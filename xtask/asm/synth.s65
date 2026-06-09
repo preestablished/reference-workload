@@ -1,0 +1,710 @@
+; REFWORK SYNTH ROM — synthetic test workload for the deterministic emulator.
+; Assembled with the built-in two-pass 65C816 assembler in xtask/src/asm.rs.
+; Target: 32 KiB LoROM bank $00, code at $8000-$FFFF.
+;
+; This program runs forever, exercising:
+;   - CPU 8/16-bit arithmetic including decimal mode
+;   - DMA WRAM→VRAM (tiles) and CPU→VRAM (tilemap)
+;   - Hardware multiply and divide ($4202/$4204 registers)
+;   - Block copy (MVN)
+;   - NMI handler: frame counter, VRAM tilemap update, scroll update
+;   - Joypad reads via $4218/$4219
+;   - PPU mode 1: BG1 4bpp tiles + palette
+;
+; WRAM layout (all in bank $7E, direct page = $0000):
+;   $0010/$0011 : frame counter (u16)
+;   $0020/$0021 : last joypad read (u16)
+;   $0030-$0033 : tile plane bytes (plane0..plane3) temp
+;   $0040-$0041 : scratch
+;   $0044-$0045 : loop counter scratch
+;   $0046-$0047 : rolling checksum scratch
+;   $1000-$10FF : CPU exercise work table (256 bytes)
+;   $10FE/$10FF : rolling 16-bit checksum of work table
+;   $1100-$111F : MVN source buffer
+;   $1120-$113F : MVN destination buffer
+
+; ─── Hardware register addresses ─────────────────────────────────────────────
+
+INIDISP  = $2100
+BGMODE   = $2105
+BG1SC    = $2107
+BG12NBA  = $210B
+TM       = $212C
+CGADD    = $2121
+CGDATA   = $2122
+VMAIN    = $2115
+VMADD_L  = $2116
+VMADD_H  = $2117
+VMDATA_L = $2118
+VMDATA_H = $2119
+WMDATA   = $2180
+WMADD_L  = $2181
+WMADD_M  = $2182
+WMADD_H  = $2183
+NMITIMEN = $4200
+RDNMI    = $4210
+JOY1L    = $4218
+JOY1H    = $4219
+MDMAEN   = $420B
+WRMPYA   = $4202
+WRMPYB   = $4203
+RDMPYL   = $4214
+RDMPYH   = $4215
+WRDIVL   = $4204
+WRDIVH   = $4205
+WRDIVB   = $4206
+RDDIVL   = $4216
+RDDIVH   = $4217
+BG1HOFS  = $210D
+BG1VOFS  = $210E
+
+; DMA channel 0 registers
+DMA0CTRL = $4300
+DMA0BADR = $4301
+DMA0A0L  = $4302
+DMA0A0H  = $4303
+DMA0A0B  = $4304
+DMA0SIZL = $4305
+DMA0SIZH = $4306
+
+; DMA channel 1 registers
+DMA1CTRL = $4310
+DMA1BADR = $4311
+DMA1A0L  = $4312
+DMA1A0H  = $4313
+DMA1A0B  = $4314
+DMA1SIZL = $4315
+DMA1SIZH = $4316
+
+; WRAM direct-page addresses (D = $0000)
+FRAME_CTR  = $0010
+JOY_MIRROR = $0020
+WORK_BASE  = $1000
+WCHKSUM    = $10FE
+
+    .org $8000
+
+; ─── Reset handler ───────────────────────────────────────────────────────────
+reset:
+    SEI
+    CLC
+    XCE             ; enter native mode
+    REP #$30        ; 16-bit A + X/Y
+    .a16
+    .i16
+    LDX #$1FFF
+    TXS             ; stack = $1FFF
+    LDA #$0000
+    TCD             ; direct page = $0000
+    PHK
+    PLB             ; DBR = 0
+
+    .a8
+    SEP #$20        ; 8-bit A for I/O
+
+    LDA #$8F
+    STA INIDISP     ; force-blank
+
+    ; PPU setup: mode 1, BG1 4bpp
+    LDA #$01
+    STA BGMODE
+    ; BG1SC: tilemap at VRAM word-addr $0400 (byte $0800 / 0x400 * 2)
+    ; BG1SC field = (byte_addr >> 10) << 2 = (0x800 >> 10) << 2 = 0 << 2 = 0
+    ; Wait: tilemap word addr $0400 = byte $0800. BG1SC bits [7:2] = base>>1KiB
+    ; = $0800 >> 10 = 0. Use $08 for a 1KiB offset = addr $0800? Yes, $08 means
+    ; VRAM word addr $0400 (field bits [7:2] = word addr >> 8).
+    ; Simplest: put tilemap at $0000 (word 0), chr at $1000 (word) via BG12NBA.
+    LDA #$00
+    STA BG1SC       ; tilemap at VRAM $0000, 32x32, no mirror
+    LDA #$01
+    STA BG12NBA     ; BG1 chr base = 4096 words = $1000 word addr
+    LDA #$01
+    STA TM          ; BG1 on main screen
+
+    ; ── Build 16 tiles in WRAM $7E:2000 ──
+    ; Use WMADD port to write to $7E:2000
+    .a16
+    REP #$20
+    LDA #$2000
+    STA WMADD_L
+    .a8
+    SEP #$20
+    LDA #$00
+    STA WMADD_H
+
+    ; Tile k = solid color k (4bpp). Each tile = 32 bytes.
+    ; Layout: 8 rows x (plane0,plane1) = 16 bytes, then 8 rows x (plane2,plane3) = 16 bytes.
+    ; For color k: plane0 = (k&1)?$FF:$00, plane1 = (k&2)?$FF:$00, etc.
+    ; Outer loop: X = tile index 0..15
+    .i16
+    LDX #$0000
+tile_loop:
+    CPX #$0010
+    BCS tiles_done
+    ; Compute plane bytes into dp $30..$33
+    .a8
+    TXA
+    AND #$01
+    BEQ lp0z
+    LDA #$FF
+    BRA lp0d
+lp0z:
+    LDA #$00
+lp0d:
+    STA $30
+    TXA
+    AND #$02
+    BEQ lp1z
+    LDA #$FF
+    BRA lp1d
+lp1z:
+    LDA #$00
+lp1d:
+    STA $31
+    TXA
+    AND #$04
+    BEQ lp2z
+    LDA #$FF
+    BRA lp2d
+lp2z:
+    LDA #$00
+lp2d:
+    STA $32
+    TXA
+    AND #$08
+    BEQ lp3z
+    LDA #$FF
+    BRA lp3d
+lp3z:
+    LDA #$00
+lp3d:
+    STA $33
+    ; Write 8 rows of (plane0,plane1) = 16 bytes
+    LDY #$0000
+lrloop01:
+    CPY #$0008
+    BCS lrdone01
+    LDA $30
+    STA WMDATA
+    LDA $31
+    STA WMDATA
+    INY
+    BRA lrloop01
+lrdone01:
+    ; Write 8 rows of (plane2,plane3) = 16 bytes
+    LDY #$0000
+lrloop23:
+    CPY #$0008
+    BCS lrdone23
+    LDA $32
+    STA WMDATA
+    LDA $33
+    STA WMDATA
+    INY
+    BRA lrloop23
+lrdone23:
+    .i16
+    INX
+    JMP tile_loop
+tiles_done:
+
+    ; ── DMA tiles WRAM $7E:2000 → VRAM word $1000 ──
+    .a8
+    SEP #$20
+    LDA #$01
+    STA VMAIN       ; word increment after high byte
+    .a16
+    REP #$20
+    LDA #$1000
+    STA VMADD_L
+    .a8
+    SEP #$20
+    ; DMA0: mode 1 (write $2118/$2119), src = $7E:2000, size = $0200
+    LDA #$01
+    STA DMA0CTRL
+    LDA #$18
+    STA DMA0BADR
+    .a16
+    REP #$20
+    LDA #$2000
+    STA DMA0A0L
+    .a8
+    SEP #$20
+    LDA #$7E
+    STA DMA0A0B
+    .a16
+    REP #$20
+    LDA #$0200
+    STA DMA0SIZL
+    .a8
+    SEP #$20
+    LDA #$01
+    STA MDMAEN
+
+    ; ── Build 16-color palette in WRAM $7E:3000 (32 bytes) ──
+    .a16
+    REP #$20
+    LDA #$3000
+    STA WMADD_L
+    .a8
+    SEP #$20
+    LDA #$00
+    STA WMADD_H
+    ; color k: simple RGB555 packed as (k | k<<5 | k<<10) & $7FFF
+    ; We write as u16 LE: lo byte then hi byte
+    .i16
+    LDX #$0000
+pal_loop:
+    CPX #$0010
+    BCS pal_done
+    .a8
+    TXA             ; k in A
+    AND #$1F        ; blue = k & $1F
+    STA $40
+    TXA
+    AND #$07
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    ORA $40
+    STA WMDATA      ; low byte: [g2:g1:g0:b4:b3:b2:b1:b0]
+    TXA
+    LSR A
+    LSR A
+    LSR A
+    AND #$03
+    STA WMDATA      ; high byte: [0:r4:r3:r2:r1:r0:g4:g3] simplified
+    .i16
+    INX
+    JMP pal_loop
+pal_done:
+
+    ; ── DMA palette WRAM $7E:3000 → CGRAM ──
+    .a8
+    SEP #$20
+    STZ CGADD
+    LDA #$00
+    STA DMA1CTRL
+    LDA #$22
+    STA DMA1BADR
+    .a16
+    REP #$20
+    LDA #$3000
+    STA DMA1A0L
+    .a8
+    SEP #$20
+    LDA #$7E
+    STA DMA1A0B
+    .a16
+    REP #$20
+    LDA #$0020
+    STA DMA1SIZL
+    .a8
+    SEP #$20
+    LDA #$02
+    STA MDMAEN
+
+    ; ── Write tilemap via CPU loop ──
+    ; 32x28 entries at VRAM $0000. tile = (row EOR col) & $0F.
+    .a8
+    SEP #$20
+    LDA #$01
+    STA VMAIN
+    .a16
+    REP #$20
+    LDA #$0000
+    STA VMADD_L     ; tilemap at VRAM word 0
+    .a8
+    SEP #$20
+    .i16
+    LDY #$0000      ; row
+tm_row_loop:
+    CPY #$001C
+    BCS tm_rows_done
+    LDX #$0000      ; col
+tm_col_loop:
+    CPX #$0020
+    BCS tm_col_done
+    .a16
+    REP #$20
+    TXA
+    EOR $44         ; $44 holds Y during inner loop
+    AND #$000F
+    STA VMDATA_L
+    LDA #$0000
+    STA VMDATA_H
+    .a8
+    SEP #$20
+    .i16
+    INX
+    JMP tm_col_loop
+tm_col_done:
+    ; save Y into $44 for next row's inner loop use
+    .a16
+    REP #$20
+    TYA
+    STA $44
+    .a8
+    SEP #$20
+    .i16
+    INY
+    JMP tm_row_loop
+tm_rows_done:
+
+    ; ── Initialize MVN source buffer ──
+    .i16
+    LDX #$0000
+init_src:
+    CPX #$0020
+    BCS init_src_done
+    .a16
+    REP #$20
+    TXA
+    STA $1100,X
+    .a8
+    SEP #$20
+    .i16
+    INX
+    INX
+    JMP init_src
+init_src_done:
+
+    ; ── Enable screen, set NMI ──
+    .a8
+    SEP #$20
+    LDA #$0F
+    STA INIDISP
+    LDA #$81        ; NMI enable + auto-joypad
+    STA NMITIMEN
+
+    ; ── Initialize WRAM counters ──
+    .a16
+    REP #$20
+    LDA #$0000
+    STA FRAME_CTR
+    STA JOY_MIRROR
+    STA WCHKSUM
+    .a8
+    SEP #$20
+
+; ─── Main loop ───────────────────────────────────────────────────────────────
+main:
+    WAI             ; wait for NMI
+
+    ; Read joypad
+    .a16
+    REP #$20
+    LDA JOY1L
+    STA JOY_MIRROR
+
+    ; Call CPU exercise routine
+    JSR do_cpu_work
+
+    ; Loop
+    JMP main
+
+; ─── CPU exercise battery ────────────────────────────────────────────────────
+do_cpu_work:
+    ; [0] 8-bit ADC
+    .a8
+    SEP #$20
+    CLC
+    LDA #$7F
+    ADC #$01
+    STA WORK_BASE + 0
+
+    ; [1] 8-bit SBC
+    SEC
+    LDA #$05
+    SBC #$03
+    STA WORK_BASE + 1
+
+    ; [2] decimal ADC (BCD: 09+01=10)
+    SED
+    CLC
+    LDA #$09
+    ADC #$01
+    STA WORK_BASE + 2
+    CLD
+
+    ; [3] decimal SBC (BCD: 20-01=19)
+    SED
+    SEC
+    LDA #$20
+    SBC #$01
+    STA WORK_BASE + 3
+    CLD
+
+    ; [4] AND
+    LDA #$FF
+    AND #$5A
+    STA WORK_BASE + 4
+
+    ; [5] ORA
+    LDA #$00
+    ORA #$A5
+    STA WORK_BASE + 5
+
+    ; [6] EOR
+    LDA #$FF
+    EOR #$55
+    STA WORK_BASE + 6
+
+    ; [7] ASL
+    LDA #$01
+    ASL A
+    ASL A
+    STA WORK_BASE + 7
+
+    ; [8] LSR
+    LDA #$80
+    LSR A
+    LSR A
+    STA WORK_BASE + 8
+
+    ; [9] ROL/ROR
+    CLC
+    LDA #$01
+    ROL A
+    STA WORK_BASE + 9
+    LSR A
+    ROR A
+    STA WORK_BASE + 10
+
+    ; [11] BIT dp test
+    LDA #$FF
+    STA $42
+    LDA #$80
+    BIT $42
+    STA WORK_BASE + 11
+
+    ; 16-bit arithmetic
+    REP #$20
+    .a16
+
+    ; [12-13] 16-bit ADC
+    CLC
+    LDA #$1000
+    ADC #$0FFF
+    STA WORK_BASE + 12
+
+    ; [14-15] 16-bit SBC
+    SEC
+    LDA #$8000
+    SBC #$0001
+    STA WORK_BASE + 14
+
+    ; [16-17] 16-bit INC loop (0..7)
+    LDA #$0000
+    STA $44
+cpu_inc_loop:
+    LDA $44
+    CMP #$0008
+    BCS cpu_inc_done
+    INC $44
+    BRA cpu_inc_loop
+cpu_inc_done:
+    LDA $44
+    STA WORK_BASE + 16
+
+    ; [18-19] 16-bit CMP result (store A)
+    LDA #$1234
+    CMP #$1234
+    STA WORK_BASE + 18
+
+    ; Hardware multiply: $07 * $08 = 56 = $38
+    SEP #$20
+    .a8
+    LDA #$07
+    STA WRMPYA
+    LDA #$08
+    STA WRMPYB
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    REP #$20
+    .a16
+    LDA RDMPYL
+    STA WORK_BASE + 20
+
+    ; Hardware divide: 200 / 10 = 20
+    SEP #$20
+    .a8
+    LDA #$C8
+    STA WRDIVL
+    LDA #$00
+    STA WRDIVH
+    LDA #$0A
+    STA WRDIVB
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    REP #$20
+    .a16
+    LDA RDDIVL
+    STA WORK_BASE + 22
+
+    ; MVN: copy 32 bytes from $7E:1100 to $7E:1120
+    LDA #$001F
+    LDX #$1100
+    LDY #$1120
+    MVN #$7E,#$7E
+
+    ; Store JOY + FRAME into table
+    LDA JOY_MIRROR
+    STA WORK_BASE + 24
+    LDA FRAME_CTR
+    STA WORK_BASE + 26
+
+    ; Compute rolling 16-bit checksum of WORK_BASE (254 bytes / 127 words)
+    LDA #$0000
+    STA $46
+    LDX #$0000
+cpu_chk_loop:
+    CPX #$00FE
+    BCS cpu_chk_done
+    LDA WORK_BASE,X
+    CLC
+    ADC $46
+    STA $46
+    INX
+    INX
+    JMP cpu_chk_loop
+cpu_chk_done:
+    LDA $46
+    STA WCHKSUM
+
+    SEP #$20
+    .a8
+    RTS
+
+; ─── NMI handler ─────────────────────────────────────────────────────────────
+nmi:
+    REP #$30
+    .a16
+    .i16
+    PHA
+    PHX
+    PHY
+
+    ; Acknowledge NMI
+    .a8
+    SEP #$20
+    LDA RDNMI
+
+    ; Increment frame counter
+    .a16
+    REP #$20
+    LDA FRAME_CTR
+    INC A
+    STA FRAME_CTR
+
+    ; Write one tilemap entry to VRAM (safe in v-blank)
+    ; VMAIN = word-increment
+    .a8
+    SEP #$20
+    LDA #$01
+    STA VMAIN
+    ; VMADD = tilemap base (0) + (frame_ctr & $3FF)
+    .a16
+    REP #$20
+    LDA FRAME_CTR
+    AND #$03FF
+    STA VMADD_L
+
+    ; tile = (frame + joy) & $0F
+    LDA FRAME_CTR
+    CLC
+    ADC JOY_MIRROR
+    AND #$000F
+    STA VMDATA_L
+    LDA #$0000
+    STA VMDATA_H
+
+    ; BG1HOFS = frame low byte (write-twice)
+    .a8
+    SEP #$20
+    LDA FRAME_CTR
+    STA BG1HOFS
+    LDA #$00
+    STA BG1HOFS
+
+    .a16
+    REP #$20
+    PLY
+    PLX
+    PLA
+    RTI
+
+; ─── IRQ handler ─────────────────────────────────────────────────────────────
+irq:
+    RTI
+
+; ─── Infinite-loop trap for unused vectors ───────────────────────────────────
+trap:
+    BRA trap
+
+; ─── ROM header ──────────────────────────────────────────────────────────────
+; LoROM: file_offset = cpu_addr - $8000.
+; Header at file offset $7FC0 → CPU address $FFC0.
+; Vectors at file offset $7FE4 → CPU address $FFE4, etc.
+
+    .org $FFC0
+
+; 21-byte ASCII title, space-padded to 21 chars (CPU addr $FFC0)
+    .ascii "REFWORK SYNTH ROM    "
+
+; $FFD5 (file $7FD5): map mode = $20 (LoROM, slow)
+    .db $20
+; $FFD6 (file $7FD6): cartridge type = $00 (ROM only)
+    .db $00
+; $FFD7 (file $7FD7): ROM size = $05 (32 KiB)
+    .db $05
+; $FFD8 (file $7FD8): SRAM size = $00
+    .db $00
+; $FFD9 (file $7FD9): country = $01
+    .db $01
+; $FFDA (file $7FDA): developer ID = $33
+    .db $33
+; $FFDB (file $7FDB): version = $00
+    .db $00
+; $FFDC-$FFDF (file $7FDC-$7FDF): complement + checksum — filled by synth_rom.rs
+    .db $FF,$FF,$00,$00
+
+; ─── Native-mode vectors (CPU $FFE4-$FFEF) ───────────────────────────────────
+    .org $FFE4
+    .dw trap        ; native COP      $FFE4
+    .dw trap        ; native BRK      $FFE6
+    .dw trap        ; native ABORT    $FFE8
+    .dw nmi         ; native NMI      $FFEA
+    .dw trap        ; reserved        $FFEC
+    .dw irq         ; native IRQ      $FFEE
+
+; ─── Emulation-mode vectors (CPU $FFF4-$FFFF) ────────────────────────────────
+    .org $FFF4
+    .dw trap        ; emu COP         $FFF4
+    .dw trap        ; reserved        $FFF6
+    .dw trap        ; emu NMI (N/A)   $FFF8
+    .dw trap        ; emu ABORT       $FFFA
+    .dw reset       ; emu RESET       $FFFC
+    .dw trap        ; emu IRQ/BRK     $FFFE

@@ -1,0 +1,14 @@
+[package]
+name = "refwork-emu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Determinism contract (ARCHITECTURE.md §1): zero runtime dependencies.
+# D1: no threads/async. D2: no clocks. D3: no RNG. D4: no floats.
+[dependencies]
+
+[features]
+# Test-only direct state access (debug_peek, cpu/bus exports for the
+# single-step CPU test runner in xtask). Compiled out of the guest binary.
+introspect = []

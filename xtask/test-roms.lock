@@ -1,0 +1,13 @@
+[
+  {
+    "name": "cpu-singlestep",
+    "url": "https://github.com/SingleStepTests/65816/archive/db6b10401729d5f20f2181dde5d3d7b037093a4a.tar.gz",
+    "blake3": "55707af7530a60fe52469c9e4bf1ac7874d9dc101847f196ea7aafbae7ea26ee",
+    "format": "tar.gz",
+    "_note": [
+      "Pinned to SingleStepTests/65816 @ db6b1040 (fetched 2026-06-09).",
+      "Operator refresh: replace the commit SHA in `url`, re-download, recompute",
+      "BLAKE3 (b3sum), update `blake3`, commit. The repo never vendors the corpus."
+    ]
+  }
+]

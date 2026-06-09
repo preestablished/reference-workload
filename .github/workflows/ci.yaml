@@ -17,9 +17,24 @@ jobs:
           repository: ${{ github.repository_owner }}/control-plane
           path: control-plane
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
+        working-directory: repo
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: repo
+      # Determinism deny-gate (ARCHITECTURE.md §1 D1-D4): bans thread/clock/
+      # rand/float/HashMap tokens from the core and harness crates.
+      - run: cargo run -p xtask -- deny
         working-directory: repo
       - run: cargo build --workspace
         working-directory: repo
       - run: cargo test --workspace
+        working-directory: repo
+      # M1 acceptance gates (IMPLEMENTATION-PLAN.md M1), release mode:
+      # synthetic-ROM 10,000-frame double-run with identical frame hashes,
+      # and the zero-allocations-per-frame counting-allocator check.
+      - run: cargo test --release -p xtask --test determinism -- --include-ignored
+        working-directory: repo
+      - run: cargo test --release -p xtask --test zero_alloc
         working-directory: repo
