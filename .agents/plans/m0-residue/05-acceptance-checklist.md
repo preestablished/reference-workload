@@ -15,8 +15,9 @@ Run from the repo root. Every box must be checked before the branch merges.
 - [ ] **"rejects 10 checked-in negative fixtures"**
       `cargo test -p refwork-featuremap --test fixtures` → every
       `tests/fixtures/invalid/*.yaml` rejected with the expected rule id
-      (manifest-asserted); ≥10 fixtures present, including `bad offset` (#01)
-      and `volatile-in-predicate` (#12) named by the acceptance text.
+      (manifest-asserted, manifest↔directory bijection checked); ≥10 fixtures
+      present, including `bad offset` (#01) and `volatile-in-predicate` (#12)
+      named by the acceptance text.
 - [ ] **"CI deny-gates demonstrably fail a PR that adds `std::thread` to
       `refwork-emu`"**
       `cargo test -p xtask --test deny_selftest` → planted-token tree fails
@@ -39,14 +40,27 @@ Run from the repo root. Every box must be checked before the branch merges.
       the API.md §1.4/§2.1 examples modulo the placeholder-warning header
       comment (no invented offsets/values).
 - [ ] `CtlMsg`/`FaultCode` variant names, field names, and **variant order**
-      match API.md §3.1 exactly (postcard wire format is order-sensitive).
-- [ ] `PROTO_VERSION` is `u16 = 1` (the old stub's `u32` is gone; grep:
-      `grep -rn "proto_version" crates/ | grep -v u16` → empty).
+      match API.md §3.1 exactly — enforced mechanically by the per-variant
+      golden-bytes table (plan 02), not by eyeball; confirm that test covers
+      all 11 `CtlMsg` variants + all 5 `FaultCode` values.
+- [ ] `PROTO_VERSION` is declared `pub const PROTO_VERSION: u16 = 1;` and the
+      old stub's `u32` is gone: `grep -rn "proto_version: u32" crates/` →
+      empty.
 - [ ] No commercial console/game names anywhere:
       grep the diff for the known excluded proper nouns (clean-room
       acceptance criterion) → no matches.
-- [ ] README "Repository layout (target)" now matches reality:
-      `schema/`, `feature-maps/`, `scoring/` exist with content.
+- [ ] The spec README's "Repository layout (target)"
+      (`~/.agents/projects/determinism/docs/reference-workload/README.md`)
+      now matches reality: `schema/`, `feature-maps/`, `scoring/` exist with
+      content. (The in-repo README is a one-liner; updating it is optional,
+      not an M0 clause.)
+
+## Doc-reconciliation follow-through
+
+- [ ] The three upstream doc-drift items in `00-overview.md` §doc-recon
+      (`stage.requires` missing from refwork §2; volatile-in-shaping
+      severity; feature-name pattern) are recorded as documentation issues —
+      not silently absorbed into code comments only.
 
 ## Process
 

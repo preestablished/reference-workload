@@ -50,12 +50,15 @@ the YAML content is specified verbatim in API.md.
 
 ## Constraints that apply to all packages
 
-- **Clean-room boundary** (repo README): docs in `~/.agents/projects/determinism/`
+- **Clean-room boundary** (spec README:
+  `~/.agents/projects/determinism/docs/reference-workload/README.md` — the
+  in-repo README is a one-liner): docs in `~/.agents/projects/determinism/`
   + public references only. No commercial console/game names anywhere in the
   repo. The YAML placeholder offsets come from API.md §1.4 — they are
   explicitly placeholders, not validated game data.
-- **MAP.md conventions:** `serde` + `serde_yaml` for YAML artifacts, `postcard`
-  for wire messages, explicit `schema_version`/`proto_version` everywhere.
+- **Conventions** (spec README "Conventions honored (MAP.md)" — MAP.md itself
+  does not name serde_yaml): `serde` + `serde_yaml` for YAML artifacts,
+  `postcard` for wire messages, explicit `schema_version`/`proto_version` everywhere.
   Parsers reject unknown `schema_version` majors and unknown required-context
   fields, ignore unknown optional fields (API.md preamble, normative).
 - `refwork-protocol` is compiled into the guest harness binary: it inherits the
@@ -64,6 +67,24 @@ the YAML content is specified verbatim in API.md.
   permitted, but none are needed).
 - Workflow: implement → `/review` (dual reviewer) → fix → verify → commit, on a
   branch (continue `phase-1/m1-emulator-core` or cut `m0-residue` from it).
+
+## Doc-reconciliation items to surface upstream (not silently absorbed)
+
+Review found three places where the owner doc (refwork API.md) and the single
+evaluator's doc (state-scorer API.md §3/§4) disagree about the SAME surface.
+Per the clean-room rule ("file a documentation issue instead of filling the
+gap"), implementation adopts the strictest intersection AND files/notes a doc
+issue for each:
+
+1. `stage.requires` exists in state-scorer's normative JSON Schema (array,
+   maxItems 8, "names only earlier stages") but is absent from refwork API.md
+   §2 — model + validate it here; flag the §2 omission upstream.
+2. Volatile feature in a shaping `expr`: refwork §2.2 says all referenced
+   features "MUST be stable"; state-scorer §4 calls it a compile *warning*.
+   We validate it as a hard error (owner doc wins) and record the conflict.
+3. Feature-name pattern: refwork §1.2 `[a-z0-9_]+` vs state-scorer
+   `^[a-z][a-z0-9_]*$` + 64-char cap. We validate the stricter intersection
+   `^[a-z][a-z0-9_]{0,63}$`.
 
 ## Out of scope (deliberately)
 

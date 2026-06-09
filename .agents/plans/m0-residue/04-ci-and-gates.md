@@ -26,7 +26,18 @@ The committed `schema/feature-map.schema.json` must always match the types:
   working-directory: repo
 ```
 
-Requires package 01's byte-deterministic schema output.
+Requires package 01's byte-deterministic schema output (incl. the pinned
+trailing-newline convention).
+
+Determinism hardening for this gate:
+- Pass `--locked` on the new CI cargo steps (Cargo.lock is committed); the
+  schema's byte-stability depends on `schemars`/`serde_json` not drifting.
+  (The sibling `control-plane` checkout pins nothing — its default-branch
+  HEAD is an accepted pre-existing CI looseness, but our lock at least pins
+  the schema-relevant crates.)
+- Document the one-command regeneration next to the gate so a legitimate
+  type change is mechanical:
+  `cargo run -p refwork-featuremap -- schema > schema/feature-map.schema.json`.
 
 ## 3. Deny-gate scope (+ the "demonstrably fails" proof)
 

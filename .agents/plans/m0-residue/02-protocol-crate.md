@@ -50,14 +50,16 @@ Notes pinned by the doc (cite in module docs, do not restate normatively):
 
 ## Encoding & helpers
 
-- `postcard` (default features, `use-std` for `to_stdvec`) + `serde`.
+- `postcard` (default features **plus** `use-std`, a non-default feature, for
+  `to_stdvec`) + `serde`.
 - `pub fn encode(msg: &CtlMsg) -> Result<Vec<u8>, postcard::Error>` and
   `pub fn decode(bytes: &[u8]) -> Result<CtlMsg, postcard::Error>` — thin
   wrappers so harness/mock-agent code shares one entry point.
-- `pub const MAX_DATAGRAM: usize = 4096;` and `encode` returns an error (new
-  `EncodeError` wrapper or debug_assert + documented contract) when the
-  encoded size exceeds it for non-`RegisterRegion` messages — decide one and
-  document; the M3 harness will rely on it.
+- `pub const MAX_DATAGRAM: usize = 4096;` and `encode` returns a typed error
+  (an `EncodeError` enum wrapping `postcard::Error` | `Oversize { len }`)
+  when the encoded size exceeds it for non-`RegisterRegion` messages.
+  Decision made here: a typed error, NOT `debug_assert` — debug asserts
+  vanish in release builds, which is exactly where the M3 harness runs.
 
 ## Determinism posture
 
@@ -73,11 +75,15 @@ This crate compiles into the guest harness binary:
 - Postcard round-trip for **every** variant (construct → encode → decode →
   assert equal), including 32-byte hash arrays and a `RegisterRegion` with a
   realistic 128 KiB region.
-- Golden-bytes test: encode `Hello { proto_version: 1 }` and assert the exact
-  byte string. This freezes the wire format — any postcard/enum reordering
-  that would silently break guest-sdk interop fails this test. Comment: the
-  enum's variant ORDER is wire-significant under postcard; never reorder,
-  only append.
+- **Golden-bytes table covering EVERY variant**: a table-driven test with one
+  fixed input value and its exact expected byte vector per `CtlMsg` variant
+  (all 11) and per `FaultCode` value (all 5, encoded inside a `Fault`
+  message and standalone). A single-variant golden does NOT freeze the wire
+  format: postcard encodes the variant *index* as the discriminant, so
+  swapping two later variants leaves `Hello`'s bytes untouched while
+  silently breaking guest-sdk interop — only per-variant goldens catch
+  reordering anywhere in the enum. Comment in the source: variant ORDER is
+  wire-significant under postcard; never reorder or insert, only append.
 - Size discipline: every non-`RegisterRegion` variant with plausible max
   payloads (e.g. 256-char `detail`) encodes ≤ 4096 B.
 - `decode` of truncated/garbage bytes returns Err (no panic).

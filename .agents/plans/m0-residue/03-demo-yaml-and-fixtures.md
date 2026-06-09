@@ -25,20 +25,32 @@ cargo run -p refwork-featuremap -- validate feature-maps/demo-game.yaml --scorin
 ```
 
 Consistency note (grounded): every feature referenced by §2.1 predicates
-(`area_id, upgrade_flags, boss_flags, credits_flag, game_mode`) is declared
-`stability: stable` in §1.4, and `player_x/player_y` (volatile) appear only in
-discretize grids — so the verbatim pair validates cleanly under rules 3/4. If
+(`area_id, upgrade_flags, boss_flags, credits_flag, game_mode`) AND by its
+shaping exprs (`upgrade_flags`, plus `room_id` in the `weight: 0` entry) is
+declared `stability: stable` in §1.4; `player_x/player_y` (volatile) appear
+only in discretize grids; the bit-op targets (`upgrade_flags`, `boss_flags`)
+are `bitflags*` types, satisfying `x/bitop-target`. So the verbatim pair
+validates cleanly under rules 3/4 and the `x/` cross-checks. If
 implementation finds otherwise, the validator is wrong, not the docs.
 
 ## Negative fixtures (≥10; M0 acceptance names "bad offset,
 volatile-in-predicate, etc.")
 
 Location: `crates/refwork-featuremap/tests/fixtures/invalid/NN-<slug>.yaml`
-(+ two scoring files where the failure is cross-file). Each fixture is the
-demo map minimally mutated — one rule violation per file. An integration test
-(`crates/refwork-featuremap/tests/fixtures.rs`) loops the directory, asserts
-`validate` FAILS each one, and asserts the reported `rule` id matches a
-manifest (`fixtures/invalid/expected.json` mapping file → rule id). The CLI
+(+ paired `NN-<slug>.scoring.yaml` for the cross-file cases, #12–#16). Each
+fixture is the demo map minimally mutated — one rule violation per file. An
+integration test (`crates/refwork-featuremap/tests/fixtures.rs`) drives the
+sweep FROM THE MANIFEST (`fixtures/invalid/expected.json` mapping file →
+expected rule id), asserting each entry FAILS with that rule id, and asserts
+manifest↔directory **bijection** (every `*.yaml` except `*.scoring.yaml`
+suffixes appears in the manifest and vice versa) so a stale fixture can never
+silently stop being exercised. Cross-file entries name their paired scoring
+file in the manifest; `*.scoring.yaml` files are never validated standalone.
+Parse-time rejections (#10 `bad-schema-version`, wrong-`kind`) must still
+surface as rule ids: parse into a permissive envelope (`schema_version` +
+`kind` first), check those post-parse, and only then deserialize the full
+model — the manifest then uses ordinary rule ids (`preamble/version`,
+`preamble/kind`) rather than a special parse-error marker. The CLI
 exit path is covered by running the binary in at least one test
 (`assert_cmd`-style via `std::process::Command` on the built binary — no new
 dev-deps needed; use `env!("CARGO_BIN_EXE_refwork-featuremap")`).
@@ -58,11 +70,13 @@ dev-deps needed; use `env!("CARGO_BIN_EXE_refwork-featuremap")`).
 | 11 | `valid-when-volatile` — `valid_when.feature: player_x` (volatile) | §1.2 guard rule |
 | 12 | `scoring-volatile-in-predicate` — scoring stage `when` on `player_x` (map valid, scoring invalid ⇒ pair fails) | §1.3/3 (“volatile-in-predicate”, named in M0 accept) |
 | 13 | `scoring-bytes-in-predicate` — map gains a valid `bytes` feature; scoring goal references it | §1.3/4 |
-| 14 | `scoring-unknown-feature` — stage `when` on `warp_progress` (not in map) | §2 cross-ref |
-| 15 | `scoring-bit-out-of-range` — `bit_set` with `bit: 9` on `bitflags8` | §2.3 bit-width |
+| 14 | `scoring-unknown-feature` — stage `when` on `warp_progress` (not in map) | `x/feature-exists` |
+| 15 | `scoring-bit-out-of-range` — `bit_set` with `bit: 9` on `bitflags8` | `x/bit-width` |
+| 16 | `scoring-bitop-on-non-bitflags` — `bit_set` with `bit: 3` on `game_mode` (`u8`) | `x/bitop-target` (state-scorer §4 alignment) |
 
-(15 listed so the 10-minimum survives any cut during review; 12–15 ship a
-paired `*.scoring.yaml`.)
+(16 listed so the 10-minimum survives any cut during review; #12–#16 ship a
+paired `*.scoring.yaml`. "Violates" ids in the `x/` namespace are
+implementation-defined cross-checks per plan 01 — not literal spec clauses.)
 
 ## Also
 
