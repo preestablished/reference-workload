@@ -9,5 +9,17 @@
       "Operator refresh: replace the commit SHA in `url`, re-download, recompute",
       "BLAKE3 (b3sum), update `blake3`, commit. The repo never vendors the corpus."
     ]
+  },
+  {
+    "name": "spc700-singlestep",
+    "url": "https://github.com/SingleStepTests/spc700/archive/67d15f492b2740964abd4efd1229e0ec9c342228.tar.gz",
+    "blake3": "ea4e133e17df4a8b506bf8630a03bac419604d369ad057b6f94706d26dd5ecfd",
+    "format": "tar.gz",
+    "_note": [
+      "Pinned to SingleStepTests/spc700 @ 67d15f49 (fetched 2026-06-09, MIT).",
+      "256 JSON files x 1000 cases: the M2 audio-CPU acceptance corpus.",
+      "Run with `cargo xtask spc-tests` (corpus-validation only until the M2",
+      "SPC700 core lands). Same refresh procedure as cpu-singlestep."
+    ]
   }
 ]

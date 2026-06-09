@@ -15,6 +15,7 @@ fn main() {
         "deny" => cmd_deny(&args[1..]),
         "fetch-test-roms" => cmd_fetch_test_roms(&args[1..]),
         "cpu-tests" => cmd_cpu_tests(&args[1..]),
+        "spc-tests" => cmd_spc_tests(&args[1..]),
         "--help" | "-h" | "help" => {
             usage();
         }
@@ -42,6 +43,9 @@ fn usage() {
     println!();
     println!("  cpu-tests [--dir DIR] [--filter SUBSTR] [--max-fail N]");
     println!("      Run the 65816 single-step JSON test corpus against the emulator CPU.");
+    println!();
+    println!("  spc-tests [--dir DIR] [--filter SUBSTR]");
+    println!("      Validate the pinned SPC700 single-step corpus (M2 gate skeleton).");
 }
 
 // ─── build-rom ───────────────────────────────────────────────────────────────
@@ -110,6 +114,41 @@ fn cmd_fetch_test_roms(_args: &[String]) {
             eprintln!("fetch-test-roms: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+// ─── spc-tests ───────────────────────────────────────────────────────────────
+
+fn cmd_spc_tests(args: &[String]) {
+    let mut opts = xtask::spc_tests::SpcTestOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("spc-tests: --dir requires a path");
+                    std::process::exit(2);
+                }
+                opts.dir = std::path::PathBuf::from(&args[i]);
+            }
+            "--filter" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("spc-tests: --filter requires a substring");
+                    std::process::exit(2);
+                }
+                opts.filter = Some(args[i].clone());
+            }
+            other => {
+                eprintln!("spc-tests: unknown option '{}'", other);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if xtask::spc_tests::run_spc_tests(&opts).is_err() {
+        std::process::exit(1);
     }
 }
 

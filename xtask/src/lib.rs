@@ -6,11 +6,14 @@
 //! - `cargo xtask fetch-test-roms` — download and verify test ROM archives.
 //! - `cargo xtask cpu-tests [--dir DIR] [--filter SUBSTR] [--max-fail N]` —
 //!   run the single-step CPU test corpus.
+//! - `cargo xtask spc-tests [--dir DIR] [--filter SUBSTR]` — validate the
+//!   pinned SPC700 single-step corpus (execution gate arrives with M2).
 
 pub mod asm;
 pub mod cpu_tests;
 pub mod deny;
 pub mod fetch;
+pub mod spc_tests;
 pub mod synth_rom;
 
 pub use synth_rom::build_synth_rom;
