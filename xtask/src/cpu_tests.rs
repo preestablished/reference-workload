@@ -244,9 +244,6 @@ pub fn run_cpu_tests(opts: &CpuTestOpts) -> Result<(), usize> {
     println!("{}", "-".repeat(60));
     for fr in &file_results {
         println!("{:<40} {:>8} {:>8}", fr.file, fr.passed, fr.failed);
-        for e in fr.errors.iter().take(3) {
-            println!("    {}", e);
-        }
         if !fr.errors.is_empty() {
             for e in fr.errors.iter().take(3) {
                 println!("    {}", e);

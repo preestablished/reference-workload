@@ -148,6 +148,8 @@ impl Cpu {
     /// the E/DL==0 wrap quirk applies to indexed direct-page *data*
     /// addresses, not to the indirect pointer word).
     fn read_dp_ptr16<B: Bus>(&mut self, bus: &mut B, base: u16) -> u16 {
+        // `wrapping_add` keeps the second byte inside bank $00 (direct page
+        // addresses never carry into bank $01).
         let lo = bus.read(base as u32) as u16;
         let hi = bus.read(base.wrapping_add(1) as u32) as u16;
         lo | (hi << 8)

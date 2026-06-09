@@ -89,6 +89,8 @@ pub fn parse_oam(oam: &[u8; 544], obsel: Obsel) -> [Sprite; 128] {
         let tile_hi = ((attr & 1) as u16) << 8;
         let palette = (attr >> 1) & 0x07;
         let priority = (attr >> 4) & 0x03;
+        // v/h flip is applied in whole-sprite space before sub-tile
+        // decomposition (a flipped 32x32 sprite mirrors its tile grid too).
         let hflip = (attr >> 6) & 1 != 0;
         let vflip = (attr >> 7) != 0;
 
@@ -222,7 +224,10 @@ pub fn render_sprite_line(
                 & 0x1FF;
 
             // OBJ tile data base: name_base_bytes for tiles 0-255,
-            // + name_select gap for tiles 256-511.
+            // + name_select gap for tiles 256-511. The name_select path is
+            // implemented per the documented formula but is exercised only
+            // by the second sprite page (untested by the M1 synthetic ROM);
+            // M2 accuracy debugging validates it against the real game.
             let name_base_bytes = (obsel.name_base as usize) << 14; // words→bytes: *2, then *8192 for 4KiW units
             let tile_addr_bytes = if tile_no < 0x100 {
                 (name_base_bytes + tile_no as usize * 32) & 0xFFFF

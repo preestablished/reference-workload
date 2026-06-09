@@ -63,9 +63,6 @@ impl Core {
             None => Box::leak(Box::new([0u8; 0x10000])),
         };
 
-        // Construct PPU with the VRAM buffer.
-        // NOTE: Ppu::new is implemented by the PPU agent (concurrently).
-        // If PPU agent has not merged yet, this will todo!()-panic.
         let ppu = Ppu::new(vram);
 
         // Construct SysBus with power-on state.
@@ -81,24 +78,6 @@ impl Core {
 
         // Front buffer (pre-zeroed, D8 — allocated here, never during frame).
         let front: Box<[u8; FB_BYTES]> = Box::new([0u8; FB_BYTES]);
-
-        // Type assertions — these are compile-time checks that the referenced
-        // constants/functions have the expected types. The dummy `let _` blocks
-        // from the original stub have been removed per the spec permission.
-        let _check_lines: u16 = LINES_PER_FRAME;
-        let _check_mclk: u64 = MCLK_PER_LINE;
-        let _check_first: u16 = FIRST_VISIBLE_LINE;
-        let _check_last: u16 = LAST_VISIBLE_LINE;
-        let _check_vblank: u16 = VBLANK_START_LINE;
-        let _check_rcu: &dyn Fn(&mut Cpu, &mut SysBus, u64) = &run_cpu_until;
-        let _ = (
-            _check_lines,
-            _check_mclk,
-            _check_first,
-            _check_last,
-            _check_vblank,
-            _check_rcu,
-        );
 
         Ok(Core {
             cpu,
@@ -126,8 +105,13 @@ impl Core {
         // but per spec FAULTED returns early so we clear all here).
         self.bus.frame_flags = FrameFlags::default();
 
-        // Carry-over from previous frame: subtract MCLK_PER_FRAME to keep
-        // mclk_frame as within-frame absolute (preserving CPU overshoot).
+        // Carry-over from previous frame: subtract one frame's clocks to keep
+        // mclk_frame as within-frame absolute, preserving CPU overshoot.
+        // Deliberately a single subtraction, not a loop: an overrun larger
+        // than a frame (e.g. a maximum-size DMA burst, ~1.5 frames) carries
+        // forward and consumes the following frames' CPU budget — time is
+        // conserved, the behavior is deterministic, and per-line events
+        // (NMI flag, auto-joypad) still fire on schedule.
         if self.bus.mclk_frame >= MCLK_PER_FRAME {
             self.bus.mclk_frame -= MCLK_PER_FRAME;
         }
@@ -135,9 +119,7 @@ impl Core {
         // Main scanline loop.
         let mut faulted_early = false;
         for line in 0..LINES_PER_FRAME {
-            // Per-line hooks (NMI, auto-joypad, etc.).
-            // PPU hooks (begin_frame at line 0, begin_vblank at line 225) are
-            // called here through SysBus so PPU state is consistent.
+            // Per-line hooks (NMI, auto-joypad, IRQ reschedule).
             self.bus.start_line(line, pad);
             self.bus.ppu.set_line(line);
 
@@ -215,7 +197,9 @@ impl Core {
     }
 
     /// TEST-ONLY: side-effect-free bus read for `ramdiff` and golden-trace
-    /// tests. Returns 0 for unmapped/side-effectful addresses.
+    /// tests. Returns 0 for unmapped/side-effectful addresses (I/O space is
+    /// defined to peek as 0 — tools cannot distinguish that from a real zero
+    /// byte; only WRAM/ROM/SRAM peeks are meaningful).
     #[cfg(feature = "introspect")]
     pub fn debug_peek(&self, bus_addr: u32) -> u8 {
         self.bus.peek(bus_addr).unwrap_or(0)

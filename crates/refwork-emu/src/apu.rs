@@ -86,10 +86,12 @@ impl ApuStub {
                 // CPU writes data to port 1, then writes the running index to
                 // port 0 as a trigger.  We echo the index back on port 0.
                 //
-                // Start-execution detection (documented):
-                // A port 0 write where the new index jumps by ≥2 from the last
-                // acknowledged index while port 1 == 0 is treated as the
-                // "start execution" command.
+                // Start-execution detection — a boot-ROM-only approximation
+                // (M1 stub): a port 0 write where the new index jumps by ≥2
+                // from the last acknowledged index while port 1 == 0 is
+                // treated as the "start execution" command. M2's real audio
+                // unit replaces this; M2 acceptance must reject runs that
+                // carry APU_STUB_HANDSHAKE frames.
                 if port == 0 {
                     let new_index = value;
                     let delta = new_index.wrapping_sub(self.last_index);

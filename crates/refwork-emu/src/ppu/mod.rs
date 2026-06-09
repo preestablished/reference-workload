@@ -456,6 +456,8 @@ impl Ppu {
                 self.vmain.step = match value & 0x03 {
                     0 => 1,
                     1 => 32,
+                    // Steps 0b10 and 0b11 both select 128 per the documented
+                    // register table (the collapse is intentional).
                     _ => 128,
                 };
                 self.vmain.remap = (value >> 2) & 0x03;

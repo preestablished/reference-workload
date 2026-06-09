@@ -199,6 +199,13 @@ impl SysBus {
 
     /// Recompute the H/V IRQ target mclk_frame value from scratch.
     /// Called on writes to $4200/$4207-$420A and at start_line().
+    ///
+    /// Boundary convention: only targets strictly in the future are armed
+    /// (`target > mclk_frame` here, fired by `add_mclk` when
+    /// `old < target <= new`). A target landing exactly on the current
+    /// master clock does not fire until the next frame's reschedule —
+    /// deterministic, documented; refine if M2 raster tests need exact-dot
+    /// reprogramming semantics.
     fn recompute_irq_target(&mut self) {
         let h_irq = self.nmitimen & 0x10 != 0;
         let v_irq = self.nmitimen & 0x20 != 0;
@@ -267,24 +274,11 @@ impl SysBus {
         self.line = line;
 
         if line == 0 {
-            // End of V-blank: clear NMI flag, begin new frame.
-            self.nmi_flag = false;
-            // Frame begin hook on PPU (stubbed until PPU agent implements it).
-            // Coordinate via public API only — if begin_frame is present, call it.
-            // (PPU agent implements this; call is safe even if todo!() inside.)
-            // We guard this carefully: the PPU stub is todo!() for many methods.
-            // Per the spec: "call ppu.begin_frame() if present" — always call it.
-            // If PPU agent hasn't filled it in, the CI will panic on PPU tests,
-            // not on our frame loop. For M1 we call all documented public hooks.
-            // NOTE: ppu.begin_frame() is todo!() in the concurrent PPU agent stub.
-            // We call it only through the documented pub fn; panics from todo!()
-            // are expected pre-merge and will be caught by integration tests only.
-            // For cargo check / our unit tests we do NOT call PPU methods.
-            // (See OWNER note: "call their existing signatures, never edit their files")
-            // The PPU hook calls are wrapped in the Core frame loop, not here,
-            // to allow unit testing of SysBus without a live PPU.
-            // Recompute IRQ schedule for new frame.
+            // End of V-blank: clear NMI flag, begin new frame. (The PPU's
+            // begin_frame/begin_vblank hooks are invoked by the Core frame
+            // loop so SysBus stays unit-testable without a live PPU.)
             self.recompute_irq_target();
+            self.nmi_flag = false;
         } else if line == 225 {
             // V-blank start: set NMI flag.
             self.nmi_flag = true;
@@ -346,11 +340,6 @@ impl SysBus {
         match reg {
             // PPU registers $00-$33 write.
             0x00..=0x33 => {
-                // ppu.write is todo!() in the concurrent agent; we still call it
-                // for correct integration. Faults from PPU propagate via Option<Fault>.
-                // NOTE: ppu.write is todo!() pre-merge; DMA to PPU will panic if
-                // called before PPU agent merges. This is expected behavior.
-                // For unit tests of SysBus DMA we only transfer to WRAM/APU targets.
                 let fault = self.ppu.write(reg, value);
                 if let Some(f) = fault {
                     self.fault(f);
@@ -368,6 +357,11 @@ impl SysBus {
                 self.wram[off] = value;
                 self.wmadd = (self.wmadd + 1) & 0x1FFFF;
             }
+            // WMADD $81-$83: DMA on the B-bus reaches these registers exactly
+            // like CPU writes do.
+            0x81 => self.wmadd = (self.wmadd & 0x1FF00) | value as u32,
+            0x82 => self.wmadd = (self.wmadd & 0x100FF) | ((value as u32) << 8),
+            0x83 => self.wmadd = (self.wmadd & 0x0FFFF) | (((value as u32) & 1) << 16),
             _ => {} // unmapped B-bus write: silently ignore
         }
     }
@@ -509,6 +503,13 @@ impl SysBus {
                     self.b_write(b_addr, v);
                 }
 
+                // D9: a faulted transfer halts DMA with channel registers and
+                // the clock still pointing AT the faulting byte (not past it),
+                // so post-mortem state reads coherently.
+                if self.fault.is_some() {
+                    break;
+                }
+
                 // Update A-bus address (live, as hardware does).
                 if !fixed {
                     let new_off = if decrement {
@@ -611,7 +612,9 @@ impl Bus for SysBus {
                         v
                     }
 
-                    // $4017: Port 2 (not-connected): bits 4-2 read as 1, bits 7-5 = mdr open bus.
+                    // $4017: port 2 not connected. Bits 1:0 (controller
+                    // data lines) read as a constant 0, bits 4-2 read as 1,
+                    // bits 7-5 are CPU open bus — fully deterministic.
                     0x4017 => {
                         let v = 0x1C | (self.mdr & 0xE0);
                         self.mdr = v;

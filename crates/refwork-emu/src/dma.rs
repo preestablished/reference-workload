@@ -107,7 +107,8 @@ impl Dma {
 /// 2: [0,0]         2 bytes, same reg twice
 /// 3: [0,0,1,1]     4 bytes, two-each
 /// 4: [0,1,2,3]     4 bytes, sequential
-/// 5: [0,1,0,1]     4 bytes (same as 1 but 4-deep)
+/// 5: [0,1,0,1]     4 bytes (behaviorally identical to 1 under the cycling
+///                  executor; kept distinct to mirror the register encoding)
 /// 6: [0,0]         same as 2
 /// 7: [0,0,1,1]     same as 3
 pub fn unit_pattern(dmap: u8) -> &'static [u8] {

@@ -763,10 +763,19 @@ fn parse_label(line: &str) -> (&str, Option<String>) {
 }
 
 fn find_assignment(s: &str) -> Option<usize> {
+    // NOTE: `=` only; reject `==`/`<=`/`>=` so a future expression grammar
+    // cannot be misparsed as a constant definition.
     // Find '=' not part of '==' or preceded by '!'
     let bytes = s.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'=' {
+            // Skip comparison operators: ==, <=, >=, !=.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                continue;
+            }
+            if i > 0 && matches!(bytes[i - 1], b'<' | b'>' | b'!' | b'=') {
+                continue;
+            }
             // make sure this is an assignment, not inside an expression
             // Simple heuristic: if lhs is identifier, treat as assignment
             let lhs = s[..i].trim();
@@ -1015,7 +1024,7 @@ fn instruction_encoded_size(
     // emits abs,Y (3 bytes) regardless of operand value.
     if ops.ends_with(",Y") || ops.ends_with(",y") {
         let base = ops.trim_end_matches(",Y").trim_end_matches(",y").trim();
-        if mne == "LDX" {
+        if mne == "LDX" || mne == "STX" {
             return match resolve(base) {
                 Some(v) if v <= 0xFF => 2,
                 _ => 3,
@@ -1055,6 +1064,16 @@ fn is_24bit_addr(s: &str) -> bool {
         return s[1..].len() > 4;
     }
     false
+}
+
+/// Split a trailing ",X"/",Y" index suffix off an operand string.
+fn split_index(ops: &str) -> (&str, Option<char>) {
+    for (suf, ix) in [(",X", 'X'), (",x", 'X'), (",Y", 'Y'), (",y", 'Y')] {
+        if let Some(base) = ops.strip_suffix(suf) {
+            return (base.trim(), Some(ix));
+        }
+    }
+    (ops, None)
 }
 
 fn is_dp_literal(s: &str) -> bool {
@@ -1113,6 +1132,14 @@ fn encode_instruction(
     };
     let w16 = |val: i64| -> Vec<u8> { vec![val as u8, (val >> 8) as u8] };
     let w24 = |val: i64| -> Vec<u8> { vec![val as u8, (val >> 8) as u8, (val >> 16) as u8] };
+    // Encode dp form when the value fits, else the absolute form.
+    let enc_da = |v: i64, dp_op: u8, abs_op: u8| -> Vec<u8> {
+        if v <= 0xFF {
+            vec![dp_op, v as u8]
+        } else {
+            vec![abs_op, v as u8, (v >> 8) as u8]
+        }
+    };
 
     // Relative branch helper
     let rel8 = |target: i64, pc_after: u32| -> Result<u8, AsmError> {
@@ -1263,23 +1290,16 @@ fn encode_instruction(
 
         // ── STZ ───────────────────────────────────────────────────────────────
         "STZ" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x64, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x64, 0x9C)),
+                Some('X') => Ok(enc_da(v, 0x74, 0x9E)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            if ops.ends_with(",X") || ops.ends_with(",x") {
-                let base = ops.trim_end_matches(",X").trim_end_matches(",x").trim();
-                let bv = eval(base)?;
-                if bv <= 0xFF {
-                    return Ok(vec![0x74, bv as u8]);
-                }
-                let mut r = vec![0x9Eu8];
-                r.extend(w16(bv));
-                return Ok(r);
-            }
-            let mut r = vec![0x9Cu8];
-            r.extend(w16(v));
-            Ok(r)
         }
 
         // ── LDX / LDY ─────────────────────────────────────────────────────────
@@ -1336,22 +1356,30 @@ fn encode_instruction(
 
         // ── STX / STY ─────────────────────────────────────────────────────────
         "STX" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x86, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x86, 0x8E)),
+                // STX has a dp,Y form only (no abs,Y).
+                Some('Y') if v <= 0xFF => Ok(vec![0x96, v as u8]),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that addressing form", mne),
+                }),
             }
-            let mut r = vec![0x8Eu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "STY" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x84, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x84, 0x8C)),
+                // STY has a dp,X form only (no abs,X).
+                Some('X') if v <= 0xFF => Ok(vec![0x94, v as u8]),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that addressing form", mne),
+                }),
             }
-            let mut r = vec![0x8Cu8];
-            r.extend(w16(v));
-            Ok(r)
         }
 
         // ── ADC / SBC ─────────────────────────────────────────────────────────
@@ -1446,62 +1474,80 @@ fn encode_instruction(
 
         // ── INC / DEC ─────────────────────────────────────────────────────────
         "INC" if !implied => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0xE6, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0xe6, 0xee)),
+                Some('X') => Ok(enc_da(v, 0xf6, 0xfe)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0xEEu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "DEC" if !implied => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0xC6, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0xc6, 0xce)),
+                Some('X') => Ok(enc_da(v, 0xd6, 0xde)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0xCEu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "INC" if implied => impl_implied!(0x1A),
         "DEC" if implied => impl_implied!(0x3A),
 
         // ── ASL / LSR / ROL / ROR (memory) ───────────────────────────────────
         "ASL" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x06, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x06, 0x0e)),
+                Some('X') => Ok(enc_da(v, 0x16, 0x1e)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0x0Eu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "LSR" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x46, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x46, 0x4e)),
+                Some('X') => Ok(enc_da(v, 0x56, 0x5e)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0x4Eu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "ROL" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x26, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x26, 0x2e)),
+                Some('X') => Ok(enc_da(v, 0x36, 0x3e)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0x2Eu8];
-            r.extend(w16(v));
-            Ok(r)
         }
         "ROR" => {
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x66, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x66, 0x6e)),
+                Some('X') => Ok(enc_da(v, 0x76, 0x7e)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0x6Eu8];
-            r.extend(w16(v));
-            Ok(r)
         }
 
         // ── BIT ──────────────────────────────────────────────────────────────
@@ -1512,13 +1558,16 @@ fn encode_instruction(
                 r.extend(imm_bytes_a(v));
                 return Ok(r);
             }
-            let v = eval(ops)?;
-            if v <= 0xFF {
-                return Ok(vec![0x24, v as u8]);
+            let (base, idx) = split_index(ops);
+            let v = eval(base)?;
+            match idx {
+                None => Ok(enc_da(v, 0x24, 0x2C)),
+                Some('X') => Ok(enc_da(v, 0x34, 0x3C)),
+                _ => Err(AsmError {
+                    line: lineno,
+                    msg: format!("{} does not support that index register", mne),
+                }),
             }
-            let mut r = vec![0x2Cu8];
-            r.extend(w16(v));
-            Ok(r)
         }
 
         // ── JSR / JMP / JSL / JML ────────────────────────────────────────────
@@ -2288,6 +2337,41 @@ mod tests {
                                        // Gap bytes between $8001 and $800F should be zero
         for (i, b) in bytes.iter().enumerate().take(0x10).skip(1) {
             assert_eq!(*b, 0, "gap byte at offset {} should be zero", i);
+        }
+    }
+
+    #[test]
+    fn indexed_store_and_rmw_encodings() {
+        // Each pair: (source line, expected bytes) — hand-checked against the
+        // public opcode matrix.
+        let cases: &[(&str, &[u8])] = &[
+            ("STZ $20,X", &[0x74, 0x20]),
+            ("STZ $2100,X", &[0x9E, 0x00, 0x21]),
+            ("STZ $20", &[0x64, 0x20]),
+            ("STZ $2100", &[0x9C, 0x00, 0x21]),
+            ("STX $20,Y", &[0x96, 0x20]),
+            ("STY $20,X", &[0x94, 0x20]),
+            ("BIT $20,X", &[0x34, 0x20]),
+            ("BIT $2100,X", &[0x3C, 0x00, 0x21]),
+            ("ASL $20,X", &[0x16, 0x20]),
+            ("ASL $2100,X", &[0x1E, 0x00, 0x21]),
+            ("LSR $20,X", &[0x56, 0x20]),
+            ("ROL $2100,X", &[0x3E, 0x00, 0x21]),
+            ("ROR $20,X", &[0x76, 0x20]),
+            ("INC $20,X", &[0xF6, 0x20]),
+            ("INC $2100,X", &[0xFE, 0x00, 0x21]),
+            ("DEC $20,X", &[0xD6, 0x20]),
+            ("DEC $2100,X", &[0xDE, 0x00, 0x21]),
+        ];
+        for (line, want) in cases {
+            let src = format!(".org $8000\n{}\n", line);
+            let (bytes, _) = assemble(&src).unwrap_or_else(|e| panic!("{line}: {e}"));
+            assert_eq!(&bytes[..want.len()], *want, "encoding of `{line}`");
+        }
+        // Forms that do not exist on this CPU must error, not mis-encode.
+        for line in ["STX $2100,Y", "STY $2100,X", "STZ $20,Y", "CPX $20,X"] {
+            let src = format!(".org $8000\n{}\n", line);
+            assert!(assemble(&src).is_err(), "`{line}` should be rejected");
         }
     }
 }
