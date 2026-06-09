@@ -1,0 +1,8 @@
+[package]
+name = "refwork-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+refwork-protocol = { path = "../refwork-protocol" }
