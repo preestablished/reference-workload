@@ -326,21 +326,8 @@
       }
     },
     "Semantics": {
-      "description": "Feature semantics — open enum; unknown values parse as `Opaque`.\n\nAPI.md §1.2: \"consumers treat unknown values as `opaque`\".",
-      "type": "string",
-      "enum": [
-        "counter",
-        "position_x",
-        "position_y",
-        "room_id",
-        "health",
-        "resource",
-        "flags",
-        "mode",
-        "progress_flag",
-        "timer",
-        "opaque"
-      ]
+      "description": "Open enum: counter | position_x | position_y | room_id | health              | resource | flags | mode | progress_flag | timer | opaque;              unknown values are treated as `opaque`.",
+      "type": "string"
     },
     "Stability": {
       "description": "Feature stability.",

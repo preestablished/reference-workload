@@ -166,9 +166,48 @@ pub fn encode(msg: &CtlMsg) -> Result<Vec<u8>, EncodeError> {
     Ok(bytes)
 }
 
-/// Deserialize a [`CtlMsg`] from a postcard-encoded byte slice.
-pub fn decode(bytes: &[u8]) -> Result<CtlMsg, postcard::Error> {
-    postcard::from_bytes(bytes)
+/// Decoding errors: malformed postcard data, or a datagram with trailing
+/// bytes after the message (one datagram = one message, §3.1 — a tail means
+/// corruption, not a second message).
+#[derive(Debug)]
+pub enum DecodeError {
+    Postcard(postcard::Error),
+    TrailingBytes { remaining: usize },
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Postcard(e) => write!(f, "postcard: {}", e),
+            DecodeError::TrailingBytes { remaining } => {
+                write!(
+                    f,
+                    "datagram has {} trailing byte(s) after message",
+                    remaining
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<postcard::Error> for DecodeError {
+    fn from(e: postcard::Error) -> Self {
+        DecodeError::Postcard(e)
+    }
+}
+
+/// Deserialize a [`CtlMsg`] from a postcard-encoded byte slice. The entire
+/// slice must be consumed; trailing bytes are an error.
+pub fn decode(bytes: &[u8]) -> Result<CtlMsg, DecodeError> {
+    let (msg, rest) = postcard::take_from_bytes(bytes)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::TrailingBytes {
+            remaining: rest.len(),
+        });
+    }
+    Ok(msg)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -636,5 +675,14 @@ mod tests {
             result.is_err(),
             "expected Err for out-of-range discriminant"
         );
+    }
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let mut bytes = encode(&CtlMsg::Ready { frame: 0 }).unwrap();
+        bytes.extend_from_slice(&[0xFF, 0xFF]);
+        match decode(&bytes) {
+            Err(DecodeError::TrailingBytes { remaining: 2 }) => {}
+            other => panic!("expected TrailingBytes {{ remaining: 2 }}, got {:?}", other),
+        }
     }
 }

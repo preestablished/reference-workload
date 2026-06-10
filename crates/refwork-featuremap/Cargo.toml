@@ -14,7 +14,8 @@ serde = { version = "1", features = ["derive"] }
 # spec README "Conventions honored (MAP.md)" section. Accepted; pinned to 0.9 minor.
 serde_yaml = "0.9"
 serde_json = "1"
-# schemars pinned to 0.8 minor for byte-stable schema output (CI drift gate dep).
+# Schema byte-stability is guarded by Cargo.lock + --locked in CI, not by
+# these caret ranges; regenerate schema/feature-map.schema.json on upgrades.
 schemars = "0.8"
 
 [dev-dependencies]

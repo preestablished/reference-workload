@@ -84,6 +84,23 @@ fn manifest_directory_bijection() {
             name
         );
     }
+
+    // Every *.scoring.yaml on disk must be referenced by some manifest entry,
+    // or it is dead weight that is never exercised.
+    let referenced: HashSet<&str> = manifest
+        .values()
+        .filter_map(|e| e.scoring.as_deref())
+        .collect();
+    for entry in std::fs::read_dir(fixtures_dir()).unwrap().flatten() {
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if name.ends_with(".scoring.yaml") {
+            assert!(
+                referenced.contains(name.as_str()),
+                "orphan scoring fixture {:?} is not referenced by expected.json",
+                name
+            );
+        }
+    }
 }
 
 #[test]
@@ -104,21 +121,9 @@ fn all_fixtures_fail_with_expected_rule() {
 
             let (map, _) = refwork_featuremap::parse_feature_map(&map_yaml)
                 .unwrap_or_else(|e| panic!("map parse error for {}: {}", filename, e));
-
-            // If map parse itself has preamble errors, those are the errors.
-            let map_errors_only = refwork_featuremap::validate_map(&map);
-            if !map_errors_only.is_empty()
-                && map_errors_only
-                    .iter()
-                    .all(|e| e.rule.starts_with("preamble/"))
-            {
-                // This shouldn't happen for cross-file fixtures (their maps should be valid)
-                map_errors_only
-            } else {
-                let (sp, _) = refwork_featuremap::parse_scoring_program(&scoring_yaml)
-                    .unwrap_or_else(|e| panic!("scoring parse error for {}: {}", scoring_file, e));
-                refwork_featuremap::validate_pair(&map, &sp)
-            }
+            let (sp, _) = refwork_featuremap::parse_scoring_program(&scoring_yaml)
+                .unwrap_or_else(|e| panic!("scoring parse error for {}: {}", scoring_file, e));
+            refwork_featuremap::validate_pair(&map, &sp)
         } else {
             // Map-only validation (includes preamble checks via parse_feature_map)
             match refwork_featuremap::parse_feature_map(&map_yaml) {

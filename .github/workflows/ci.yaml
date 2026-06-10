@@ -27,9 +27,9 @@ jobs:
       # rand/float/HashMap tokens from the core and harness crates.
       - run: cargo run -p xtask -- deny
         working-directory: repo
-      - run: cargo build --workspace
+      - run: cargo build --workspace --locked
         working-directory: repo
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
         working-directory: repo
       # M0 gate: the platform-canonical demo artifacts must validate
       # (IMPLEMENTATION-PLAN.md M0 acceptance).
@@ -45,7 +45,7 @@ jobs:
       # M1 acceptance gates (IMPLEMENTATION-PLAN.md M1), release mode:
       # synthetic-ROM 10,000-frame double-run with identical frame hashes,
       # and the zero-allocations-per-frame counting-allocator check.
-      - run: cargo test --release -p xtask --test determinism -- --include-ignored
+      - run: cargo test --release --locked -p xtask --test determinism -- --include-ignored
         working-directory: repo
-      - run: cargo test --release -p xtask --test zero_alloc
+      - run: cargo test --release --locked -p xtask --test zero_alloc
         working-directory: repo

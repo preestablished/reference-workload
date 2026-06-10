@@ -241,8 +241,11 @@ impl FeatureType {
 
 /// Feature semantics — open enum; unknown values parse as `Opaque`.
 ///
-/// API.md §1.2: "consumers treat unknown values as `opaque`".
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// API.md §1.2: "consumers treat unknown values as `opaque`". The published
+/// JSON Schema must stay open too (`type: string`, no closed `enum`) — a
+/// closed enum would make downstream schema-validation reject maps this
+/// crate's own validator accepts; see the hand-written `JsonSchema` impl.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Semantics {
     Counter,
@@ -258,8 +261,28 @@ pub enum Semantics {
     Opaque,
     /// Unknown variant — treated as opaque per forward-compat spec.
     #[serde(other)]
-    #[schemars(skip)]
     Unknown,
+}
+
+impl JsonSchema for Semantics {
+    fn schema_name() -> String {
+        "Semantics".to_owned()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // Open enum (§1.2): any string is schema-valid; unknown values mean
+        // `opaque`. The known values are documented in `description` for
+        // human readers without closing the set.
+        let mut obj = schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            ..Default::default()
+        };
+        obj.metadata().description = Some(
+            "Open enum: counter | position_x | position_y | room_id | health              | resource | flags | mode | progress_flag | timer | opaque;              unknown values are treated as `opaque`."
+                .to_owned(),
+        );
+        schemars::schema::Schema::Object(obj)
+    }
 }
 
 /// Feature stability.
@@ -589,6 +612,16 @@ pub fn validate_map(map: &FeatureMap) -> Vec<ValidationError> {
             None => continue,
         };
 
+        // Offsets are byte offsets within a region (§1.2) — never negative.
+        if feat.offset.0 < 0 {
+            errors.push(err(
+                "1.3/1",
+                format!("{}.offset", path),
+                format!("offset {} is negative", feat.offset.0),
+            ));
+            continue;
+        }
+
         // Offset + width in bounds
         let offset = feat.offset.0 as u64;
         if offset.saturating_add(width as u64) > region_size {
@@ -599,12 +632,58 @@ pub fn validate_map(map: &FeatureMap) -> Vec<ValidationError> {
                     "offset 0x{:X} + width {} = {} exceeds region {:?} size {}",
                     offset,
                     width,
-                    offset + width as u64,
+                    offset.saturating_add(width as u64),
                     feat.region,
                     region_size
                 ),
             ));
         }
+    }
+
+    // x/discretize — parameter sanity so a refwork-valid map cannot hand the
+    // scorer a divide-by-zero bucket or a degenerate threshold.
+    for (i, feat) in map.features.iter().enumerate() {
+        let path = format!("features[{}] ({})", i, feat.name);
+        match &feat.discretize {
+            Some(Discretize::Bucket { size }) if *size < 1 => {
+                errors.push(err(
+                    "x/discretize",
+                    format!("{}.discretize.size", path),
+                    "bucket size must be >= 1".to_string(),
+                ));
+            }
+            Some(Discretize::Threshold { edges }) => {
+                if edges.is_empty() {
+                    errors.push(err(
+                        "x/discretize",
+                        format!("{}.discretize.edges", path),
+                        "threshold edges must be non-empty".to_string(),
+                    ));
+                } else if edges.windows(2).any(|w| w[0] >= w[1]) {
+                    errors.push(err(
+                        "x/discretize",
+                        format!("{}.discretize.edges", path),
+                        "threshold edges must be strictly ascending".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // x/meta-name — §1.1: meta.name is [a-z0-9-]+ (registry key).
+    if map.meta.name.is_empty()
+        || !map
+            .meta
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        errors.push(err(
+            "x/meta-name",
+            "meta.name".to_string(),
+            format!("{:?} does not match [a-z0-9-]+ (§1.1)", map.meta.name),
+        ));
     }
 
     // §1.3/2 — bitflags* only with discretize: bits or none
@@ -1758,5 +1837,66 @@ goal:
         assert!(integer.is_some(), "integer variant missing");
         let sp = string_pat.expect("string variant missing");
         assert_eq!(sp["pattern"], "^0[xX][0-9a-fA-F]+$");
+    }
+    #[test]
+    fn negative_offset_rejected_without_panic() {
+        let yaml = minimal_map_yaml(
+            "  - { name: x, region: wram, offset: -1, type: u8, semantics: counter, stability: stable }",
+        );
+        let (_, errors) = parse_feature_map(&yaml).unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.rule == "1.3/1" && e.msg.contains("negative")),
+            "negative offset must be a 1.3/1 error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn semantics_schema_is_open() {
+        // The published schema must accept unknown semantics strings (open
+        // enum, §1.2) — i.e. emit a plain string type, never a closed enum.
+        let schema = generate_schema();
+        let v: serde_json::Value = serde_json::from_str(&schema).unwrap();
+        let sem = &v["definitions"]["Semantics"];
+        assert_eq!(sem["type"], "string", "Semantics schema: {}", sem);
+        assert!(
+            sem.get("enum").is_none(),
+            "Semantics schema must not close the value set: {}",
+            sem
+        );
+    }
+
+    #[test]
+    fn discretize_bucket_zero_and_bad_edges_rejected() {
+        let yaml = minimal_map_yaml(
+            "  - { name: a, region: wram, offset: 0, type: u8, semantics: counter, stability: stable, discretize: { kind: bucket, size: 0 } }\n  - { name: b, region: wram, offset: 1, type: u8, semantics: counter, stability: stable, discretize: { kind: threshold, edges: [] } }\n  - { name: c, region: wram, offset: 2, type: u8, semantics: counter, stability: stable, discretize: { kind: threshold, edges: [5, 5] } }",
+        );
+        let (_, errors) = parse_feature_map(&yaml).unwrap();
+        let count = errors.iter().filter(|e| e.rule == "x/discretize").count();
+        assert_eq!(
+            count, 3,
+            "expected 3 x/discretize errors, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn meta_name_pattern_enforced() {
+        let yaml = r#"schema_version: 1
+kind: feature-map
+meta: { name: "Bad_Name", workload: w, game_revision: r, version: 1 }
+regions:
+  - { name: wram, size: 131072 }
+features:
+  - { name: x, region: wram, offset: 0, type: u8, semantics: counter, stability: stable }
+"#;
+        let (_, errors) = parse_feature_map(yaml).unwrap();
+        assert!(
+            errors.iter().any(|e| e.rule == "x/meta-name"),
+            "meta.name pattern: {:?}",
+            errors
+        );
     }
 }
