@@ -127,8 +127,24 @@ impl Core {
             // bus unit-testable without a live PPU).
             if line == 0 {
                 self.bus.ppu.begin_frame();
+                // HDMA: initialize channel table pointers at start of frame
+                // (line 0 = end of v-blank, documented init point).
+                self.bus.init_hdma();
             } else if line == VBLANK_START_LINE {
                 self.bus.ppu.begin_vblank();
+            }
+
+            // HDMA: apply per-scanline register writes before rendering the
+            // line (writes land in h-blank before the visible raster begins).
+            // HDMA runs on visible lines only (1..=224); v-blank HDMA writes
+            // are skipped per the documented behavior — the channel state
+            // still advances so table reload at line 0 is consistent.
+            if (FIRST_VISIBLE_LINE..=LAST_VISIBLE_LINE).contains(&line) {
+                self.bus.execute_hdma();
+                if self.bus.fault.is_some() {
+                    faulted_early = true;
+                    break;
+                }
             }
 
             // Run CPU until the end of this scanline.

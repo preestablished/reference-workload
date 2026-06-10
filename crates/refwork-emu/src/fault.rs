@@ -10,13 +10,13 @@ pub enum Fault {
     CpuStopped { pc: u32 },
     /// Write to an address with no mapped device or memory.
     UnmappedWrite { addr: u32, value: u8 },
-    /// A PPU background mode outside the M1-implemented set was selected.
+    /// A PPU background mode outside the M2-implemented set was selected.
     UnimplementedBgMode { mode: u8 },
-    /// An M1-unimplemented PPU feature was enabled (register, value).
+    /// An unimplemented PPU feature was enabled (register, value).
     UnimplementedPpuFeature { reg: u8, value: u8 },
-    /// HDMA was enabled; per-scanline DMA arrives with mid-frame raster
-    /// support in M2.
-    HdmaUnimplemented { channels: u8 },
+    /// A channel was set in both MDMAEN ($420B) and HDMAEN ($420C) simultaneously.
+    /// The general-DMA kick is rejected; the channel continues running as HDMA.
+    HdmaDmaConflict { channels: u8 },
     /// Cartridge ROM/SRAM geometry violated at runtime.
     CartAccess { addr: u32 },
 }
