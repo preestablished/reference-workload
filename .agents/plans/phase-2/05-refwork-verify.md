@@ -10,11 +10,22 @@ map-check. The full-stack determinism suite (double-run vs hypervisor,
 snapshot/restore, `trace`) is M5/M6 — design the CLI as subcommands so those
 slot in later without renaming anything.
 
-## Deliverable 1 — host input-script format (shared with `ramdiff`)
+**Seam discipline (Option-B insurance):** 08 calls this suite
+"emulator-agnostic and the port's acceptance test" — that only holds if it
+is enforced here. All core access goes through the public Core API surface
+(`Core::new` / `run_one_frame` / `blit_completed_frame` / `frame_counter` /
+`wram()` / `debug_peek` under `introspect`); that surface is the facade an
+Option-B port must implement. Nothing in this crate may reach around it.
 
-Define once, in a small shared module (either a `refwork-script` micro-crate
-or a module in `refwork-verify` that `ramdiff` depends on — prefer the
-micro-crate; both tools and future M5 work consume it):
+## Deliverable 1 — `refwork-script` micro-crate (**day-1 deliverable**)
+
+The `.padlog` format is the hidden coupling between this package and 04 —
+both consume it, so it cannot live inside either tool. Land
+`crates/refwork-script` (format spec doc + parser/writer + round-trip
+tests) as this package's **first PR, before 04 starts**; the dependency
+graph is `refwork-script → {ramdiff, refwork-verify}`, and future M5 work
+consumes it too. Keep it dependency-light; it stays outside the deny scope
+unless `refwork-harness` ever grows a dependency on it (see 07).
 
 - Semantics: **one u16 pad word per frame**, bit assignment exactly API.md
   §3.4 (A=0 … Select=11, bits 12–15 zero). Frame 0 is the first
@@ -40,12 +51,23 @@ refwork-verify play --rom <game.rom> --script <run.padlog>
 ```
 
 - Runs the script to completion (or `--frames`), printing/collecting:
-  per-frame chained hash option (reuse the `blake3(wram ‖ fb)` +
-  chain definition from `xtask/src/hash_chain.rs` — **extract that hashing
-  into a shared location** rather than duplicating, so xtask and verify can
-  never disagree), feature-change events when `--map` given, fault report
-  with frame number on any `Fault` (D9 surfacing — this is the bring-up
-  loop's primary instrument for 06).
+  per-frame chained hash option (the `blake3(wram ‖ fb)` + chain definition
+  from `xtask/src/hash_chain.rs` moves into a new tiny **`refwork-hash`**
+  host crate — blake3 dep, region-hash + chain functions, consumed by both
+  xtask and refwork-verify so they can never disagree; deliberately *not* a
+  module in `refwork-emu`, which must stay dependency-free for the guest
+  build and inside the deny scope), feature-change events when `--map`
+  given, fault report with frame number on any `Fault` (D9 surfacing — this
+  is the bring-up loop's primary instrument for 06).
+- `--continue-past-faults` — **lab-only reconnaissance mode**: on a fault,
+  log it (fault, frame, PC context) and keep running instead of halting, so
+  one lab run yields the *complete* inventory of missing features rather
+  than one per run (D9 makes normal runs halt at the first fault, which
+  serializes 03's on-demand lane against the gate clock). Post-fault state
+  is garbage and the run is non-authoritative by construction — the flag
+  prints a loud banner, is rejected by `map-check`/`double-run`, and is
+  banned from acceptance runs and CI. This does not weaken D9: the core
+  still faults; only this host tool's stop-policy changes.
 - `--snap` writes the published-framebuffer bytes at the named frames —
   these are compared against operator-approved goldens **in the lab** (raw
   `.bin` compare is the gate; `.png` is for human eyes only and may use an
@@ -90,11 +112,19 @@ window diagnostics can extend this later.
 - Round-trip and RLE-edge unit tests for the `.padlog` parser/writer;
   property: `write(parse(x))` canonicalizes, `parse(write(log)) == log`.
 - `play` on the synthetic ROM: scripted 600-frame run, chained hash equals
-  `cargo xtask hash-chain` for the same input policy (proves the shared
-  hashing extraction worked).
+  `cargo xtask hash-chain` for the same input policy (proves the
+  `refwork-hash` extraction worked).
 - `map-check` positive + negative tests against the synthetic ROM with a
   tiny synthetic feature map (known counter address): a correct expectation
   passes; a wrong `changes_to` fails with the right frame number.
 - `double-run` on the synthetic ROM green at 10k frames in CI; a
-  deliberately nondeterministic build (test-only hook) is caught — the
-  "tests the tester" negative from the IMPLEMENTATION-PLAN testing table.
+  deliberately injected divergence is caught — the "tests the tester"
+  negative from the IMPLEMENTATION-PLAN testing table. **The injection
+  lives in `refwork-verify` itself** (a test-only flag that perturbs the
+  pad stream or hash input on run 2), *not* in `refwork-emu`: the deny gate
+  text-scans `refwork-emu`/`refwork-harness`/`refwork-protocol` source for
+  clock/RNG/float tokens regardless of cfg gates, so a
+  `cfg(feature = "nondet-test")` wall-clock read in the core would fail
+  every PR. See 07 item 5.
+- A `map-check` or `double-run` invocation that is handed a
+  `--continue-past-faults` artifact (or the flag itself) exits nonzero.

@@ -33,10 +33,16 @@ single-step corpus the same way the 65C816 core was.
    D9).
 3. `xtask spc-tests` finished (the skeleton exists in
    `xtask/src/spc_tests.rs`): load the public SPC700 single-step JSON corpus,
-   compare registers/PSW/cycles per instruction via a `cfg(feature =
-   "introspect")` hook, `--filter`/`--max-fail` like `cpu-tests`. Pin the
-   corpus (URL + BLAKE3) in `xtask/test-roms.lock` next to the 65816 entry;
-   fetched by `cargo xtask fetch-test-roms`, never committed.
+   compare end-state registers/PSW per instruction via a `cfg(feature =
+   "introspect")` hook, `--filter`/`--max-fail` like `cpu-tests`. The bar is
+   **state-only**, matching the 65816 gate — the skeleton already documents
+   that the corpus's `cycles` traces are deliberately not deserialized; do
+   not silently raise the bar to per-cycle bus comparison. Per-opcode cycle
+   *counts* still need to be right for timer/DSP scheduling — cover those
+   with ordinary unit tests where 02 depends on them. The corpus is
+   **already pinned** (`xtask/test-roms.lock` `spc700-singlestep` @
+   67d15f49, BLAKE3'd, fetched 2026-06-09); remaining work is the execution
+   path only.
 
 ## Design constraints
 

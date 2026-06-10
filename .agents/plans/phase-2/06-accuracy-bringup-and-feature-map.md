@@ -1,9 +1,29 @@
 # 06 — First-room bring-up against the operator ROM; verified feature map
 
-**Depends on:** 02 (full APU), 03 (PPU raster features), 04 (`ramdiff`),
-05 (`refwork-verify`). **The 3-week build-vs-vendor gate clock starts when
-this package starts** — record the start date in the gate log (package 08)
-on day one.
+**Depends on:** 02 (full APU), 03 core lane (PPU raster features), 04
+(`ramdiff`), 05 (`refwork-verify`). **The 3-week build-vs-vendor gate clock
+starts when this package starts** — record the start date in the gate log
+(package 08) on day one (and see 00/08: this clock-start reading needs
+operator ratification, with a 4-week calendar backstop on 01–05).
+
+## Preconditions — done *before* the clock starts, none on gate time
+
+- [ ] **aarch64 lab box ("the Spark") provisioned**: Rust toolchain
+  installed, this repo builds, ROM accessible — proven by a green
+  synthetic-ROM cross-arch double-run against the Intel box (hash
+  equality). QEMU is acceptable for CI (07) but **not** for the M2
+  evidence run; the lab box must actually work.
+- [ ] **Interactive environment designated and smoke-tested**: name the
+  machine (and operator) where `ramdiff record --interactive` sessions
+  happen — it needs a display, a keyboard, *and* the operator ROM. If
+  that machine is not a lab box (e.g. a dev workstation), get explicit
+  operator sign-off on ROM handling and write the rule in the bring-up
+  log. Run the windowing smoke test (04 acceptance) **on that machine**
+  before day one — discovering a broken windowing crate on gate time is
+  self-inflicted.
+- [ ] 03 core lane fully landed (its build-order items 1–7); modes 3/7
+  pre-built if hands were free (03 item 8).
+- [ ] `refwork-verify play --continue-past-faults` recon mode working (05).
 
 This is the unpredictable part ("accuracy debugging", 2–4 weeks in the
 ARCHITECTURE §2 estimate) and the phase's schedule risk. Everything here
@@ -19,12 +39,17 @@ operator-validated artifacts per the clean-room follow-up note), and
 Iterate, keeping a dated log (`.agents/plans/phase-2/bringup-log.md`, no
 game names — "the demo game"):
 
-1. `refwork-verify play --rom <operator>.rom --script boot.padlog` — start
-   with an empty/held-input script. Every `Fault{...}` is the next work
-   item: `UnimplementedBgMode` / `UnimplementedPpuFeature` → implement in
-   package 03's on-demand lane; unimplemented bus address / opcode edge →
-   fix in the relevant core module. **Never weaken a fault to a silent
-   fallback to make the game boot (D9).**
+1. `refwork-verify play --rom <operator>.rom --script boot.padlog
+   --continue-past-faults` — start with an empty/held-input script, in
+   recon mode, so the **first run yields the complete fault inventory**
+   (D9 halts authoritative runs at the first fault; without recon mode
+   every lab cycle discovers exactly one gap). Triage the inventory into
+   03's on-demand lane (`UnimplementedBgMode` / `UnimplementedPpuFeature`)
+   and core fixes (unimplemented bus address / opcode edge), then batch the
+   implementations. Re-run *without* the flag to confirm the route is
+   fault-clean before extending it. **Never weaken a fault to a silent
+   fallback to make the game boot (D9)** — recon mode changes the host
+   tool's stop-policy, never the core's faulting.
 2. When a segment renders, extend the input script via
    `ramdiff record --interactive` (play forward, save the recorded
    `.padlog`), then re-verify the extended script replays deterministically
@@ -67,7 +92,8 @@ Once the first room is reachable interactively:
   `refwork-verify play --snap` produces framebuffer dumps; the operator
   approves them once; they live in the lab golden store. The lab runner's
   acceptance job re-runs the script and byte-compares.
-- Final M2 evidence run (lab, both arches — see 07 for the aarch64 runner):
+- Final M2 evidence run (lab, both arches — the Spark provisioned per the
+  preconditions above; 07's CI runners are not a substitute):
   - `refwork-verify play --script first-room.padlog --report` →
     `room_id` transition asserted, goldens match.
   - `refwork-verify map-check` green against the verified map.
@@ -75,6 +101,13 @@ Once the first room is reachable interactively:
     aarch64, chained hashes **equal across the two architectures** (the
     cross-arch compare catches latent float/UB issues — the named reason
     this gate exists).
+- **Provenance block** recorded in the bring-up log — hashes are not game
+  content and are admissible under the same rule as the verified offsets;
+  without them the evidence run is a trust statement, not a checkable
+  claim. Record: repo git rev + rustc version of the evidence build, cart
+  BLAKE3, `first-room.padlog` BLAKE3, golden-framebuffer BLAKE3 list,
+  `m2-run.json` digest, and the final chained hash from **both**
+  architectures. This block is a row in 08's acceptance checklist.
 
 ## Acceptance (= M2 acceptance items 1–3)
 

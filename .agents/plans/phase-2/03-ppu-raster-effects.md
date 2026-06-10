@@ -25,9 +25,16 @@ a HUD-split game:
 2. **Per-scanline register latching.** M1 renders each line from current
    register state already — verify that scroll/brightness/mode register
    writes mid-frame (via HDMA or IRQ handlers) take effect on the *next*
-   line boundary, and add a regression test. (True mid-*scanline* latching
-   is explicitly out of scope per IMPLEMENTATION-PLAN — scanline-accurate,
-   not cycle-exact.)
+   line boundary, and add a regression test. **Deliberate deviation, on the
+   record:** ARCHITECTURE.md §2's effort table says "per-scanline rendering
+   with mid-scanline-register latching is required; cycle-exact PPU is not."
+   This plan starts at scanline granularity anyway — HDMA writes land in
+   h-blank, so the HUD split should not need mid-scanline latching — and
+   treats true mid-scanline latching as a named **on-demand-lane
+   contingency** (below), implemented only if bring-up shows a visible
+   artifact that needs it. File the spec-reconciliation doc issue now (08's
+   close-out pattern, pre-emptively) rather than letting the deviation ride
+   silently.
 3. **Color math** — CGWSEL/CGADSUB/COLDATA semantics: fixed-color vs
    subscreen operand, add/subtract, half-math, per-layer enable, backdrop
    participation. Requires rendering the **subscreen** (TS-enabled layers)
@@ -35,29 +42,41 @@ a HUD-split game:
    the per-line compositor to produce (main, sub) pixel pairs, then apply
    math. Remove the `Fault::UnimplementedPpuFeature` on TS/CGWSEL/CGADSUB
    as each piece lands.
-4. **Windows** — $2123–$212F: two windows, per-layer enable/invert, the
-   four combination ops, main/sub masking (TMW/TSW), color-math window
-   region select. Implement as a per-line 256-entry mask computed once per
-   line per window config.
-5. **H/V counter latch** — $2137 (SLHV) software latch, OPHCT/OPVCT
-   ($213C/$213D) two-read protocol with high/low flip-flops, $213F status
-   read clearing the latch flag. The counter values are a pure function of
-   the per-line position the core already tracks; the M1 "always 0" stub is
-   in `ppu/mod.rs`.
+4. **Windows** — window block $2123–$212B plus TMW/TSW ($212E/$212F): two
+   windows, per-layer enable/invert, the four combination ops, main/sub
+   masking. (The color-math window region select lives in CGWSEL $2130 —
+   covered under item 3; TM/TS $212C/$212D are layer designation, already
+   M1.) Implement as a per-line 256-entry mask computed once per line per
+   window config.
+5. **OPHCT dot counter.** The latch machinery is **already done in M1** —
+   $2137 SLHV latch, OPVCT, the $213C/$213D two-read flip-flops, and $213F
+   latch-clear all work (`ppu/mod.rs` ~670, ~727–760). The only delta:
+   OPHCT always latches 0 ("no dot counter in M1", `ppu/mod.rs:670`). Add
+   H dot-position tracking to the per-line loop so OPHCT latches a real
+   value, and extend the existing read-protocol tests.
 6. **Mosaic** — $2106 size + per-BG enable, line-group quantization.
-7. **Auto-joypad busy window** (`joypad.rs` + `bus.rs`): model the
-   documented latch window (auto-read occupies scanlines ~225–227): $4212
-   bit 0 reflects in-progress status; $4218/$4219 reads during the busy
-   window return the documented stale/partial behavior — implement the
-   simple deterministic version (return previous latch while busy) and note
-   it; games that poll $4212 first (the common idiom) are exact.
-8. **BG modes 2–7, on demand only.** Do **not** pre-build all modes. The
-   demo game's first room determines the set: when bring-up (06) hits
-   `Fault::UnimplementedBgMode { mode }`, implement that mode. Mode 3
-   (8bpp) and mode 7 (affine) are the likely candidates for title/intro
-   screens; each is its own `render_modeN` following the mode-0/1 pattern.
-   Modes never hit by the first-room route stay faulting — D9 keeps us
-   honest, and M2 acceptance only needs the route to run.
+7. **Auto-joypad stale reads.** The busy window is **already modeled in
+   M1**: `bus.rs` sets `auto_joy_busy` at line 225, clears at line 228, and
+   $4212 bit 0 reflects it. The only delta: $4218/$4219 currently expose
+   the *new* latch immediately at line 225; change them to return the
+   previous latch while busy (the simple deterministic version of the
+   documented stale/partial behavior) and note the simplification — games
+   that poll $4212 first (the common idiom) are exact either way.
+
+The items above are the **core lane** — all land before package 06 starts.
+The **on-demand lane** stays open during 06:
+
+8. **BG modes 2–7, on demand.** Do **not** pre-build all modes; modes never
+   hit by the first-room route stay faulting (D9 keeps us honest, and M2
+   acceptance only needs the route to run). But D9 also halts on the
+   *first* fault, so each lab run surfaces one gap at a time — every
+   reopen of this lane burns gate-clock days. Two mitigations: (a) 06 uses
+   `refwork-verify play --continue-past-faults` (05) for reconnaissance, so
+   one run yields the full fault inventory; (b) **pre-build mode 3 (8bpp)
+   and mode 7 (affine) before 06 starts if hands are free** — the plan's
+   own likely candidates for title/intro screens. Each mode is its own
+   `render_modeN` following the mode-0/1 pattern. Mid-scanline latching
+   (item 2's deviation) is also a named contingency in this lane.
 
 ## Constraints
 
@@ -77,11 +96,14 @@ a HUD-split game:
 - Per-feature unit tests with hand-computed expected pixels (existing
   `ppu` test style): HDMA scroll-split renders two regions; color-math
   add/half on known CGRAM values; window mask truth-table for all four ops;
-  OPHCT/OPVCT two-read protocol; mosaic 4×4 quantization; auto-joypad $4212
-  busy-bit sequence.
+  OPHCT real-dot latch (extending the existing two-read-protocol tests);
+  mosaic 4×4 quantization; auto-joypad stale-read-while-busy sequence.
 - Extended synthetic ROM double-run 10k frames green; zero-alloc green;
   deny green.
-- Public PPU test ROMs where available for the implemented features (pin in
-  `xtask/test-roms.lock`, operator-fetched like the CPU corpus) — run on
-  the lab runner, not CI, if they need visual/manual judgment; automate the
-  hash-comparable ones.
+- **PPU test-ROM survey, timeboxed (½ day):** enumerate the public test-ROM
+  suites covering the implemented features, and record the outcome in this
+  package's close-out — either entries pinned in `xtask/test-roms.lock`
+  (operator-fetched like the CPU corpus; lab-run if they need visual
+  judgment, automated if hash-comparable) or an explicit "evaluated X/Y,
+  adopted none because Z". "Where available" with no record is not an
+  acceptable close-out — that's a skip wearing a pass.

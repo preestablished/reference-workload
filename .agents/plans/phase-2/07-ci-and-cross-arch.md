@@ -20,38 +20,55 @@ are lab-runner jobs outside this repo's CI.
 3. **Cross-arch chained-hash compare** (with package 02; this is the new
    structural piece):
    - Add an aarch64 job. Preferred: a GitHub-hosted arm64 runner
-     (`ubuntu-24.04-arm`) if available to this repo; fallback: the lab's
-     aarch64 box ("the Spark") as a self-hosted runner; last resort:
-     `cross`/QEMU-user emulation (slow but deterministic — acceptable for
-     nightly). Decide by trying them in that order; record the choice in
-     this file when made.
+     (`ubuntu-24.04-arm`) if available to this repo — note these have
+     historically been free for **public** repos only; if this repo is
+     private, expect this rung to fail immediately and budget the trial
+     accordingly. Fallback: the lab's aarch64 box ("the Spark") as a
+     self-hosted runner; last resort: `cross`/QEMU-user emulation (slow but
+     deterministic — acceptable for nightly). Decide by trying them in that
+     order; record the choice in this file when made.
+   - **CI ≠ the lab evidence run.** This job covers the *synthetic ROM*
+     only. The M2 acceptance run (demo game, 100k frames, real aarch64
+     hardware) happens on the provisioned Spark per 06's preconditions —
+     QEMU is not a valid substitute there, and provisioning the Spark is a
+     pre-06 task regardless of which CI rung wins.
    - Mechanism already exists: `cargo xtask hash-chain` prints the chained
-     frame hash (`blake3` chain over `blake3(wram ‖ fb)`). The job runs
-     hash-chain (or `refwork-verify double-run --report`, once 05 lands and
-     the hashing is shared) at fixed frame count on both arches and
-     **diffs the two hash values** — a job-level compare step that fails on
-     mismatch. Per-PR at 10k frames, nightly at 100k.
+     frame hash (`blake3` chain over `blake3(wram ‖ fb)`; definition moves
+     into the shared `refwork-hash` crate per 05). The job runs hash-chain
+     (or `refwork-verify double-run --report`, once 05 lands) at fixed
+     frame count on both arches and **diffs the two hash values** — a
+     job-level compare step that fails on mismatch. Per-PR at 10k frames,
+     nightly at 100k.
    - The aarch64 job also runs the plain test suite + clippy once per PR —
      cheap insurance that the workspace builds and tests cross-arch at all.
 4. **Gate hygiene for new crates** (with packages 04/05):
    - `ramdiff` and `refwork-verify` join fmt/clippy/test/build jobs
      automatically via `--workspace` — verify no job uses an explicit crate
      list that would skip them.
-   - Confirm the deny gate's scope statement still matches reality: it must
-     keep covering `refwork-emu` (now much larger) and `refwork-harness`,
-     and must **not** be widened to host CLIs (they may legitimately use
-     floats for `.png` output etc.). Add `refwork-script` (if created as a
-     micro-crate, 05) to the deny scope **only if** `refwork-harness` ends
-     up depending on it later — note this in the deny config comment.
+   - Confirm the deny gate's scope statement still matches reality: it
+     covers **three** crates today — `refwork-emu` (now much larger),
+     `refwork-harness`, and `refwork-protocol` (`xtask/src/deny.rs`
+     ~244–246) — and must **not** be widened to host CLIs (`ramdiff`,
+     `refwork-verify`, `refwork-hash` may legitimately use floats for
+     `.png` output etc.). Add `refwork-script` (05) to the deny scope
+     **only if** `refwork-harness` ends up depending on it later — note
+     this in the deny config comment.
    - Windowing deps (`ramdiff --interactive`) must not break headless CI:
      CI runs scripted tests only; if the window crate needs system libs at
      link time even unused, feature-gate the interactive module
      (`--features interactive` locally, default off).
 5. **Negative determinism test** (with 05's `double-run`): nightly job
-   builds the test-only nondeterminism hook (e.g. a `cfg(feature =
-   "nondet-test")` wall-clock read in a scratch path) and asserts
-   `refwork-verify double-run` **fails** — the "tests the tester" row of
-   the testing-strategy table.
+   exercises the test-only divergence hook and asserts `refwork-verify
+   double-run` **fails** — the "tests the tester" row of the
+   testing-strategy table. **The hook must live in `refwork-verify`, not
+   the core**: `xtask/src/deny.rs` token-scans the *source text* of
+   `refwork-emu`/`refwork-harness`/`refwork-protocol` for
+   clock/RNG/float tokens regardless of cfg gates, so a committed
+   `cfg(feature = "nondet-test")` wall-clock read in those crates fails
+   the per-PR deny gate, and allow-listing it would weaken the gate.
+   `refwork-verify` perturbing its own pad stream / hash input on run 2
+   under a test flag achieves the same negative without touching deny
+   scope (05 acceptance).
 
 ## Acceptance (package-local)
 

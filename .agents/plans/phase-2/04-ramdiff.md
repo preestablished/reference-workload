@@ -1,13 +1,19 @@
 # 04 — `crates/ramdiff`: RAM-address discovery MVP
 
-**Independent of 01–03** (records against whatever the core can run; useful
-work starts immediately with the synthetic ROM, real use begins in 06).
-Design source: ARCHITECTURE.md §5 (workflow + type sketch are normative).
+**Independent of 01–03; depends on 05's day-1 `refwork-script` micro-crate**
+(the `.padlog` format — land that first; it's a few hundred lines). Records
+against whatever the core can run; useful work starts immediately with the
+synthetic ROM, real use begins in 06. Design source: ARCHITECTURE.md §5
+(workflow + type sketch are normative).
 
 `ramdiff` is a **host-side CLI** — outside the deny gate's scope (threads/
 floats permitted, though none are needed), but it links `refwork-emu`
 directly with `features = ["introspect"]`. New workspace member at
-`crates/ramdiff/` per the README layout.
+`crates/ramdiff/` per the README layout. **Seam discipline (Option-B
+insurance):** all core access goes through the public Core API surface
+(`Core::new` / `run_one_frame` / `blit_completed_frame` / `frame_counter` /
+`wram()` / `debug_peek`) — that surface is the facade an Option-B port must
+implement, so nothing in this tool may reach around it.
 
 ## Deliverables
 
@@ -19,18 +25,21 @@ directly with `features = ["introspect"]`. New workspace member at
    `Vec<u32>`/bitvec is fine for 128 KiB regions; the sketch's RoaringBitmap
    is an option, not a requirement.
 2. **`ramdiff record`** (`src/record.rs`) — runs `refwork-emu` host-side:
-   - `--rom <file.rom>` + `--script <input log>` (format from package 05 —
-     shared crate or module so the two tools never drift): scripted
-     deterministic replay with `--mark <frame>=<label>` dump points and
-     `--dump-every N` for per-frame trajectories.
+   - `--rom <file.rom>` + `--script <run.padlog>` (the `refwork-script`
+     crate — never a private parser, so the two tools can't drift):
+     scripted deterministic replay with `--mark <frame>=<label>` dump
+     points and `--dump-every N` for per-frame trajectories.
    - `--interactive`: opens a window, blits `blit_completed_frame` output
      (XRGB8888, 256×224), maps keyboard → the §3.4 pad bitmask, hotkey
-     dumps WRAM with a prompted label, and **records the per-frame pad
-     words to an input log on exit**. This is also how first-room scripts
-     get authored for 06 — interactivity is explicitly sanctioned for host
-     tools (ARCHITECTURE §5 step 2). Keep the windowing dependency minimal
-     (`minifb` or `softbuffer`+`winit`-class crate; pick the smallest that
-     gives a pixel buffer + key events; pin it).
+     dumps WRAM with a prompted label, and **appends each frame's pad word
+     to the input log as it happens** — incremental writes, not
+     write-on-exit, so a crashed or killed session loses nothing
+     (interactive lab sessions are expensive operator time on the gate
+     clock). This is also how first-room scripts get authored for 06 —
+     interactivity is explicitly sanctioned for host tools (ARCHITECTURE §5
+     step 2). Keep the windowing dependency minimal (`minifb` or
+     `softbuffer`+`winit`-class crate; pick the smallest that gives a pixel
+     buffer + key events; pin it).
    - Frame pacing in interactive mode only: host-side sleep to ~60 fps is
      fine here (host tool, not the core).
 3. **`ramdiff search`** (`src/filter.rs`) — set-algebra narrowing over the

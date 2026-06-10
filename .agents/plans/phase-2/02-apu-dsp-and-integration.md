@@ -41,11 +41,11 @@ acceptance; `ApuStub` is banned from it.
      timestamp. This bounds divergence windows deterministically — the
      *schedule* is a pure function of emulated state, satisfying the
      contract regardless of accuracy.
-3. **Retire `ApuStub`**: bus routes $2140–$2143 to the real APU; delete
-   `ApuStub`, the `Apu::Stub` plumbing, and the
+3. **Retire `ApuStub`**: bus routes $2140–$2143 to the real APU; delete the
+   `ApuStub` struct, the `pub apu: ApuStub` field in `bus.rs`, and the
    `FrameFlags::APU_STUB_ACCESS`/`APU_STUB_HANDSHAKE` flags plus their
-   harvest in `core_impl.rs` (~lines 154–162). Grep tests/docs for the flag
-   names — M1's synthetic-ROM tests may assert them.
+   harvest in `core_impl.rs` (inserts at lines 156/160). Grep tests/docs for
+   the flag names — M1's synthetic-ROM tests may assert them.
 4. Synthetic-ROM extension (`xtask/asm` + `xtask/src/synth_rom.rs`): add an
    APU exercise segment — upload a small SPC program via the IPL protocol,
    key on a BRR voice, poll ENDX/port echo, fold results into the drawn
