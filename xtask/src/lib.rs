@@ -8,11 +8,14 @@
 //!   run the single-step CPU test corpus.
 //! - `cargo xtask spc-tests [--dir DIR] [--filter SUBSTR]` — validate the
 //!   pinned SPC700 single-step corpus (execution gate arrives with M2).
+//! - `cargo xtask hash-chain [--frames N]` — print the chained synthetic-ROM
+//!   frame hash (cross-architecture determinism probe).
 
 pub mod asm;
 pub mod cpu_tests;
 pub mod deny;
 pub mod fetch;
+pub mod hash_chain;
 pub mod spc_tests;
 pub mod synth_rom;
 

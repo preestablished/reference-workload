@@ -16,6 +16,7 @@ fn main() {
         "fetch-test-roms" => cmd_fetch_test_roms(&args[1..]),
         "cpu-tests" => cmd_cpu_tests(&args[1..]),
         "spc-tests" => cmd_spc_tests(&args[1..]),
+        "hash-chain" => cmd_hash_chain(&args[1..]),
         "--help" | "-h" | "help" => {
             usage();
         }
@@ -46,6 +47,10 @@ fn usage() {
     println!();
     println!("  spc-tests [--dir DIR] [--filter SUBSTR]");
     println!("      Validate the pinned SPC700 single-step corpus (M2 gate skeleton).");
+    println!();
+    println!("  hash-chain [--frames N]");
+    println!("      Print the chained synthetic-ROM frame hash (default 600 frames).");
+    println!("      Identical across architectures = cross-arch determinism holds.");
 }
 
 // ─── build-rom ───────────────────────────────────────────────────────────────
@@ -149,6 +154,48 @@ fn cmd_spc_tests(args: &[String]) {
     }
     if xtask::spc_tests::run_spc_tests(&opts).is_err() {
         std::process::exit(1);
+    }
+}
+
+// ─── hash-chain ──────────────────────────────────────────────────────────────
+
+fn cmd_hash_chain(args: &[String]) {
+    let mut frames = 600usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--frames" => {
+                i += 1;
+                let v = args.get(i).and_then(|a| a.parse().ok());
+                match v {
+                    Some(n) => frames = n,
+                    None => {
+                        eprintln!("hash-chain: --frames requires a positive integer");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("hash-chain: unknown option '{}'", other);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    match xtask::hash_chain::run_hash_chain(frames) {
+        Ok(chain) => {
+            let hex: String = chain.iter().map(|b| format!("{:02x}", b)).collect();
+            println!(
+                "hash-chain: frames={} arch={} chain={}",
+                frames,
+                std::env::consts::ARCH,
+                hex
+            );
+        }
+        Err(e) => {
+            eprintln!("hash-chain: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
