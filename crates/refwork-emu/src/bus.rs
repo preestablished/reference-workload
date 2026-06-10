@@ -145,13 +145,8 @@ impl SysBus {
         }
 
         // Low-mirror WRAM: banks $00-$3F/$80-$BF, offset $0000-$1FFF.
-        match bank {
-            0x00..=0x3F | 0x80..=0xBF => {
-                if off < 0x2000 {
-                    return Some(self.wram[off as usize & 0x1FFF]);
-                }
-            }
-            _ => {}
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
+            return Some(self.wram[off as usize & 0x1FFF]);
         }
 
         // Cart ROM/SRAM (no side effects).
@@ -375,14 +370,9 @@ impl SysBus {
 
         // Guard: A-bus DMA cannot reach $21xx-$43xx registers.
         // These fall in banks $00-$3F/$80-$BF at those offsets.
-        match bank {
-            0x00..=0x3F | 0x80..=0xBF => {
-                if (0x2000..0x6000).contains(&off) {
-                    // I/O register range on A-bus during DMA: open-bus.
-                    return self.mdr;
-                }
-            }
-            _ => {}
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..0x6000).contains(&off) {
+            // I/O register range on A-bus during DMA: open-bus.
+            return self.mdr;
         }
 
         // WRAM banks $7E/$7F.
@@ -407,14 +397,9 @@ impl SysBus {
         let off = (addr & 0xFFFF) as u16;
 
         // Guard: do not touch I/O registers from A-bus DMA.
-        match bank {
-            0x00..=0x3F | 0x80..=0xBF => {
-                if (0x2000..0x6000).contains(&off) {
-                    // No-op with a comment: A-bus DMA cannot reach register space.
-                    return;
-                }
-            }
-            _ => {}
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..0x6000).contains(&off) {
+            // No-op: A-bus DMA cannot reach register space.
+            return;
         }
 
         // WRAM banks $7E/$7F.
