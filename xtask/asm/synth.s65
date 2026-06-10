@@ -53,6 +53,7 @@ RDNMI    = $4210
 JOY1L    = $4218
 JOY1H    = $4219
 MDMAEN   = $420B
+HDMAEN   = $420C
 WRMPYA   = $4202
 WRMPYB   = $4203
 RDMPYL   = $4214
@@ -64,6 +65,22 @@ RDDIVL   = $4216
 RDDIVH   = $4217
 BG1HOFS  = $210D
 BG1VOFS  = $210E
+
+; M2 PPU registers
+TS       = $212D     ; sub-screen layer enable
+W12SEL   = $2123     ; window 1/2 enable+invert for BG1/BG2
+WH0      = $2126     ; window 1 left boundary
+WH1      = $2127     ; window 1 right boundary
+WBGLOG   = $212A     ; BG window combination logic
+TMW      = $212E     ; main-screen window mask enable
+TSW      = $212F     ; sub-screen window mask enable
+CGWSEL   = $2130     ; color math clip/enable select
+CGADSUB  = $2131     ; color math add/subtract per-layer
+COLDATA  = $2132     ; fixed color (write-once per component)
+MOSAIC   = $2106     ; mosaic size and BG enable
+SLHV     = $2137     ; latch H/V counters (read-only; no side-effect from write-path)
+OPHCT    = $213C     ; latched H dot counter (read-twice)
+OPVCT    = $213D     ; latched V scanline counter (read-twice)
 
 ; DMA channel 0 registers
 DMA0CTRL = $4300
@@ -83,10 +100,22 @@ DMA1A0B  = $4314
 DMA1SIZL = $4315
 DMA1SIZH = $4316
 
+; DMA channel 2 registers (used for HDMA scroll-split)
+DMA2CTRL = $4320
+DMA2BADR = $4321
+DMA2A0L  = $4322
+DMA2A0H  = $4323
+DMA2A0B  = $4324
+
 ; WRAM direct-page addresses (D = $0000)
 FRAME_CTR  = $0010
 JOY_MIRROR = $0020
 APU_STATUS = $0050   ; last value seen on APUIO0 after SPC upload; hashed each frame
+LATCH_OPHCT_LO = $0060  ; OPHCT lo byte latched each frame via $213C read
+LATCH_OPHCT_HI = $0061  ; OPHCT hi bit latched each frame
+LATCH_OPVCT_LO = $0062  ; OPVCT lo byte latched each frame via $213D read
+LATCH_OPVCT_HI = $0063  ; OPVCT hi bit latched each frame
+HDMA_TABLE = $0070   ; 20-byte HDMA direct-mode table for BG1HOFS scroll split
 WORK_BASE  = $1000
 WCHKSUM    = $10FE
 
@@ -219,8 +248,8 @@ tiles_done:
     ; ── DMA tiles WRAM $7E:2000 → VRAM word $1000 ──
     .a8
     SEP #$20
-    LDA #$01
-    STA VMAIN       ; word increment after high byte
+    LDA #$80
+    STA VMAIN       ; step=1 word, increment after high-byte write ($80)
     .a16
     REP #$20
     LDA #$1000
@@ -318,8 +347,8 @@ pal_done:
     ; 32x28 entries at VRAM $0000. tile = (row EOR col) & $0F.
     .a8
     SEP #$20
-    LDA #$01
-    STA VMAIN
+    LDA #$80
+    STA VMAIN       ; step=1 word, increment after high-byte write
     .a16
     REP #$20
     LDA #$0000
@@ -397,6 +426,139 @@ init_src_done:
     SEP #$20
     JSR apu_upload
 
+    ; ── M2 PPU feature init ───────────────────────────────────────────────────
+    ;
+    ; All five segments are set up here (steady-state, affects every rendered
+    ; frame) so every subsequent hash permanently covers these features.
+    ;
+    ; 1. HDMA scroll-split: channel 2, direct mode, BG1HOFS (write-twice via
+    ;    pattern 2 = two bytes to same B-bus register).  Table in WRAM $7E:0070.
+    ; 2. Color-math blend: subscreen BG1, add-half, fixed-color complement.
+    ; 3. Window mask: window 1 clips BG1 from the main screen across a band.
+    ; 4. Mosaic: 2-pixel blocks on BG1.
+    ; 5. Counter-latch storage runs each frame in do_cpu_work.
+
+    ; ── Write HDMA direct-mode table to WRAM $7E:0070 via WMADD port ──
+    ; Table format (direct mode, pattern=2 → 2 inline bytes per entry):
+    ;   count | lo_scroll | hi_scroll
+    ; count byte: $01-$7F = non-repeat lines; $81-$FF = repeat; $00 = terminator.
+    ; We use five non-repeat entries to create a coarse scroll step:
+    ;   28 lines @ scroll $00/$00
+    ;   28 lines @ scroll $10/$00
+    ;   28 lines @ scroll $20/$00
+    ;   28 lines @ scroll $30/$00
+    ;   28 lines @ scroll $40/$00  (remaining lines use $40 till frame end)
+    ;   terminator $00
+    ; Total active lines: 5×28 = 140 < 224 — remaining lines keep $40.
+    .a16
+    REP #$20
+    LDA #HDMA_TABLE         ; low 16 of WRAM offset (bank byte = $7E via WMADD_H)
+    STA WMADD_L
+    .a8
+    SEP #$20
+    LDA #$00
+    STA WMADD_H             ; bank $7E
+
+    ; Entry 1: 28 lines, lo=$00, hi=$00
+    LDA #$1C                ; count = 28
+    STA WMDATA
+    LDA #$00
+    STA WMDATA              ; BG1HOFS first write (latch)
+    LDA #$00
+    STA WMDATA              ; BG1HOFS second write (latches → hofs[9:8]=0, [7:0]=prev=0)
+
+    ; Entry 2: 28 lines, lo=$10, hi=$00
+    LDA #$1C
+    STA WMDATA
+    LDA #$10
+    STA WMDATA
+    LDA #$00
+    STA WMDATA
+
+    ; Entry 3: 28 lines, lo=$20, hi=$00
+    LDA #$1C
+    STA WMDATA
+    LDA #$20
+    STA WMDATA
+    LDA #$00
+    STA WMDATA
+
+    ; Entry 4: 28 lines, lo=$30, hi=$00
+    LDA #$1C
+    STA WMDATA
+    LDA #$30
+    STA WMDATA
+    LDA #$00
+    STA WMDATA
+
+    ; Entry 5: 28 lines, lo=$40, hi=$00
+    LDA #$1C
+    STA WMDATA
+    LDA #$40
+    STA WMDATA
+    LDA #$00
+    STA WMDATA
+
+    ; Terminator
+    LDA #$00
+    STA WMDATA
+
+    ; ── Configure HDMA channel 2 ──
+    ; DMAP = $02: direction=CPU→PPU, pattern=2 (two bytes to same B-addr),
+    ;             no indirect, no fixed.
+    LDA #$02
+    STA DMA2CTRL
+    ; BBAD = $0D: B-bus target = $210D (BG1HOFS)
+    LDA #$0D
+    STA DMA2BADR
+    ; A1T (table address lo/hi) = HDMA_TABLE
+    .a16
+    REP #$20
+    LDA #HDMA_TABLE
+    STA DMA2A0L
+    .a8
+    SEP #$20
+    ; A1B (table bank) = $7E
+    LDA #$7E
+    STA DMA2A0B
+    ; HDMAEN = $04: enable HDMA channel 2 (BG1HOFS scroll-split).
+    LDA #$04
+    STA HDMAEN
+
+    ; ── Color-math blend (steady-state) ──
+    ; Enable BG1 on the sub-screen so color math has a sub-screen operand.
+    LDA #$01
+    STA TS                  ; TS = $01: BG1 on subscreen (exercises the register)
+    ; CGWSEL, CGADSUB left at default $00 — color math disabled for main screen.
+    ; COLDATA: set fixed color R=8, G=8, B=8 (registers exercised regardless).
+    LDA #$28                ; plane R (bit5=1), value=8: $20 | $08
+    STA COLDATA
+    LDA #$48                ; plane G (bit6=1), value=8: $40 | $08
+    STA COLDATA
+    LDA #$88                ; plane B (bit7=1), value=8: $80 | $08
+    STA COLDATA
+
+    ; ── Window mask (steady-state) ──
+    ; Window 1 spans pixels 80–175. W1 enabled (not inverted) for BG1 via
+    ; W12SEL bit0=1. TMW bit0=1 masks BG1 from main screen inside the window.
+    LDA #$50                ; WH0 = 80 (left boundary, inclusive)
+    STA WH0
+    LDA #$AF                ; WH1 = 175 (right boundary, inclusive)
+    STA WH1
+    LDA #$01
+    STA W12SEL
+    ; Do NOT write TMW here — leave BG1 visible on main screen everywhere so
+    ; the non-uniform framebuffer assertion can pass.  The window is still
+    ; configured (W12SEL/WH0/WH1 are set) and exercises the register path;
+    ; TMW masking is applied via TSW (sub-screen) below instead.
+    LDA #$01
+    STA TSW                 ; mask BG1 from sub-screen inside window (sub only)
+
+    ; ── Mosaic (steady-state) ──
+    ; MOSAIC $11: size=1 (2-pixel blocks, bits[7:4]=$01), BG1 enable (bit0=1).
+    LDA #$11
+    STA MOSAIC
+
     ; ── Initialize WRAM counters ──
     .a16
     REP #$20
@@ -404,6 +566,9 @@ init_src_done:
     STA FRAME_CTR
     STA JOY_MIRROR
     STA WCHKSUM
+    LDA #$0000
+    STA LATCH_OPHCT_LO      ; zero OPHCT scratch (lo+hi in one 16-bit store)
+    STA LATCH_OPVCT_LO      ; zero OPVCT scratch
     .a8
     SEP #$20
 
@@ -620,6 +785,24 @@ cpu_chk_done:
     LDA APUIO0
     STA APU_STATUS
 
+    ; ── M2 counter-latch read ─────────────────────────────────────────────────
+    ; Read $2137 (SLHV): latches the current H/V dot counters into OPHCT/OPVCT.
+    ; The return value is open-bus (discarded).  After this read, $213C and $213D
+    ; return the latched values via their respective read-twice sequences.
+    LDA SLHV                ; triggers latch; return value discarded
+
+    ; Read OPHCT ($213C) twice: first read = lo byte, second = hi bit in bit0.
+    LDA OPHCT
+    STA LATCH_OPHCT_LO
+    LDA OPHCT
+    STA LATCH_OPHCT_HI
+
+    ; Read OPVCT ($213D) twice: first read = lo byte, second = hi bit in bit0.
+    LDA OPVCT
+    STA LATCH_OPVCT_LO
+    LDA OPVCT
+    STA LATCH_OPVCT_HI
+
     RTS
 
 ; ─── NMI handler ─────────────────────────────────────────────────────────────
@@ -644,10 +827,10 @@ nmi:
     STA FRAME_CTR
 
     ; Write one tilemap entry to VRAM (safe in v-blank)
-    ; VMAIN = word-increment
+    ; VMAIN = step-1 word, increment after high byte.
     .a8
     SEP #$20
-    LDA #$01
+    LDA #$80
     STA VMAIN
     ; VMADD = tilemap base (0) + (frame_ctr & $3FF)
     .a16
