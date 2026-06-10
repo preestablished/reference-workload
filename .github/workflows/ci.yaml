@@ -15,11 +15,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/control-plane
-          # Pinned to the branch carrying the Phase-0 skeleton (the
-          # determinism-proto path dependency); control-plane's main still
-          # holds only the initial commit. Drop the ref once the skeleton
-          # is promoted to main.
-          ref: phase-0-skeleton
           path: control-plane
       - uses: dtolnay/rust-toolchain@stable
         with:
