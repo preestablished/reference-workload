@@ -131,8 +131,7 @@ pub fn parse(text: &str) -> Result<PadLog, PadLogError> {
                 word,
             });
         }
-        log.frames
-            .extend(std::iter::repeat_n(word, count as usize));
+        log.frames.extend(std::iter::repeat_n(word, count as usize));
     }
 
     if !header_seen {
