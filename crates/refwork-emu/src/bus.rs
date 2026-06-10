@@ -14,7 +14,7 @@
 //! - OPHCT real dot counter: `start_line` passes the current within-line dot
 //!   to `ppu.latch_hv_counters` so OPHCT reflects a real position.
 
-use crate::apu::ApuStub;
+use crate::apu::Apu;
 use crate::cart::Cartridge;
 use crate::cpu::Cpu;
 use crate::dma::{unit_pattern, Dma, Hdma, HdmaState};
@@ -49,7 +49,11 @@ pub struct SysBus {
     pub wram: &'static mut [u8; 0x20000],
     pub cart: Cartridge,
     pub ppu: Ppu,
-    pub apu: ApuStub,
+    pub apu: Apu,
+    /// Master-clock timestamp of the last APU catch-up. The APU is advanced
+    /// to the current `mclk_total` whenever the CPU accesses $2140–$2143 and
+    /// at the end of each scanline.
+    pub apu_mclk_base: u64,
     pub dma: Dma,
     /// HDMA per-frame run-time state (D8: fixed-size, allocated in new).
     pub hdma: Hdma,
@@ -59,6 +63,9 @@ pub struct SysBus {
 
     /// Master clocks elapsed since the start of the current frame.
     pub mclk_frame: u64,
+    /// Monotonically increasing total master clocks elapsed since power-on.
+    /// Used for APU catch-up scheduling (never resets between frames).
+    pub mclk_total: u64,
     /// Open-bus / memory-data-register latch (D3: documented constant
     /// behavior — reads of unmapped addresses return this).
     pub mdr: u8,
@@ -117,13 +124,15 @@ impl SysBus {
             wram,
             cart,
             ppu,
-            apu: ApuStub::new(),
+            apu: Apu::new(),
+            apu_mclk_base: 0,
             dma: Dma::new(),
             hdma: Hdma::new(),
             hdmaen: 0,
             joypad: Joypad::new(),
 
             mclk_frame: 0,
+            mclk_total: 0,
             mdr: 0,
             fault: None,
 
@@ -178,6 +187,7 @@ impl SysBus {
     fn add_mclk(&mut self, mclk: u64) {
         let old = self.mclk_frame;
         self.mclk_frame = old + mclk;
+        self.mclk_total = self.mclk_total.wrapping_add(mclk);
         // Check if an IRQ target was crossed.
         if let Some(target) = self.irq_target_mclk {
             if old < target && self.mclk_frame >= target {
@@ -281,9 +291,43 @@ impl SysBus {
         }
     }
 
+    /// Catch the APU up to the current `mclk_total` timestamp.
+    ///
+    /// Called (a) whenever the CPU accesses $2140–$2143, and (b) at the end
+    /// of each scanline from `core_impl.rs`. This bounds the divergence window
+    /// deterministically: the APU is never more than one scanline behind the
+    /// CPU's master-clock view.
+    ///
+    /// If the catch-up encounters an APU halt condition (SLEEP/STOP/test-register
+    /// nonzero write), records the appropriate `Fault` (D9).
+    pub fn apu_catch_up(&mut self) {
+        if self.apu_mclk_base >= self.mclk_total {
+            return;
+        }
+        let delta = self.mclk_total - self.apu_mclk_base;
+        self.apu_mclk_base = self.mclk_total;
+
+        let halt = self.apu.advance_master_cycles(delta);
+        if let Some(h) = halt {
+            use crate::apu::spc700::ApuHalt;
+            match h {
+                ApuHalt::Stop => {
+                    let pc = self.apu.cpu.pc;
+                    self.fault(crate::fault::Fault::ApuStopped { pc });
+                }
+                ApuHalt::TestTrigger(v) => {
+                    let pc = self.apu.cpu.pc;
+                    self.fault(crate::fault::Fault::ApuTestTrigger { value: v, pc });
+                }
+                // SLEEP is not a fault; the APU will resume on the next interrupt.
+                ApuHalt::Sleep => {}
+            }
+        }
+    }
+
     /// Frame scheduler hook: called by `Core` at the start of every
     /// scanline. Handles v-blank entry (NMI flag/edge, OAM reload,
-    /// auto-joypad latch), v-blank exit, and per-line APU stub ticks.
+    /// auto-joypad latch), v-blank exit, and per-line APU catch-up.
     pub fn start_line(&mut self, line: u16, pad: u16) {
         let _ = pad; // pad is set on the joypad by Core before calling start_line
         self.line = line;
@@ -482,9 +526,8 @@ impl SysBus {
             }
             // APU ports $40-$7F (mirrors: port = reg & 3).
             0x40..=0x7F => {
-                self.apu.accessed = true;
                 let port = reg & 3;
-                let v = self.apu.read(port);
+                let v = self.apu.cpu_read_port(port);
                 self.mdr = v;
                 v
             }
@@ -513,9 +556,8 @@ impl SysBus {
             }
             // APU ports $40-$7F.
             0x40..=0x7F => {
-                self.apu.accessed = true;
                 let port = reg & 3;
-                self.apu.write(port, value);
+                self.apu.cpu_write_port(port, value);
             }
             // WMDATA $80.
             0x80 => {
@@ -743,10 +785,11 @@ impl Bus for SysBus {
                     }
 
                     // $2140-$217F: APU ports (mirrors every 4).
+                    // Catch the APU up to the current timestamp before reading.
                     0x2140..=0x217F => {
                         let port = (off & 3) as u8;
-                        self.apu.accessed = true;
-                        let v = self.apu.read(port);
+                        self.apu_catch_up();
+                        let v = self.apu.cpu_read_port(port);
                         self.mdr = v;
                         v
                     }
@@ -978,10 +1021,11 @@ impl Bus for SysBus {
                     }
 
                     // $2140-$217F: APU ports.
+                    // Catch the APU up to the current timestamp before writing.
                     0x2140..=0x217F => {
                         let port = (off & 3) as u8;
-                        self.apu.accessed = true;
-                        self.apu.write(port, value);
+                        self.apu_catch_up();
+                        self.apu.cpu_write_port(port, value);
                     }
 
                     // $2180: WMDATA write.

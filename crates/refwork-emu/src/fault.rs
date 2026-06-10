@@ -19,6 +19,12 @@ pub enum Fault {
     HdmaDmaConflict { channels: u8 },
     /// Cartridge ROM/SRAM geometry violated at runtime.
     CartAccess { addr: u32 },
+    /// The SPC700 audio CPU executed a STOP instruction (opcode $FF).
+    /// This is a permanent halt requiring a hard reset.
+    ApuStopped { pc: u16 },
+    /// The SPC700 audio CPU wrote a nonzero value to the $F0 test register.
+    /// This is a test-ROM-only condition; the APU is halted.
+    ApuTestTrigger { value: u8, pc: u16 },
 }
 
 /// Per-frame diagnostic flags returned by `Core::run_one_frame`.
@@ -28,11 +34,6 @@ pub struct FrameFlags(pub u32);
 impl FrameFlags {
     /// The core is halted on a [`Fault`]; the frame was not (fully) emulated.
     pub const FAULTED: FrameFlags = FrameFlags(1 << 0);
-    /// The stub APU's ports were accessed this frame (M1 stub — flagged so
-    /// M2 acceptance can ban runs that relied on canned audio responses).
-    pub const APU_STUB_ACCESS: FrameFlags = FrameFlags(1 << 1);
-    /// The stub APU served a handshake-protocol transition this frame.
-    pub const APU_STUB_HANDSHAKE: FrameFlags = FrameFlags(1 << 2);
 
     /// Returns true if every flag in `other` is set in `self`.
     pub fn contains(self, other: FrameFlags) -> bool {

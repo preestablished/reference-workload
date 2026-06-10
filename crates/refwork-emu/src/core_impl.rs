@@ -156,6 +156,17 @@ impl Core {
                 break;
             }
 
+            // APU catch-up at end of scanline (b): advance the APU to the
+            // current master-clock boundary so it stays within one scanline
+            // of the CPU's time view. This is the second catch-up point;
+            // the first fires on every CPU access to $2140–$2143.
+            self.bus.apu_catch_up();
+
+            if self.bus.fault.is_some() {
+                faulted_early = true;
+                break;
+            }
+
             // Render visible scanlines.
             if (FIRST_VISIBLE_LINE..=LAST_VISIBLE_LINE).contains(&line) {
                 self.bus.ppu.render_scanline(line);
@@ -165,16 +176,6 @@ impl Core {
                 faulted_early = true;
                 break;
             }
-        }
-
-        // Harvest APU stub diagnostic flags.
-        if self.bus.apu.accessed {
-            self.bus.frame_flags.insert(FrameFlags::APU_STUB_ACCESS);
-            self.bus.apu.accessed = false;
-        }
-        if self.bus.apu.handshake_activity {
-            self.bus.frame_flags.insert(FrameFlags::APU_STUB_HANDSHAKE);
-            self.bus.apu.handshake_activity = false;
         }
 
         if faulted_early || self.bus.fault.is_some() {

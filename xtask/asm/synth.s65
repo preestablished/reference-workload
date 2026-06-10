@@ -25,6 +25,13 @@
 
 ; ─── Hardware register addresses ─────────────────────────────────────────────
 
+; APU I/O ports ($2140-$2143): CPU↔SPC700 bidirectional ports.
+; CPU writes to these to send data to the SPC700; reads to see what SPC sent.
+APUIO0   = $2140
+APUIO1   = $2141
+APUIO2   = $2142
+APUIO3   = $2143
+
 INIDISP  = $2100
 BGMODE   = $2105
 BG1SC    = $2107
@@ -79,6 +86,7 @@ DMA1SIZH = $4316
 ; WRAM direct-page addresses (D = $0000)
 FRAME_CTR  = $0010
 JOY_MIRROR = $0020
+APU_STATUS = $0050   ; last value seen on APUIO0 after SPC upload; hashed each frame
 WORK_BASE  = $1000
 WCHKSUM    = $10FE
 
@@ -379,6 +387,16 @@ init_src_done:
     LDA #$81        ; NMI enable + auto-joypad
     STA NMITIMEN
 
+    ; ── Upload SPC program via IPL protocol ──
+    ; The SPC700 powers on with its IPL ROM running, which presents $AA/$BB on
+    ; ports 0/1 as a ready signal.  We wait for that, then upload a small
+    ; program that keys on a BRR voice, polls ENDX, and echoes $CC back to
+    ; port 0 once the voice ends.  The result is stored to APU_STATUS each
+    ; frame so it folds into the WRAM frame hash.
+    .a8
+    SEP #$20
+    JSR apu_upload
+
     ; ── Initialize WRAM counters ──
     .a16
     REP #$20
@@ -596,6 +614,12 @@ cpu_chk_done:
 
     SEP #$20
     .a8
+
+    ; Read APU port 0 and store to WRAM (folds APU state into frame hash).
+    ; After the SPC upload this will be $CC once the BRR voice has ended.
+    LDA APUIO0
+    STA APU_STATUS
+
     RTS
 
 ; ─── NMI handler ─────────────────────────────────────────────────────────────
@@ -663,6 +687,171 @@ irq:
 ; ─── Infinite-loop trap for unused vectors ───────────────────────────────────
 trap:
     BRA trap
+
+; ─── APU upload: SPC700 program payload ──────────────────────────────────────
+;
+; Raw SPC700 machine code, 177 bytes, loaded at ARAM $0200 via the IPL
+; transfer protocol.
+;
+; The program:
+;   1. Configures DSP: DIR=$10 (sample table at ARAM $1000), voice 0
+;      VOL_L/R=$40, PITCH=$0400, SRCN=0, ADSR disabled, GAIN=$7F,
+;      MVOLL/MVOLR=$40.
+;   2. Writes a minimal BRR source entry and a 9-byte BRR block (end flag set,
+;      all-zero samples) at ARAM $1000-$100C.
+;   3. Keys on voice 0 (KON=$01), clears KON immediately.
+;   4. Polls ENDX ($7C) bit 0 until the voice has finished.
+;   5. Writes $CC to SPC port 0 ($F4) so the main CPU can observe it via
+;      APUIO0 ($2140).
+;   6. SLEEP.
+;
+; SPC700 instruction encoding (clean-room, from public SPC700 ISA reference):
+;   CD imm      MOV X, #imm           ($CD)
+;   CD imm      MOV X, #imm           ($CD)
+;   D8 dp       MOV dp, X             ($D8) — write X to dp (used for DSP addr in $F2)
+;   E8 imm      MOV A, #imm           ($E8)
+;   C4 dp       MOV dp, A             ($C4) — write A to dp (used for DSP data in $F3, port in $F4)
+;   8F imm,dp   MOV dp, #imm          ($8F)
+;   C7 dp       MOV (dp+X), A         ($C7) with X=0 → indirect through [dp:dp+1]
+;   AB dp       INC dp                ($AB)
+;   E4 dp       MOV A, dp             ($E4)
+;   28 imm      AND A, #imm           ($28)
+;   F0 rel      BEQ rel               ($F0)
+;   EF          SLEEP                 ($EF)
+;
+spc_prog_start:
+    ; -- Set DIR = $10 (sample directory at ARAM $1000) --
+    .db $CD,$5D, $D8,$F2, $E8,$10, $C4,$F3
+    ; -- Voice 0: VOL_L (reg $00) = $40 --
+    .db $CD,$00, $D8,$F2, $E8,$40, $C4,$F3
+    ; -- Voice 0: VOL_R (reg $01) = $40 --
+    .db $CD,$01, $D8,$F2, $E8,$40, $C4,$F3
+    ; -- Voice 0: PITCH_L (reg $02) = $00 --
+    .db $CD,$02, $D8,$F2, $E8,$00, $C4,$F3
+    ; -- Voice 0: PITCH_H (reg $03) = $04 (pitch = $0400) --
+    .db $CD,$03, $D8,$F2, $E8,$04, $C4,$F3
+    ; -- Voice 0: SRCN (reg $04) = $00 --
+    .db $CD,$04, $D8,$F2, $E8,$00, $C4,$F3
+    ; -- Voice 0: ADSR1 (reg $05) = $00 (ADSR disabled) --
+    .db $CD,$05, $D8,$F2, $E8,$00, $C4,$F3
+    ; -- Voice 0: GAIN (reg $07) = $7F (direct gain, max level) --
+    .db $CD,$07, $D8,$F2, $E8,$7F, $C4,$F3
+    ; -- MVOLL (reg $0C) = $40 --
+    .db $CD,$0C, $D8,$F2, $E8,$40, $C4,$F3
+    ; -- MVOLR (reg $1C) = $40 --
+    .db $CD,$1C, $D8,$F2, $E8,$40, $C4,$F3
+    ; -- Zero X so C7 indirect stores go through DP[$00:$01], not DP[$1C:$1D] --
+    .db $CD,$00
+    ; -- Set pointer $00/$01 = $1000 (direct page) --
+    .db $8F,$00,$00, $8F,$10,$01
+    ; -- Write sample directory entry at $1000-$1003: start=$1004, loop=$1004 --
+    .db $E8,$04, $C7,$00, $AB,$00  ; ARAM[$1000]=$04 (start lo), ptr=$1001
+    .db $E8,$10, $C7,$00, $AB,$00  ; ARAM[$1001]=$10 (start hi), ptr=$1002
+    .db $E8,$04, $C7,$00, $AB,$00  ; ARAM[$1002]=$04 (loop lo),  ptr=$1003
+    .db $E8,$10, $C7,$00, $AB,$00  ; ARAM[$1003]=$10 (loop hi),  ptr=$1004
+    ; -- Write BRR block header at $1004: end=1, loop=0, filter=0, shift=0 --
+    .db $E8,$01, $C7,$00, $AB,$00  ; ARAM[$1004]=$01, ptr=$1005
+    ; -- Write 8 zero sample bytes ($1005-$100C) --
+    .db $E8,$00
+    .db $C7,$00, $AB,$00  ; ARAM[$1005]=0, ptr=$1006
+    .db $C7,$00, $AB,$00  ; ARAM[$1006]=0, ptr=$1007
+    .db $C7,$00, $AB,$00  ; ARAM[$1007]=0, ptr=$1008
+    .db $C7,$00, $AB,$00  ; ARAM[$1008]=0, ptr=$1009
+    .db $C7,$00, $AB,$00  ; ARAM[$1009]=0, ptr=$100A
+    .db $C7,$00, $AB,$00  ; ARAM[$100A]=0, ptr=$100B
+    .db $C7,$00, $AB,$00  ; ARAM[$100B]=0, ptr=$100C
+    .db $C7,$00            ; ARAM[$100C]=0
+    ; -- KON (reg $4C) = $01: key on voice 0 --
+    .db $CD,$4C, $D8,$F2, $E8,$01, $C4,$F3
+    ; -- KON = $00: clear immediately to prevent re-trigger --
+    .db $E8,$00, $C4,$F3
+    ; -- Set DSP address to ENDX ($7C) for polling --
+    .db $CD,$7C, $D8,$F2
+    ; -- Poll ENDX bit 0: loop until set --
+    ;    poll_loop (offset 0 within these 6 bytes):
+    ;      E4 F3        MOV A, $F3       read ENDX via DSP data port
+    ;      28 01        AND A, #$01      isolate voice-0 end flag
+    ;      F0 FA        BEQ poll_loop    branch back -6 if not set yet
+    .db $E4,$F3, $28,$01, $F0,$FA
+    ; -- Signal done: write $CC to SPC output port 0 ($F4 → APUIO0) --
+    .db $E8,$CC, $C4,$F4
+    ; -- SLEEP: APU idles; port 0 stays $CC --
+    .db $EF
+spc_prog_end:
+
+; ─── APU upload subroutine ────────────────────────────────────────────────────
+;
+; Implements the host side of the IPL transfer protocol (publicly documented).
+;
+; Protocol:
+;   1. Wait for $AA on APUIO0, $BB on APUIO1 (APU power-on ready signature).
+;   2. Write load address $0200 to APUIO2/APUIO3.
+;   3. Write $CC to APUIO0 to start transfer; wait for APU to echo $CC back.
+;   4. Transfer loop: for each byte (index 1..177):
+;        write byte to APUIO1, write index to APUIO0, wait for echo on APUIO0.
+;   5. Kick: write strobe 0 to APUIO0.
+;        APU sees strobe 0 (out-of-band sentinel) → jumps to load address $0200.
+;
+; Registers on entry: 8-bit A, 16-bit X (as set in reset handler via REP #$30).
+; Registers on exit:  A, X clobbered.  Y preserved (not used).
+; DP scratch:         $40 (strobe counter).
+; Width state on exit: 8-bit A, 16-bit X (unchanged from entry).
+;
+apu_upload:
+    ; Ensure 8-bit A, 16-bit X for the upload subroutine.
+    ; The callers set these widths, but the assembler state at this point in
+    ; the source file may differ; directives here pin the encoding.
+    .a8
+    .i16
+    ; ── Wait for APU ready: $AA on port 0 ──
+au_wait_aa:
+    LDA APUIO0
+    CMP #$AA
+    BNE au_wait_aa
+    ; ── Wait for $BB on port 1 ──
+au_wait_bb:
+    LDA APUIO1
+    CMP #$BB
+    BNE au_wait_bb
+    ; ── Write load address $0200 (lo=$00, hi=$02) ──
+    LDA #$00
+    STA APUIO2
+    LDA #$02
+    STA APUIO3
+    ; ── Initiate transfer: write $CC to port 0 ──
+    LDA #$CC
+    STA APUIO0
+    ; ── Wait for APU to acknowledge with $CC on port 0 ──
+au_wait_ack:
+    LDA APUIO0
+    CMP #$CC
+    BNE au_wait_ack
+    ; ── Transfer loop: send 177 bytes with monotonically increasing strobes ──
+    ; $40 = strobe byte (1-based, starts at $01)
+    ; X   = byte index into spc_prog_start (0-based, 0..176)
+    LDA #$01
+    STA $40
+    LDX #$00
+au_xfer_loop:
+    CPX #$B1           ; 177 = $B1: all bytes sent?
+    BCS au_xfer_kick
+    LDA spc_prog_start,X    ; fetch payload byte from ROM
+    STA APUIO1              ; write data to port 1
+    LDA $40
+    STA APUIO0              ; write strobe to port 0
+au_xfer_wait:
+    CMP APUIO0         ; A = strobe; wait for APU to echo it
+    BNE au_xfer_wait
+    INX                ; advance byte index
+    INC $40            ; next strobe
+    JMP au_xfer_loop
+au_xfer_kick:
+    ; Kick: strobe 0 on port 0 signals APU to jump to load address $0200.
+    ; Strobe 0 is the out-of-band kick sentinel; normal transfer strobes are
+    ; 1-based, so 0 is unambiguous regardless of the port-1 data value.
+    LDA #$00
+    STA APUIO0      ; strobe 0 = kick signal
+    RTS
 
 ; ─── ROM header ──────────────────────────────────────────────────────────────
 ; LoROM: file_offset = cpu_addr - $8000.

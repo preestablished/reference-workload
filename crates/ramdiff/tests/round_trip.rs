@@ -11,11 +11,11 @@
 //!   After N frames: WRAM[0x0010] = N & 0xFF, WRAM[0x0011] = (N >> 8) & 0xFF.
 //!
 //! The test:
-//! 1. Records dump-a at frame 0 (no advance).
-//! 2. Records dump-b at frame 10 (10 NMI cycles → frame counter = 10).
+//! 1. Records dump-a after 2 frames (counter = 1).
+//! 2. Records dump-b after 12 frames (counter = 11).
 //! 3. Searches: changed between a and b.
-//! 4. Searches: increased (frame counter goes 0→10).
-//! 5. Searches: --value 10 --in b.
+//! 4. Searches: increased (frame counter goes 1→11).
+//! 5. Searches: --value 11 --in b.
 //! 6. Verifies offset 0x0010 survives.
 //! 7. Emits a feature entry to a scratch map; validates it passes.
 
@@ -124,24 +124,25 @@ fn round_trip_finds_frame_counter() {
     let session_tmp = TempDir::new("-session");
     let session_dir = session_tmp.path.clone();
 
-    // Dump-a: after 1 run_one_frame call — reset code has run, frame counter = 0.
-    // (Before any run_one_frame, WRAM is WRAM_INIT_BYTE = 0x55; reset code runs
-    // on the first run_one_frame and explicitly writes FRAME_CTR = 0x0000.)
-    let wram_a: Box<[u8; WRAM_SIZE]> = run_core_dump(&rom_path, 1);
-    // Dump-b: after 11 run_one_frame calls — NMI has fired 10 times → counter = 10.
-    let wram_b: Box<[u8; WRAM_SIZE]> = run_core_dump(&rom_path, 11);
+    // The reset handler spans the APU IPL upload and finishes during
+    // frame 1: FRAME_CTR is written to 0 mid-boot, then the NMI increments
+    // it once per completed frame, so counter == frames - 1 from frame 2 on.
+    // Dump-a: after 2 run_one_frame calls — counter = 1.
+    let wram_a: Box<[u8; WRAM_SIZE]> = run_core_dump(&rom_path, 2);
+    // Dump-b: after 12 run_one_frame calls — counter = 11.
+    let wram_b: Box<[u8; WRAM_SIZE]> = run_core_dump(&rom_path, 12);
 
     // Verify we captured the right frame counter values.
     let fc_a = (wram_a[0x0010] as u16) | ((wram_a[0x0011] as u16) << 8);
     let fc_b = (wram_b[0x0010] as u16) | ((wram_b[0x0011] as u16) << 8);
     assert_eq!(
-        fc_a, 0,
-        "frame counter after 1 frame should be 0, got {}",
+        fc_a, 1,
+        "frame counter after 2 frames should be 1, got {}",
         fc_a
     );
     assert_eq!(
-        fc_b, 10,
-        "frame counter after 11 frames should be 10, got {}",
+        fc_b, 11,
+        "frame counter after 12 frames should be 11, got {}",
         fc_b
     );
 
@@ -157,13 +158,13 @@ fn round_trip_finds_frame_counter() {
 
     session.add_dump(DumpMeta {
         label: "a".to_owned(),
-        frame: 0,
+        frame: 1,
         file: file_a.to_owned(),
         region: "wram".to_owned(),
     });
     session.add_dump(DumpMeta {
         label: "b".to_owned(),
-        frame: 10,
+        frame: 11,
         file: file_b.to_owned(),
         region: "wram".to_owned(),
     });
@@ -205,11 +206,11 @@ fn round_trip_finds_frame_counter() {
         s2.candidates.offsets.len()
     );
 
-    // Step 3: filter --value 10 --in b
+    // Step 3: filter --value 11 --in b
     run_search(
         &session_dir,
         &[FilterOp::ValueIn {
-            value: 10,
+            value: 11,
             label: "b".to_owned(),
         }],
     )
@@ -218,7 +219,7 @@ fn round_trip_finds_frame_counter() {
     let s3 = Session::load(&session_dir).unwrap();
     assert!(
         s3.candidates.offsets.contains(&FRAME_CTR_OFFSET),
-        "frame counter offset 0x{:04X} not in candidates after --value 10; total={}",
+        "frame counter offset 0x{:04X} not in candidates after --value 11; total={}",
         FRAME_CTR_OFFSET,
         s3.candidates.offsets.len()
     );

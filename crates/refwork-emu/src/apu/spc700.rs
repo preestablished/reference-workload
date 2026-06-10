@@ -80,6 +80,14 @@ pub struct Spc700 {
     /// When true, I/O register range $F0–$FF is treated as plain RAM (corpus
     /// mode). Production code leaves this false.
     pub corpus_mode: bool,
+    /// Bitmask of I/O registers written during the last `execute()` call.
+    ///
+    /// Bit `k` is set when the instruction wrote to ARAM address `$F0 + k`
+    /// (covering the full $F0–$FF I/O range).  Cleared at the start of every
+    /// `execute()` call.  Used by `Apu::step()` to detect port writes without
+    /// a value-comparison heuristic (which fails when the written value equals
+    /// the sync-in value).
+    pub io_written_mask: u16,
 }
 
 impl Default for Spc700 {
@@ -100,6 +108,7 @@ impl Spc700 {
             psw: 0x02, // Z set by convention; all others clear
             halted: None,
             corpus_mode: false,
+            io_written_mask: 0,
         }
     }
 
@@ -176,9 +185,15 @@ impl Spc700 {
     }
 
     /// Write one byte to ARAM (or I/O in corpus mode).
+    ///
+    /// Sets a bit in `io_written_mask` when the target address is in the
+    /// I/O range $F0–$FF so `Apu::step` can detect port writes precisely.
     #[inline]
-    pub fn write_mem(&self, mem: &mut [u8; 0x10000], addr: u16, value: u8) {
+    pub fn write_mem(&mut self, mem: &mut [u8; 0x10000], addr: u16, value: u8) {
         mem[addr as usize] = value;
+        if (0x00F0..=0x00FF).contains(&addr) {
+            self.io_written_mask |= 1u16 << (addr - 0x00F0);
+        }
     }
 
     // ---- program fetch ----
@@ -214,7 +229,7 @@ impl Spc700 {
     }
 
     #[inline]
-    fn dp_write(&self, mem: &mut [u8; 0x10000], offset: u8, value: u8) {
+    fn dp_write(&mut self, mem: &mut [u8; 0x10000], offset: u8, value: u8) {
         self.write_mem(mem, self.dp_addr(offset), value);
     }
 
@@ -230,7 +245,7 @@ impl Spc700 {
     /// hi at offset+1; wraps within the page).
     #[allow(dead_code)]
     #[inline]
-    fn dp_write16(&self, mem: &mut [u8; 0x10000], offset: u8, value: u16) {
+    fn dp_write16(&mut self, mem: &mut [u8; 0x10000], offset: u8, value: u16) {
         self.dp_write(mem, offset, value as u8);
         self.dp_write(mem, offset.wrapping_add(1), (value >> 8) as u8);
     }
@@ -248,7 +263,7 @@ impl Spc700 {
     /// Write a 16-bit LE absolute word (no page-wrap).
     #[allow(dead_code)]
     #[inline]
-    fn abs_write16(&self, mem: &mut [u8; 0x10000], addr: u16, value: u16) {
+    fn abs_write16(&mut self, mem: &mut [u8; 0x10000], addr: u16, value: u16) {
         self.write_mem(mem, addr, value as u8);
         self.write_mem(mem, addr.wrapping_add(1), (value >> 8) as u8);
     }
@@ -270,7 +285,7 @@ impl Spc700 {
 
     /// Write a 16-bit LE word to a direct-page address with DP page wrapping.
     #[inline]
-    fn dp_abs_write16(&self, mem: &mut [u8; 0x10000], ea: u16, value: u16) {
+    fn dp_abs_write16(&mut self, mem: &mut [u8; 0x10000], ea: u16, value: u16) {
         self.write_mem(mem, ea, value as u8);
         let hi_addr = (ea & 0xFF00) | ((ea.wrapping_add(1)) & 0x00FF);
         self.write_mem(mem, hi_addr, (value >> 8) as u8);
@@ -629,7 +644,7 @@ impl Spc700 {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn execute(&mut self, mem: &mut [u8; 0x10000], opcode: u8) -> u32 {
+    pub fn execute(&mut self, mem: &mut [u8; 0x10000], opcode: u8) -> u32 {
         match opcode {
             // ---- NOP ----
             0x00 => 2, // NOP
