@@ -217,12 +217,33 @@ fn collect_rs_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Run the deny gate on the two target crate source directories.
+/// Scan every `.rs` file under `root`, returning all findings. Public so the
+/// deny self-test (`xtask/tests/deny_selftest.rs`) can run the gate against a
+/// planted-token tree, continuously demonstrating the failure mode the M0
+/// acceptance clause requires.
+pub fn scan_tree(root: &Path) -> Vec<Finding> {
+    let mut all: Vec<Finding> = Vec::new();
+    let files = collect_rs_files(root);
+    for file in &files {
+        match scan_file(file) {
+            Ok(findings) => all.extend(findings),
+            Err(e) => {
+                eprintln!("deny: cannot read {}: {}", file.display(), e);
+            }
+        }
+    }
+    all
+}
+
+/// Run the deny gate on the guest-linked crate source directories
+/// (`refwork-emu`, `refwork-harness`, and `refwork-protocol` — the protocol
+/// crate compiles into the guest harness binary and inherits D1-D4).
 /// Returns `Ok(())` on clean, `Err(count)` with findings printed to stderr.
 pub fn run_deny(workspace_root: &Path) -> Result<(), usize> {
     let dirs = [
         workspace_root.join("crates/refwork-emu/src"),
         workspace_root.join("crates/refwork-harness/src"),
+        workspace_root.join("crates/refwork-protocol/src"),
     ];
 
     let mut all_findings: Vec<Finding> = Vec::new();
@@ -232,15 +253,7 @@ pub fn run_deny(workspace_root: &Path) -> Result<(), usize> {
             eprintln!("deny: directory not found: {}", dir.display());
             continue;
         }
-        let files = collect_rs_files(dir);
-        for file in &files {
-            match scan_file(file) {
-                Ok(findings) => all_findings.extend(findings),
-                Err(e) => {
-                    eprintln!("deny: cannot read {}: {}", file.display(), e);
-                }
-            }
-        }
+        all_findings.extend(scan_tree(dir));
     }
 
     if all_findings.is_empty() {

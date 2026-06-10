@@ -1,0 +1,19 @@
+# Fixture 14 SCORING: stage when on warp_progress (not in map). Violates x/feature-exists.
+schema_version: 1
+kind: scoring-program
+meta:
+  name: demo-game
+  feature_map: demo-game
+  version: 1
+stages:
+  monotone: true
+  list:
+    - name: warp_done
+      points: 500
+      when: { feature: warp_progress, op: eq, value: 1 }   # not in map — x/feature-exists
+    - name: reached_credits
+      points: 2000
+      when: { feature: credits_flag, op: ne, value: 0 }
+goal:
+  name: credits_reached
+  predicate: { feature: credits_flag, op: ne, value: 0 }

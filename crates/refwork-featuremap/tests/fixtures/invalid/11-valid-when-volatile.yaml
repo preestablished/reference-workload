@@ -1,0 +1,58 @@
+# Fixture 11: valid_when references player_x (volatile). Violates §1.2 guard rule.
+schema_version: 1
+kind: feature-map
+meta:
+  name: demo-game
+  workload: refwork-demo
+  game_revision: "operator-set"
+  version: 1
+regions:
+  - { name: wram, size: 131072 }
+features:
+  - name: room_id
+    region: wram
+    offset: 0x079B
+    type: u16le
+    semantics: room_id
+    stability: stable
+    discretize: { kind: identity }
+
+  - name: player_x
+    region: wram
+    offset: 0x0AF6
+    type: u16le
+    semantics: position_x
+    stability: volatile            # volatile — cannot be used in valid_when
+    discretize: { kind: none }
+
+  - name: player_y
+    region: wram
+    offset: 0x0AFA
+    type: u16le
+    semantics: position_y
+    stability: volatile
+    discretize: { kind: none }
+
+  - name: health
+    region: wram
+    offset: 0x09C2
+    type: u16le
+    semantics: health
+    stability: stable
+    valid_when: { feature: player_x, op: ne, value: 0 }   # player_x is volatile
+
+  - name: game_mode
+    region: wram
+    offset: 0x0998
+    type: u8
+    semantics: mode
+    stability: stable
+    discretize: { kind: identity }
+
+  - name: credits_flag
+    region: wram
+    offset: 0x09DA
+    type: u8
+    semantics: progress_flag
+    stability: stable
+    discretize: { kind: identity }
