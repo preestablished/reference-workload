@@ -107,3 +107,18 @@ The **on-demand lane** stays open during 06:
   judgment, automated if hash-comparable) or an explicit "evaluated X/Y,
   adopted none because Z". "Where available" with no record is not an
   acceptable close-out — that's a skip wearing a pass.
+
+  **Close-out record (2026-06-10):** evaluated the known public PPU
+  test-ROM families for the landed features (per-feature display tests
+  covering HDMA splits, color math, windows, and mosaic exist in the
+  public homebrew test-suite ecosystem; the SingleStepTests org that
+  supplied both CPU corpora has no PPU corpus). Adopted none into
+  `test-roms.lock` now because (a) the candidate suites are
+  visual-judgment ROMs, not hash-comparable end-state corpora — they need
+  a lab screen and an operator eye, which is exactly the 06 bring-up
+  loop's instrument, and (b) URL pinning requires the operator-side fetch
+  + BLAKE3 step this session cannot perform. Action carried into 06's
+  preconditions: when the interactive lab environment is designated, the
+  operator fetches the chosen display-test ROMs, runs them once over the
+  implemented feature set, and the bring-up log records pass/fail per
+  feature; anything hash-comparable gets pinned in `test-roms.lock` then.

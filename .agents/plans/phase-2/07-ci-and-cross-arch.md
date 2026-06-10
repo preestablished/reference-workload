@@ -27,6 +27,10 @@ are lab-runner jobs outside this repo's CI.
      self-hosted runner; last resort: `cross`/QEMU-user emulation (slow but
      deterministic — acceptable for nightly). Decide by trying them in that
      order; record the choice in this file when made.
+     **2026-06-10: rung 1 (`ubuntu-24.04-arm`) wired into ci.yaml/nightly.yaml
+     as a matrix leg + compare job; verdict pending the first push. If the
+     arm leg fails to schedule (private-repo limitation), fall back to the
+     Spark as a self-hosted runner and update this record.**
    - **CI ≠ the lab evidence run.** This job covers the *synthetic ROM*
      only. The M2 acceptance run (demo game, 100k frames, real aarch64
      hardware) happens on the provisioned Spark per 06's preconditions —

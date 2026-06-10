@@ -239,6 +239,11 @@ pub fn scan_tree(root: &Path) -> Vec<Finding> {
 /// (`refwork-emu`, `refwork-harness`, and `refwork-protocol` — the protocol
 /// crate compiles into the guest harness binary and inherits D1-D4).
 /// Returns `Ok(())` on clean, `Err(count)` with findings printed to stderr.
+///
+/// Host-side CLIs (`ramdiff`, `refwork-verify`, `refwork-hash`) are
+/// deliberately OUTSIDE this scope — they may legitimately use floats,
+/// sleeps, etc. `refwork-script` joins the scope only if `refwork-harness`
+/// ever grows a dependency on it (plan phase-2/07 item 4).
 pub fn run_deny(workspace_root: &Path) -> Result<(), usize> {
     let dirs = [
         workspace_root.join("crates/refwork-emu/src"),

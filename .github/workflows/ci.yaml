@@ -5,9 +5,18 @@ on:
 jobs:
   rust:
     strategy:
+      # aarch64 leg (plan phase-2/07 item 3): GitHub-hosted arm64 runner —
+      # rung 1 of the decision ladder (hosted arm → self-hosted Spark →
+      # QEMU). Historically free for public repos only; if this leg fails
+      # to schedule, fall back per the plan and record the change there.
       matrix:
-        runner: [ubuntu-latest]
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
+    outputs:
+      # Per-arch chained hashes for the cross-arch compare job. Each matrix
+      # leg writes only its own key (empty values do not overwrite).
+      hash_x86_64: ${{ steps.hash.outputs.hash_x86_64 }}
+      hash_aarch64: ${{ steps.hash.outputs.hash_aarch64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,3 +58,31 @@ jobs:
         working-directory: repo
       - run: cargo test --release --locked -p xtask --test zero_alloc
         working-directory: repo
+      # M2 cross-arch probe (plan phase-2/07 item 3): per-PR 10k-frame
+      # chained hash, exported per-arch and diffed by the cross-arch job.
+      # Nightly runs the same compare at 100k frames.
+      - id: hash
+        run: |
+          out=$(cargo run --locked --release -p xtask -- hash-chain --frames 10000)
+          echo "$out"
+          arch=$(echo "$out" | sed -E 's/.*arch=([^ ]+).*/\1/')
+          chain=$(echo "$out" | sed -E 's/.*chain=([0-9a-f]+).*/\1/')
+          echo "hash_${arch}=${chain}" >> "$GITHUB_OUTPUT"
+        working-directory: repo
+  # Cross-arch determinism gate: the synthetic-ROM chained hash must be
+  # bit-identical on x86_64 and aarch64 (catches latent float/UB issues —
+  # IMPLEMENTATION-PLAN.md M2). CI covers the synthetic ROM only; the M2
+  # evidence run (demo game, real aarch64 hardware) is a lab job.
+  cross-arch:
+    needs: rust
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          x="${{ needs.rust.outputs.hash_x86_64 }}"
+          a="${{ needs.rust.outputs.hash_aarch64 }}"
+          echo "x86_64:  $x"
+          echo "aarch64: $a"
+          test -n "$x" || { echo "missing x86_64 hash"; exit 1; }
+          test -n "$a" || { echo "missing aarch64 hash"; exit 1; }
+          test "$x" = "$a" || { echo "CROSS-ARCH HASH MISMATCH"; exit 1; }
+          echo "cross-arch chained hashes identical"
