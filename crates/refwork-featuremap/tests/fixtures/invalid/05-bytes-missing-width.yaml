@@ -1,0 +1,41 @@
+# Fixture 05: type: bytes feature without width. Violates §1.2 width rule.
+schema_version: 1
+kind: feature-map
+meta:
+  name: demo-game
+  workload: refwork-demo
+  game_revision: "operator-set"
+  version: 1
+regions:
+  - { name: wram, size: 131072 }
+features:
+  - name: room_id
+    region: wram
+    offset: 0x079B
+    type: u16le
+    semantics: room_id
+    stability: stable
+    discretize: { kind: identity }
+
+  - name: raw_block
+    region: wram
+    offset: 0x1000
+    type: bytes          # width is required for bytes but omitted here
+    semantics: opaque
+    stability: stable
+
+  - name: game_mode
+    region: wram
+    offset: 0x0998
+    type: u8
+    semantics: mode
+    stability: stable
+    discretize: { kind: identity }
+
+  - name: credits_flag
+    region: wram
+    offset: 0x09DA
+    type: u8
+    semantics: progress_flag
+    stability: stable
+    discretize: { kind: identity }

@@ -1,0 +1,59 @@
+# PLACEHOLDER FILE — this scoring program references features declared in
+# feature-maps/demo-game.yaml, which uses placeholder offsets (API.md §1.4/§2.1).
+# Real feature addresses must be validated by the operator before use in production.
+schema_version: 1
+kind: scoring-program
+meta:
+  name: demo-game
+  feature_map: demo-game        # meta.name of the §1 map; versions resolved by registry
+  version: 1
+
+stages:                          # ordered; points are cumulative when `monotone: true`
+  monotone: true                 # a state's stage-score = sum of points of all stages
+  list:                          #   whose predicate holds (stages are independent
+                                 #   predicates, not a strict ladder — sequence-skips
+                                 #   the search discovers still score)
+    - name: left_start_area
+      points: 100
+      when: { feature: area_id, op: ne, value: 0 }
+
+    - name: first_upgrade
+      points: 200
+      when: { feature: upgrade_flags, op: bit_set, bit: 0 }
+
+    - name: first_boss
+      points: 400
+      when: { feature: boss_flags, op: bit_set, bit: 0 }
+
+    - name: second_boss
+      points: 400
+      when: { feature: boss_flags, op: bit_set, bit: 1 }
+
+    - name: third_boss
+      points: 400
+      when: { feature: boss_flags, op: bit_set, bit: 2 }
+
+    - name: final_boss
+      points: 800
+      when: { feature: boss_flags, op: bit_set, bit: 3 }
+
+    - name: credits
+      points: 2000
+      when: { feature: credits_flag, op: ne, value: 0 }
+
+shaping:                         # optional, small, never dominates stages
+  - name: upgrades_collected
+    weight: 10                   # score += weight * popcount(upgrade_flags)
+    expr: { feature: upgrade_flags, reduce: popcount }
+  - name: rooms_are_novelty_not_score   # documentation entry style: comments allowed,
+    weight: 0                          # novelty handled by scorer via discretize hints
+    expr: { feature: room_id, reduce: identity }
+
+penalties:
+  - name: dead
+    when: { all: [ { feature: game_mode, op: eq, value: 0x19 } ] }   # death state
+    action: prune                # scorer verdict: orchestrator should not expand
+
+goal:
+  name: credits_reached
+  predicate: { feature: credits_flag, op: ne, value: 0 }

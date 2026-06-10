@@ -1,0 +1,16 @@
+# Fixture 13 SCORING: goal predicate references raw_block (bytes). Violates §1.3/4.
+schema_version: 1
+kind: scoring-program
+meta:
+  name: demo-game
+  feature_map: demo-game
+  version: 1
+stages:
+  monotone: true
+  list:
+    - name: reached_credits
+      points: 2000
+      when: { feature: credits_flag, op: ne, value: 0 }
+goal:
+  name: raw_goal
+  predicate: { feature: raw_block, op: ne, value: 0 }   # bytes feature — §1.3/4

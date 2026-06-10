@@ -1,0 +1,18 @@
+{
+  "01-offset-out-of-bounds.yaml": { "rule": "1.3/1" },
+  "02-duplicate-name.yaml": { "rule": "1.3/1" },
+  "03-undeclared-region.yaml": { "rule": "1.3/1" },
+  "04-bitflags-bad-discretize.yaml": { "rule": "1.3/2" },
+  "05-bytes-missing-width.yaml": { "rule": "1.2/width" },
+  "06-width-mismatch.yaml": { "rule": "1.2/width-mismatch" },
+  "07-grid-x-not-scalar.yaml": { "rule": "1.3/7" },
+  "08-grid-room-volatile.yaml": { "rule": "1.3/7" },
+  "09-grid-double-count.yaml": { "rule": "1.3/7" },
+  "10-bad-schema-version.yaml": { "rule": "preamble/version" },
+  "11-valid-when-volatile.yaml": { "rule": "1.2/guard" },
+  "12-scoring-volatile-in-predicate.yaml": { "rule": "2/stable-only", "scoring": "12-scoring-volatile-in-predicate.scoring.yaml" },
+  "13-scoring-bytes-in-predicate.yaml": { "rule": "1.3/4", "scoring": "13-scoring-bytes-in-predicate.scoring.yaml" },
+  "14-scoring-unknown-feature.yaml": { "rule": "x/feature-exists", "scoring": "14-scoring-unknown-feature.scoring.yaml" },
+  "15-scoring-bit-out-of-range.yaml": { "rule": "x/bit-width", "scoring": "15-scoring-bit-out-of-range.scoring.yaml" },
+  "16-scoring-bitop-on-non-bitflags.yaml": { "rule": "x/bitop-target", "scoring": "16-scoring-bitop-on-non-bitflags.scoring.yaml" }
+}

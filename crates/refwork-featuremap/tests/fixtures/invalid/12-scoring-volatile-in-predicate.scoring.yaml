@@ -1,0 +1,19 @@
+# Fixture 12 SCORING: stage references player_x (volatile). Violates §1.3/3.
+schema_version: 1
+kind: scoring-program
+meta:
+  name: demo-game
+  feature_map: demo-game
+  version: 1
+stages:
+  monotone: true
+  list:
+    - name: moved_right
+      points: 100
+      when: { feature: player_x, op: gt, value: 0 }   # player_x is volatile — §1.3/3
+    - name: reached_credits
+      points: 2000
+      when: { feature: credits_flag, op: ne, value: 0 }
+goal:
+  name: credits_reached
+  predicate: { feature: credits_flag, op: ne, value: 0 }

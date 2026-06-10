@@ -17,9 +17,35 @@ jobs:
           repository: ${{ github.repository_owner }}/control-plane
           path: control-plane
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
         working-directory: repo
-      - run: cargo build --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: repo
-      - run: cargo test --workspace
+      # Determinism deny-gate (ARCHITECTURE.md §1 D1-D4): bans thread/clock/
+      # rand/float/HashMap tokens from the core and harness crates.
+      - run: cargo run -p xtask -- deny
+        working-directory: repo
+      - run: cargo build --workspace --locked
+        working-directory: repo
+      - run: cargo test --workspace --locked
+        working-directory: repo
+      # M0 gate: the platform-canonical demo artifacts must validate
+      # (IMPLEMENTATION-PLAN.md M0 acceptance).
+      - run: cargo run --locked -p refwork-featuremap -- validate feature-maps/demo-game.yaml --scoring scoring/demo-game.yaml
+        working-directory: repo
+      # Schema-drift gate: the committed JSON Schema must match the types.
+      # Regenerate with:
+      #   cargo run -p refwork-featuremap -- schema > schema/feature-map.schema.json
+      - run: |
+          cargo run --locked -p refwork-featuremap -- schema > /tmp/feature-map.schema.json
+          diff -u schema/feature-map.schema.json /tmp/feature-map.schema.json
+        working-directory: repo
+      # M1 acceptance gates (IMPLEMENTATION-PLAN.md M1), release mode:
+      # synthetic-ROM 10,000-frame double-run with identical frame hashes,
+      # and the zero-allocations-per-frame counting-allocator check.
+      - run: cargo test --release --locked -p xtask --test determinism -- --include-ignored
+        working-directory: repo
+      - run: cargo test --release --locked -p xtask --test zero_alloc
         working-directory: repo

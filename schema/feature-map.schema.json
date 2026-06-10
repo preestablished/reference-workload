@@ -1,0 +1,361 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FeatureMap",
+  "description": "Top-level feature-map document (API.md §1.1).",
+  "type": "object",
+  "required": [
+    "features",
+    "kind",
+    "meta",
+    "regions",
+    "schema_version"
+  ],
+  "properties": {
+    "features": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Feature"
+      }
+    },
+    "kind": {
+      "type": "string"
+    },
+    "meta": {
+      "$ref": "#/definitions/FeatureMapMeta"
+    },
+    "regions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RegionDecl"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "CompareOp": {
+      "description": "Comparison operator for leaf predicates (equality/ordering operations).",
+      "type": "string",
+      "enum": [
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge"
+      ]
+    },
+    "Discretize": {
+      "description": "Discretization hint (API.md §1.2).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "identity"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "size"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "bucket"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "bits"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "edges",
+            "kind"
+          ],
+          "properties": {
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "threshold"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "cell_h",
+            "cell_w",
+            "kind",
+            "room",
+            "x",
+            "y"
+          ],
+          "properties": {
+            "cell_h": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "cell_w": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "grid"
+              ]
+            },
+            "room": {
+              "type": "string"
+            },
+            "x": {
+              "type": "string"
+            },
+            "y": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Feature": {
+      "description": "A feature entry (API.md §1.2).\n\nFeature-name pattern: `^[a-z][a-z0-9_]{0,63}$` — the strict intersection of refwork §1.2 `[a-z0-9_]+` and state-scorer §3/§4 `^[a-z][a-z0-9_]*$` + 64-char cap.",
+      "type": "object",
+      "required": [
+        "name",
+        "offset",
+        "region",
+        "semantics",
+        "stability",
+        "type"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discretize": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Discretize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "$ref": "#/definitions/IntOrHex"
+        },
+        "region": {
+          "type": "string"
+        },
+        "semantics": {
+          "$ref": "#/definitions/Semantics"
+        },
+        "stability": {
+          "$ref": "#/definitions/Stability"
+        },
+        "type": {
+          "$ref": "#/definitions/FeatureType"
+        },
+        "valid_when": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ValidWhen"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "FeatureMapMeta": {
+      "type": "object",
+      "required": [
+        "game_revision",
+        "name",
+        "version",
+        "workload"
+      ],
+      "properties": {
+        "authors": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "game_revision": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "workload": {
+          "type": "string"
+        }
+      }
+    },
+    "FeatureType": {
+      "description": "Feature data type (API.md §1.2). Endianness is explicit — no platform default (rule 6).",
+      "type": "string",
+      "enum": [
+        "u8",
+        "u16le",
+        "u16be",
+        "u32le",
+        "u32be",
+        "i8",
+        "i16le",
+        "i16be",
+        "i32le",
+        "i32be",
+        "bitflags8",
+        "bitflags16le",
+        "bitflags32le",
+        "bcd8",
+        "bcd16le",
+        "bytes"
+      ]
+    },
+    "IntOrHex": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "pattern": "^0[xX][0-9a-fA-F]+$"
+        }
+      ]
+    },
+    "RegionDecl": {
+      "type": "object",
+      "required": [
+        "name",
+        "size"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Semantics": {
+      "description": "Open enum: counter | position_x | position_y | room_id | health              | resource | flags | mode | progress_flag | timer | opaque;              unknown values are treated as `opaque`.",
+      "type": "string"
+    },
+    "Stability": {
+      "description": "Feature stability.",
+      "type": "string",
+      "enum": [
+        "stable",
+        "volatile"
+      ]
+    },
+    "ValidWhen": {
+      "description": "`valid_when` guard (API.md §1.2).",
+      "type": "object",
+      "required": [
+        "feature",
+        "op",
+        "value"
+      ],
+      "properties": {
+        "feature": {
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/definitions/CompareOp"
+        },
+        "value": {
+          "$ref": "#/definitions/IntOrHex"
+        }
+      }
+    }
+  }
+}

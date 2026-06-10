@@ -3,3 +3,10 @@ name = "refwork-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+
+[dev-dependencies]
+# no additional dev deps needed

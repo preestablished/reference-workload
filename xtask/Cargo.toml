@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Developer tooling: build-rom, deny, fetch-test-roms, cpu-tests"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+refwork-emu = { path = "../crates/refwork-emu", features = ["introspect"] }
+
+[dev-dependencies]
+blake3 = "1"

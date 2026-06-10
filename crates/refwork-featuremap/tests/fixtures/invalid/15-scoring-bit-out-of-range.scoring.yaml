@@ -1,0 +1,20 @@
+# Fixture 15 SCORING: bit_set with bit: 9 on boss_flags (bitflags8, max bit 7).
+# Violates x/bit-width.
+schema_version: 1
+kind: scoring-program
+meta:
+  name: demo-game
+  feature_map: demo-game
+  version: 1
+stages:
+  monotone: true
+  list:
+    - name: mystery_bit
+      points: 100
+      when: { feature: boss_flags, op: bit_set, bit: 9 }   # bit 9 > max 7 — x/bit-width
+    - name: reached_credits
+      points: 2000
+      when: { feature: credits_flag, op: ne, value: 0 }
+goal:
+  name: credits_reached
+  predicate: { feature: credits_flag, op: ne, value: 0 }

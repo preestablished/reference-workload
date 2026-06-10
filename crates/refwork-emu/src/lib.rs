@@ -1,0 +1,55 @@
+//! `refwork-emu` — deterministic 16-bit-console emulator core.
+//!
+//! Implements the emulator determinism contract (reference-workload
+//! ARCHITECTURE.md §1, rules D1–D9):
+//!
+//! - **D1** single-threaded: no threads, no async, anywhere in this crate.
+//! - **D2** zero wall-clock reads: no `Instant`, `SystemTime`, sleeps.
+//! - **D3** no RNG: uninitialized-RAM contents are a fixed documented
+//!   pattern ([`WRAM_INIT_BYTE`]); open bus returns the last bus value.
+//! - **D4** no floats: no `f32`/`f64` tokens in this crate (CI-enforced).
+//! - **D5** all state in plain memory: every byte of emulator state lives in
+//!   ordinary struct fields / owned buffers.
+//! - **D8** allocation-stable: everything is allocated in [`Core::new`];
+//!   zero allocations per frame thereafter (CI-enforced with a counting
+//!   allocator).
+//! - **D9** fail loudly: any contract-relevant anomaly is a [`Fault`] and a
+//!   halt, never a silent fallback.
+//!
+//! The crate has exactly one production consumer shape: construct a
+//! [`Core`] with a [`Cartridge`] and externally-owned [`RegionBuffers`],
+//! then drive `run_one_frame(pad)` / `blit_completed_frame(..)` from the
+//! harness frame loop (ARCHITECTURE.md §3).
+
+#![forbid(unsafe_code)]
+
+mod apu;
+mod bus;
+pub mod cart;
+mod core_impl;
+mod cpu;
+mod dma;
+mod fault;
+mod joypad;
+mod ppu;
+mod timing;
+
+pub use cart::Cartridge;
+pub use core_impl::{Core, CoreError, RegionBuffers};
+pub use fault::{Fault, FrameFlags};
+pub use timing::{FB_BYTES, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
+
+/// Fixed WRAM power-on fill pattern (D3): two boots are byte-identical.
+pub const WRAM_INIT_BYTE: u8 = 0x55;
+
+/// Emulator core version string, published in the `meta` region by the
+/// harness (API.md §3.6) and recorded in determinism reports.
+pub const EMU_VERSION: &str = "refwork-emu 0.1.0";
+
+// Test-only exports for the single-step CPU test runner (`xtask cpu-tests`)
+// and golden-trace tooling. Never part of the guest build.
+#[cfg(feature = "introspect")]
+pub mod introspect {
+    pub use crate::bus::Bus;
+    pub use crate::cpu::Cpu;
+}
