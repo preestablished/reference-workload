@@ -63,11 +63,21 @@ fault-burn-down or heisenbug-chasing? / projected first-room date.
 
 _(dated entries; newest last)_
 
-- **2026-06-10** — M2 kickoff. Repo-side engine packages landed on
-  `phase-2/m2-impl`: 01 (SPC700 core, corpus 256,000/256,000), 03 (PPU
-  raster core lane + modes 3/7), 04 (`ramdiff`), 05 (`refwork-script`,
-  `refwork-hash`, `refwork-verify`), 02 in progress. No operator-ROM work
-  yet; the gate clock has NOT started.
+- **2026-06-10** — M2 kickoff. ALL repo-side engine packages landed on
+  `phase-2/m2-impl`: 01 (SPC700 core, corpus 256,000/256,000), 02 (DSP +
+  integration, ApuStub retired; bring-up against the real IPL fixed a
+  power-on DSP echo-write ARAM corruption, an IPL opcode-encoding bug,
+  and a kick-protocol collision), 03 (PPU raster core lane + modes 3/7 +
+  synthetic-ROM segments), 04 (`ramdiff`), 05 (`refwork-script`,
+  `refwork-hash`, `refwork-verify`), 07 (CI: per-PR aarch64 +
+  cross-arch hash compare, nightly corpora + 100k + negative
+  determinism). Dual-Opus review pass applied (Apu I/O sync model made
+  mask-exact, ENDX write-clear, color-math halving order, map-check
+  by_frame semantics, artifact-based CI compare). All gates green at
+  push: both corpora 100%, 10k double-run, zero-alloc, deny, clippy,
+  fmt. No operator-ROM work yet; the gate clock has NOT started — the
+  next M2 step is the 06 preconditions (Spark provisioning, interactive
+  environment), which are operator/lab-side.
 
 ## Provenance block (filled by the final M2 evidence run)
 
