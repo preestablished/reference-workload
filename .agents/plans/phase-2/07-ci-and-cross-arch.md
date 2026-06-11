@@ -28,9 +28,12 @@ are lab-runner jobs outside this repo's CI.
      deterministic — acceptable for nightly). Decide by trying them in that
      order; record the choice in this file when made.
      **2026-06-10: rung 1 (`ubuntu-24.04-arm`) wired into ci.yaml/nightly.yaml
-     as a matrix leg + compare job; verdict pending the first push. If the
-     arm leg fails to schedule (private-repo limitation), fall back to the
-     Spark as a self-hosted runner and update this record.**
+     as a matrix leg + artifact-based compare job. DECIDED 2026-06-10 on the
+     first push (PR #2): the hosted arm runner schedules and passes for this
+     repo — arm leg ~14 min, x86 leg ~11 min, cross-arch hash compare PASS
+     (first cross-architecture determinism evidence for the M2 core). Rung 1
+     adopted; the Spark remains lab-only for the 06 evidence run, as the plan
+     requires.**
    - **CI ≠ the lab evidence run.** This job covers the *synthetic ROM*
      only. The M2 acceptance run (demo game, 100k frames, real aarch64
      hardware) happens on the provisioned Spark per 06's preconditions —
