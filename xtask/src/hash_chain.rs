@@ -22,6 +22,9 @@ pub fn pad(frame: usize) -> u16 {
 
 /// Run `frames` frames and return the final chained hash.
 pub fn run_hash_chain(frames: usize) -> Result<[u8; 32], String> {
+    // Single-sourced: `build_synth_rom` is the same function `build-rom`
+    // writes to disk, so this probe and the built artifact are
+    // byte-identical by construction.
     let rom = crate::build_synth_rom();
     let cart = Cartridge::from_rom(rom, None).map_err(|e| format!("bad synth ROM: {:?}", e))?;
     let wram: &'static mut [u8; 0x20000] = Box::leak(Box::new([WRAM_INIT_BYTE; 0x20000]));

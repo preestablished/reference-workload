@@ -88,6 +88,9 @@ pub struct Spc700 {
     /// a value-comparison heuristic (which fails when the written value equals
     /// the sync-in value).
     pub io_written_mask: u16,
+    /// Bitmask of I/O-range reads ($F0–$FF) performed by the last
+    /// instruction; bit N = address $F0+N. Cleared by `Apu::step`.
+    pub io_read_mask: u16,
 }
 
 impl Default for Spc700 {
@@ -109,6 +112,7 @@ impl Spc700 {
             halted: None,
             corpus_mode: false,
             io_written_mask: 0,
+            io_read_mask: 0,
         }
     }
 
@@ -179,8 +183,15 @@ impl Spc700 {
 impl Spc700 {
     /// Read one byte from ARAM (or I/O overlay if !corpus_mode).
     /// In corpus mode: plain flat read.
+    ///
+    /// Sets a bit in `io_read_mask` when the address is in the I/O range
+    /// $F0–$FF so `Apu::step` can model read side effects (timer output
+    /// clear-on-read) precisely.
     #[inline]
-    pub fn read_mem(&self, mem: &[u8; 0x10000], addr: u16) -> u8 {
+    pub fn read_mem(&mut self, mem: &[u8; 0x10000], addr: u16) -> u8 {
+        if (0x00F0..=0x00FF).contains(&addr) {
+            self.io_read_mask |= 1u16 << (addr - 0x00F0);
+        }
         mem[addr as usize]
     }
 
@@ -224,7 +235,7 @@ impl Spc700 {
     // ---- direct-page read/write helpers ----
 
     #[inline]
-    fn dp_read(&self, mem: &[u8; 0x10000], offset: u8) -> u8 {
+    fn dp_read(&mut self, mem: &[u8; 0x10000], offset: u8) -> u8 {
         self.read_mem(mem, self.dp_addr(offset))
     }
 
@@ -235,7 +246,7 @@ impl Spc700 {
 
     /// Read a 16-bit little-endian word from the direct page.
     #[inline]
-    fn dp_read16(&self, mem: &[u8; 0x10000], offset: u8) -> u16 {
+    fn dp_read16(&mut self, mem: &[u8; 0x10000], offset: u8) -> u16 {
         let lo = self.dp_read(mem, offset) as u16;
         let hi = self.dp_read(mem, offset.wrapping_add(1)) as u16;
         lo | (hi << 8)
@@ -254,7 +265,7 @@ impl Spc700 {
     /// addresses that may legitimately cross pages).
     #[allow(dead_code)]
     #[inline]
-    fn abs_read16(&self, mem: &[u8; 0x10000], addr: u16) -> u16 {
+    fn abs_read16(&mut self, mem: &[u8; 0x10000], addr: u16) -> u16 {
         let lo = self.read_mem(mem, addr) as u16;
         let hi = self.read_mem(mem, addr.wrapping_add(1)) as u16;
         lo | (hi << 8)
@@ -274,7 +285,7 @@ impl Spc700 {
     /// Used by ADDW / SUBW / CMPW / MOVW / INCW / DECW where the SPC700
     /// wraps the second byte within the DP boundary.
     #[inline]
-    fn dp_abs_read16(&self, mem: &[u8; 0x10000], ea: u16) -> u16 {
+    fn dp_abs_read16(&mut self, mem: &[u8; 0x10000], ea: u16) -> u16 {
         // ea = dp_base | offset (offset is 8 bits, dp_base is $0000 or $0100)
         let lo = self.read_mem(mem, ea) as u16;
         // High byte wraps within the page: keep page bits, increment only offset.
@@ -594,6 +605,7 @@ impl Spc700 {
         let ya = (y << 8) | self.a as u16;
         self.set_flag(psw::H, (x & 0x0F) <= (y & 0x0F));
         self.set_flag(psw::V, y >= x);
+        // `x`/`y` are zero-extended u8s, so `2 * x` cannot overflow u16.
         let (q, r) = if y < 2 * x {
             (ya / x, ya % x)
         } else {

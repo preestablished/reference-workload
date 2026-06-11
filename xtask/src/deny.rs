@@ -48,6 +48,12 @@ impl std::fmt::Display for Finding {
 /// replacing them with whitespace of the same length to preserve column
 /// numbers. Doc comments (`///`, `//!`) are also stripped (they legitimately
 /// mention banned words).
+///
+/// KNOWN LIMITATION (deliberate, fail-closed): this is a line-oriented
+/// scanner — raw strings (`r#"…"#`) and multi-line `/* … */` block comments
+/// are not modeled, so banned tokens inside them are still REPORTED. That
+/// can only cause a false positive (a finding to explain), never a missed
+/// token, which is the right failure direction for a deny gate.
 fn strip_non_code(line: &str) -> String {
     let bytes = line.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

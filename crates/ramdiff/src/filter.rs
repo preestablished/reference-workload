@@ -13,7 +13,8 @@
 //! - `--inc A B`        — value at B > value at A
 //! - `--dec A B`        — value at B < value at A
 //! - `--value N --in A` — value equals N in dump A
-//! - `--delta D A B`    — |value_B - value_A| == D (unsigned subtraction wraps)
+//! - `--delta D A B`    — |value_B - value_A| == D (checked in both directions;
+//!   values are widened to u32 first, so no u8/u16 wrap-around is involved)
 //! - `--width u8|u16le` — (re-)initialize candidate set with this width
 
 use crate::session::{CandidateSet, SearchWidth, Session, WRAM_SIZE};

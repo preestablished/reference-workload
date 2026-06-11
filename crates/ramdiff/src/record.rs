@@ -7,27 +7,11 @@
 //! # Interactive mode (`--interactive`, feature `interactive`)
 //!
 //! When the `interactive` cargo feature is enabled, the `--interactive` flag
-//! opens a `minifb` window showing the blitted framebuffer. The keyboard
-//! mapping is:
-//!
-//! | Key | Pad bit | Function |
-//! |-----|---------|----------|
-//! | Z | 0 | B button |
-//! | X | 1 | Y button |
-//! | A | 2 | Select |
-//! | S | 3 | Start → actually mapped below |
-//! | Up arrow | 4 | D-pad Up |
-//! | Down arrow | 5 | D-pad Down |
-//! | Left arrow | 6 | D-pad Left |
-//! | Right arrow | 7 | D-pad Right |
-//! | X | 8 | A button |
-//! | Z | 9 | X button |
-//! | Enter/Return | 10 | Start |
-//! | Right Shift | 11 | Select |
+//! opens a `minifb` window showing the blitted framebuffer.
 //!
 //! API.md §3.4 pad bitmask (bit 0..11): A B X Y L R Up Down Left Right Start Select
 //!
-//! Chosen mapping:
+//! Keyboard mapping:
 //! | Key | Button | Bit |
 //! |-----|--------|-----|
 //! | X key | A | 0 |

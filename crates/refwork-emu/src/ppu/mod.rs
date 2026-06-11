@@ -104,6 +104,10 @@ fn cgram_color_components_fixed(color: u16) -> (u8, u8, u8) {
 /// Apply color math: add or subtract two BGR555 colors, optional half,
 /// with per-channel 5-bit clamp. Returns a BGR555 result.
 /// `add`: true=add, false=subtract. `half`: true=divide result by 2.
+///
+/// Documented operation order: the raw sum/difference is halved FIRST and
+/// clamped after — a 5-bit add tops out at 62, halving to 31, so half-math
+/// must not be capped at 15 by a premature clamp.
 #[inline]
 #[allow(clippy::too_many_arguments)] // two unpacked RGB triples + op flags
 fn color_math_op(
@@ -116,57 +120,23 @@ fn color_math_op(
     add: bool,
     half: bool,
 ) -> u16 {
-    let r5 = if add {
-        let s = (main_r as u16) + (sub_r as u16);
-        let v = if s > 31 { 31 } else { s as u8 };
-        if half {
-            v >> 1
+    #[inline]
+    fn channel(main: u8, sub: u8, add: bool, half: bool) -> u8 {
+        let mut v: i16 = if add {
+            main as i16 + sub as i16
         } else {
-            v
-        }
-    } else {
-        let s = (main_r as i16) - (sub_r as i16);
-        let v = if s < 0 { 0u8 } else { s as u8 };
+            main as i16 - sub as i16
+        };
         if half {
-            v >> 1
-        } else {
-            v
+            // Arithmetic shift: negative differences stay negative until the
+            // final floor clamp below.
+            v >>= 1;
         }
-    };
-    let g5 = if add {
-        let s = (main_g as u16) + (sub_g as u16);
-        let v = if s > 31 { 31 } else { s as u8 };
-        if half {
-            v >> 1
-        } else {
-            v
-        }
-    } else {
-        let s = (main_g as i16) - (sub_g as i16);
-        let v = if s < 0 { 0u8 } else { s as u8 };
-        if half {
-            v >> 1
-        } else {
-            v
-        }
-    };
-    let b5 = if add {
-        let s = (main_b as u16) + (sub_b as u16);
-        let v = if s > 31 { 31 } else { s as u8 };
-        if half {
-            v >> 1
-        } else {
-            v
-        }
-    } else {
-        let s = (main_b as i16) - (sub_b as i16);
-        let v = if s < 0 { 0u8 } else { s as u8 };
-        if half {
-            v >> 1
-        } else {
-            v
-        }
-    };
+        v.clamp(0, 31) as u8
+    }
+    let r5 = channel(main_r, sub_r, add, half);
+    let g5 = channel(main_g, sub_g, add, half);
+    let b5 = channel(main_b, sub_b, add, half);
     (r5 as u16) | ((g5 as u16) << 5) | ((b5 as u16) << 10)
 }
 
@@ -1290,17 +1260,12 @@ impl Ppu {
 
         #[allow(clippy::needless_range_loop)] // x indexes several parallel line buffers
         for x in 0..256usize {
-            let eff_x = if self.mosaic_bg_enable != 0 {
-                self.mosaic_x(x as u16, 0) as usize // approximate: use BG1's mosaic for all
-            } else {
-                x
-            };
-
             let sp = spr_pixels[x];
-            let b0 = bg_pixels[0][eff_x];
-            let b1 = bg_pixels[1][eff_x];
-            let b2 = bg_pixels[2][eff_x];
-            let b3 = bg_pixels[3][eff_x];
+            // Per-BG mosaic quantization (matches the mode-1/3 paths).
+            let b0 = bg_pixels[0][self.mosaic_x(x as u16, 0) as usize];
+            let b1 = bg_pixels[1][self.mosaic_x(x as u16, 1) as usize];
+            let b2 = bg_pixels[2][self.mosaic_x(x as u16, 2) as usize];
+            let b3 = bg_pixels[3][self.mosaic_x(x as u16, 3) as usize];
 
             // Window masking: layer is hidden if its main-win-mask pixel = 1 and TMW bit is set.
             let b0_vis = self.main_visible(b0.is_transparent(), 0, x);
@@ -2743,6 +2708,13 @@ mod ppu_tests {
         // R=10 + sub_R=10 = 20; half → 10.
         let result = color_math_op(10, 0, 0, 10, 0, 0, true, true);
         assert_eq!(result & 0x1F, 10, "R add+half should be 10");
+        // Halving happens BEFORE the 5-bit clamp: 31 + 31 = 62, half → 31
+        // (a clamp-then-halve implementation would wrongly produce 15).
+        let result = color_math_op(31, 0, 0, 31, 0, 0, true, true);
+        assert_eq!(result & 0x1F, 31, "half-math must not be capped at 15");
+        // Subtract+half floors at 0: 10 - 31 = -21, half → -10, clamp → 0.
+        let result = color_math_op(10, 0, 0, 31, 0, 0, false, true);
+        assert_eq!(result & 0x1F, 0, "sub+half floors at 0");
     }
 
     /// COLDATA component write: each plane independently settable.

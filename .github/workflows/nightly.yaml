@@ -41,9 +41,6 @@ jobs:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    outputs:
-      hash_x86_64: ${{ steps.hash.outputs.hash_x86_64 }}
-      hash_aarch64: ${{ steps.hash.outputs.hash_aarch64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,15 +55,23 @@ jobs:
       - run: printf 'padlog v1\n600x0000\n' > target/held.padlog
         working-directory: repo
       # 100k-frame double-run (held-input script; pad policy holds the last
-      # word for the remaining frames).
-      - id: hash
-        run: |
+      # word for the remaining frames). The chained hash is published as a
+      # per-arch artifact for the cross-arch compare job (artifacts avoid
+      # the documented matrix-job output-overwrite hazard).
+      - run: |
+          set -euo pipefail
           out=$(cargo run --locked --release -p refwork-verify -- double-run \
             --rom target/synth-rom.rom --script target/held.padlog --frames 100000)
           echo "$out"
-          chain=$(echo "$out" | sed -E 's/.*chain=([0-9a-f]+).*/\1/')
-          echo "hash_$(uname -m | sed 's/arm64/aarch64/')=${chain}" >> "$GITHUB_OUTPUT"
+          chain=$(echo "$out" | sed -nE 's/.*chain=([0-9a-f]{64}).*/\1/p')
+          test -n "$chain" || { echo "could not extract a 64-hex chain"; exit 1; }
+          echo "$chain" > "/tmp/hash-$(uname -m).txt"
         working-directory: repo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-100k-${{ matrix.runner }}
+          path: /tmp/hash-*.txt
+          if-no-files-found: error
       - run: cargo test --release --locked -p xtask --test zero_alloc
         working-directory: repo
       # Negative test: the nondet hook must make double-run exit nonzero.
@@ -85,12 +90,17 @@ jobs:
     needs: deep-determinism
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-100k-*
+          merge-multiple: true
+          path: hashes
       - run: |
-          x="${{ needs.deep-determinism.outputs.hash_x86_64 }}"
-          a="${{ needs.deep-determinism.outputs.hash_aarch64 }}"
+          set -euo pipefail
+          ls -l hashes
+          x=$(cat hashes/hash-x86_64.txt)
+          a=$(cat hashes/hash-aarch64.txt)
           echo "x86_64:  $x"
           echo "aarch64: $a"
-          test -n "$x" || { echo "missing x86_64 hash"; exit 1; }
-          test -n "$a" || { echo "missing aarch64 hash"; exit 1; }
           test "$x" = "$a" || { echo "CROSS-ARCH HASH MISMATCH"; exit 1; }
           echo "cross-arch 100k chained hashes identical"

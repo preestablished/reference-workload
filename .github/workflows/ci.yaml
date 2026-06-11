@@ -12,11 +12,6 @@ jobs:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    outputs:
-      # Per-arch chained hashes for the cross-arch compare job. Each matrix
-      # leg writes only its own key (empty values do not overwrite).
-      hash_x86_64: ${{ steps.hash.outputs.hash_x86_64 }}
-      hash_aarch64: ${{ steps.hash.outputs.hash_aarch64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,16 +54,22 @@ jobs:
       - run: cargo test --release --locked -p xtask --test zero_alloc
         working-directory: repo
       # M2 cross-arch probe (plan phase-2/07 item 3): per-PR 10k-frame
-      # chained hash, exported per-arch and diffed by the cross-arch job.
-      # Nightly runs the same compare at 100k frames.
-      - id: hash
-        run: |
+      # chained hash, published as a per-arch artifact and byte-compared by
+      # the cross-arch job (artifacts avoid the documented matrix-job
+      # output-overwrite hazard). Nightly runs the same compare at 100k.
+      - run: |
+          set -euo pipefail
           out=$(cargo run --locked --release -p xtask -- hash-chain --frames 10000)
           echo "$out"
-          arch=$(echo "$out" | sed -E 's/.*arch=([^ ]+).*/\1/')
-          chain=$(echo "$out" | sed -E 's/.*chain=([0-9a-f]+).*/\1/')
-          echo "hash_${arch}=${chain}" >> "$GITHUB_OUTPUT"
+          chain=$(echo "$out" | sed -nE 's/.*chain=([0-9a-f]{64}).*/\1/p')
+          test -n "$chain" || { echo "could not extract a 64-hex chain"; exit 1; }
+          echo "$chain" > "/tmp/hash-$(uname -m).txt"
         working-directory: repo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-chain-${{ matrix.runner }}
+          path: /tmp/hash-*.txt
+          if-no-files-found: error
   # Cross-arch determinism gate: the synthetic-ROM chained hash must be
   # bit-identical on x86_64 and aarch64 (catches latent float/UB issues —
   # IMPLEMENTATION-PLAN.md M2). CI covers the synthetic ROM only; the M2
@@ -77,12 +78,17 @@ jobs:
     needs: rust
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-chain-*
+          merge-multiple: true
+          path: hashes
       - run: |
-          x="${{ needs.rust.outputs.hash_x86_64 }}"
-          a="${{ needs.rust.outputs.hash_aarch64 }}"
+          set -euo pipefail
+          ls -l hashes
+          x=$(cat hashes/hash-x86_64.txt)
+          a=$(cat hashes/hash-aarch64.txt)
           echo "x86_64:  $x"
           echo "aarch64: $a"
-          test -n "$x" || { echo "missing x86_64 hash"; exit 1; }
-          test -n "$a" || { echo "missing aarch64 hash"; exit 1; }
           test "$x" = "$a" || { echo "CROSS-ARCH HASH MISMATCH"; exit 1; }
           echo "cross-arch chained hashes identical"

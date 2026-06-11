@@ -134,6 +134,21 @@ impl Timer {
         v
     }
 
+    /// Current 4-bit output counter without the clear-on-read side effect
+    /// (used to stage live values into ARAM before an SPC700 instruction;
+    /// `Apu::step` applies the clear when the read mask shows a real read).
+    #[inline]
+    pub fn peek_output(&self) -> u8 {
+        self.output & 0x0F
+    }
+
+    /// Clear-on-read side effect, applied after the fact by `Apu::step`
+    /// when the instruction's read mask shows a $FD-$FF read.
+    #[inline]
+    pub fn clear_output(&mut self) {
+        self.output = 0;
+    }
+
     /// Write the 8-bit target register ($FA–$FC). Does NOT restart the timer.
     #[inline]
     pub fn write_target(&mut self, value: u8) {

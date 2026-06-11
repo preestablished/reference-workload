@@ -81,16 +81,23 @@ pub fn map_check(
 
     let total_frames = frames_override.unwrap_or(script.len() as u64);
     let last_pad: u16 = script.frames.last().copied().unwrap_or(0);
-    let mut fb = [0u8; FB_BYTES];
+    // Boxed: a quarter-MiB by value blows the default test-thread stack.
+    let mut fb: Box<[u8; FB_BYTES]> = Box::new([0u8; FB_BYTES]);
     let mut chain = [0u8; 32];
 
     // Previous values for delta and changes_to assertions.
     let mut prev_values: std::collections::BTreeMap<String, FeatureValue> =
         std::collections::BTreeMap::new();
 
-    // Track which by_frame assertions still need to fire.
-    let mut pending: Vec<(usize, &Assertion)> =
-        expectations.assertions.iter().enumerate().collect();
+    // Track which assertions still need to fire. The bool records whether
+    // the feature's `valid_when` has been true at any evaluated frame (used
+    // to distinguish an expectations error from a plain by_frame failure).
+    let mut pending: Vec<(usize, &Assertion, bool)> = expectations
+        .assertions
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (i, a, false))
+        .collect();
 
     for f in 0..total_frames {
         let pad = if (f as usize) < script.frames.len() {
@@ -114,7 +121,7 @@ pub fn map_check(
         }
 
         core.blit_completed_frame(&mut fb);
-        let fh = frame_hash(core.wram(), &fb);
+        let fh = frame_hash(core.wram(), &fb[..]);
         chain = chain_update(&chain, &fh);
 
         let frame_no = core.frame_counter();
@@ -140,38 +147,58 @@ pub fn map_check(
             }
         }
 
-        // ── Check at_frame assertions ────────────────────────────────────────
-        let mut remaining: Vec<(usize, &Assertion)> = Vec::new();
-        for (idx, a) in pending.drain(..) {
+        // ── Check assertions ─────────────────────────────────────────────────
+        //
+        // at_frame: evaluated exactly once, at that frame; `valid_when`
+        //   false there is an error in the expectations file (exit 2).
+        // by_frame: evaluated at EVERY frame up to and including the
+        //   deadline — it passes as soon as the condition holds once.
+        //   Frames where `valid_when` is false are skipped; if the deadline
+        //   passes without the feature ever being valid, that is an
+        //   expectations error, otherwise a plain assertion failure.
+        let mut remaining: Vec<(usize, &Assertion, bool)> = Vec::new();
+        for (idx, a, mut ever_valid) in pending.drain(..) {
             let deadline = a.deadline();
-            let fire_now = match (a.at_frame, a.by_frame) {
-                (Some(af), None) => frame_no == af,
-                (None, Some(bf)) => frame_no >= bf,
-                _ => false,
+            let is_at = a.at_frame.is_some();
+            let evaluate_now = if is_at {
+                frame_no == a.at_frame.unwrap()
+            } else {
+                frame_no <= deadline
             };
 
-            if fire_now {
+            if evaluate_now {
                 let feat = find_feature(map, &a.feature).unwrap();
 
-                // valid_when check: false valid_when at assertion time is an
-                // expectations-file error (exit 2).
                 if !is_valid(map, feat, core.wram()) {
-                    return Ok(MapCheckResult::ExpectationsError(format!(
-                        "assertion #{} ({:?}) at frame {}: valid_when is false — \
-                         asserting on an invalid feature is an error in the \
-                         expectations file (exit 2)",
-                        idx, a.feature, frame_no
-                    )));
+                    if is_at {
+                        // valid_when false at the asserted frame is an
+                        // expectations-file error (exit 2).
+                        return Ok(MapCheckResult::ExpectationsError(format!(
+                            "assertion #{} ({:?}) at frame {}: valid_when is false — \
+                             asserting on an invalid feature is an error in the \
+                             expectations file (exit 2)",
+                            idx, a.feature, frame_no
+                        )));
+                    }
+                    // by_frame: skip invalid frames; the deadline check below
+                    // decides the outcome if it never becomes valid.
+                    if frame_no < deadline {
+                        remaining.push((idx, a, ever_valid));
+                        continue;
+                    }
+                    if !ever_valid {
+                        return Ok(MapCheckResult::ExpectationsError(format!(
+                            "assertion #{} ({:?}): valid_when never true through \
+                             by_frame deadline {} — error in the expectations file \
+                             (exit 2)",
+                            idx, a.feature, deadline
+                        )));
+                    }
                 }
+                ever_valid = true;
 
                 let cur = read_feature_value(feat, core.wram());
                 let prev = *prev_values.get(&a.feature).unwrap_or(&cur);
-
-                let off = feat.offset.0 as usize;
-                let width = feat.feature_type.derived_width().unwrap_or(1) as usize;
-                let raw: Vec<u8> = (0..width)
-                    .map(|i| core.wram().get(off + i).copied().unwrap_or(0))
-                    .collect();
 
                 let (ok, desc) = if let Some(exp) = a.equals {
                     (cur == exp, format!("equals {}", exp))
@@ -183,20 +210,35 @@ pub fn map_check(
                     unreachable!("validate() already enforced exactly one condition")
                 };
 
-                if !ok {
-                    return Ok(MapCheckResult::Failure {
-                        frame: frame_no,
-                        feature: a.feature.clone(),
-                        expected_description: desc,
-                        actual: cur,
-                        raw_bytes: raw,
-                    });
+                if ok {
+                    // Satisfied — drop from pending.
+                    continue;
                 }
-                // Assertion passed; update prev.
-                prev_values.insert(a.feature.clone(), cur);
+                if !is_at && frame_no < deadline {
+                    // by_frame: not met yet; keep waiting.
+                    remaining.push((idx, a, ever_valid));
+                    continue;
+                }
+                // at_frame miss, or by_frame deadline reached unmet.
+                let off = feat.offset.0 as usize;
+                let width = feat.feature_type.derived_width().unwrap_or(1) as usize;
+                let raw: Vec<u8> = (0..width)
+                    .map(|i| core.wram().get(off + i).copied().unwrap_or(0))
+                    .collect();
+                return Ok(MapCheckResult::Failure {
+                    frame: frame_no,
+                    feature: a.feature.clone(),
+                    expected_description: if is_at {
+                        desc
+                    } else {
+                        format!("{} by frame {}", desc, deadline)
+                    },
+                    actual: cur,
+                    raw_bytes: raw,
+                });
             } else if frame_no > deadline {
-                // by_frame deadline exceeded without firing (shouldn't happen
-                // for by_frame, but at_frame missed means the frame has passed).
+                // at_frame already passed without firing (frames_override can
+                // start past it) — report the miss.
                 let feat = find_feature(map, &a.feature).unwrap();
                 let cur = read_feature_value(feat, core.wram());
                 return Ok(MapCheckResult::Failure {
@@ -210,14 +252,24 @@ pub fn map_check(
                     raw_bytes: Vec::new(),
                 });
             } else {
-                remaining.push((idx, a));
+                remaining.push((idx, a, ever_valid));
             }
         }
         pending = remaining;
+
+        // Record this frame's value for every asserted feature so next
+        // frame's `changes_to`/`delta` compare against the true previous
+        // value rather than a stale pass-time snapshot.
+        for a in &expectations.assertions {
+            if let Some(feat) = find_feature(map, &a.feature) {
+                let v = read_feature_value(feat, core.wram());
+                prev_values.insert(a.feature.clone(), v);
+            }
+        }
     }
 
     // Any un-fired assertions are failures.
-    if let Some((_, a)) = pending.first() {
+    if let Some((_, a, _)) = pending.first() {
         let feat = find_feature(map, &a.feature).unwrap();
         let cur = read_feature_value(feat, core.wram());
         return Ok(MapCheckResult::Failure {

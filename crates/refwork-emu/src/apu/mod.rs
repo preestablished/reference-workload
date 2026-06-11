@@ -332,159 +332,114 @@ impl Apu {
         let opcode = self.mem_read(pc);
         self.cpu.pc = pc.wrapping_add(1);
 
-        // Execute the instruction. The SPC700 core needs a flat memory buffer
-        // for addressing. We use the ARAM raw slice for the inner execution,
-        // but route I/O addresses through our overlay by temporarily applying
-        // writes/reads via the APU's mem_read/mem_write.
+        // Execution model: the SPC700 core addresses a flat 64 KiB slice, so
+        // the bidirectional I/O page ($F0-$FF) is emulated around each
+        // instruction with an explicit sync contract:
         //
-        // Design note: For simplicity and correctness, we pass the raw ARAM to
-        // the core for bulk addressing operations, but intercept I/O register
-        // accesses by checking addresses before/after execution. This works
-        // because the SPC700 executes one instruction at a time and I/O
-        // register side-effects only matter at explicit $F0–$FF address accesses.
+        //   sync-in  — stage every readable I/O value into ARAM so flat
+        //              reads observe live state: $F4-$F7 = main-CPU-written
+        //              ports, $F2 = DSP address, $F3 = current DSP register,
+        //              $F1 = control shadow, $FD-$FF = live timer outputs.
+        //   execute  — the core records exact $F0-$FF accesses in
+        //              `io_written_mask` / `io_read_mask` (bit N = $F0+N).
+        //   sync-out — apply write side effects ONLY for registers whose
+        //              write bit is set (ports -> cpu_ports, $F0 test
+        //              trigger, $F1 control, $F2/$F3 DSP, $FA-$FC timer
+        //              targets), and read side effects only for registers
+        //              whose read bit is set ($FD-$FF clear-on-read).
         //
-        // The correct approach: use a memory-callback model. For this
-        // implementation, we run the instruction on the raw ARAM (which already
-        // reflects I/O writes since they write through to ARAM), then sync
-        // any changed I/O registers afterward by checking the ARAM bytes.
-        //
-        // This is correct for the I/O layout because:
-        //   - Reads: io_read() is called when the SPC reads $F0–$FF.
-        //   - Writes: io_write() is called when the SPC writes $F0–$FF (via mem_write).
-        //
-        // For the step function, the opcode is already fetched via mem_read.
-        // We now need to execute the rest of the instruction. Since the SPC700
-        // core takes a flat `&mut [u8; 0x10000]`, we pass the raw ARAM and then
-        // check if the instruction touched I/O registers by scanning post-step.
-        //
-        // More precisely: the step implementation routes memory accesses through
-        // a callback. Here, because the SPC700 core (spc700.rs) calls
-        // `read_mem`/`write_mem` on the raw slice, I/O side-effects are NOT
-        // automatically applied. We accept this limitation: the SPC program
-        // accesses I/O registers via explicit $F0–$FF addresses which go through
-        // ARAM. For correctness, side-effects (DSP writes, port updates, timer
-        // updates) are applied when the SPC writes to $F0–$FF via mem_write().
-        //
-        // This means: the SPC700 writing to $F5 (port 1) via mem_write() will
-        // update cpu_ports[1] correctly. The SPC700 reading $F4 via mem_read()
-        // returns spc_ports[0] correctly.
-        //
-        // The limitation: the SPC core's internal `read_mem`/`write_mem` bypass
-        // our overlay when called from `execute()` since they operate directly
-        // on the flat slice. We address this by making the ARAM reflect I/O
-        // state for reads (we copy port values into ARAM $F4–$F7 before
-        // stepping), and by applying side-effects from ARAM writes post-step
-        // for writes to $F0–$FF.
-        //
-        // Port sync: before executing, copy spc_ports into ARAM $F4–$F7 so the
-        // SPC can read them via flat mem access.
-        // After executing, sync ARAM $F4–$F7 back to cpu_ports.
-        //
-        // *** Port direction handling (bidirectional $F4–$F7) ***
-        //
-        // $F4–$F7 are bidirectional: the SPC reads them to see what the main CPU
-        // wrote (input direction: main→SPC), and writes them to send data back to
-        // the main CPU (output direction: SPC→main).
-        //
-        // In the flat ARAM model we must distinguish these two directions without
-        // memory-access callbacks.  The approach:
-        //
-        //   1. Save the current SPC-output values (cpu_ports[]) from ARAM before
-        //      sync-in.
-        //   2. Overwrite ARAM[$F4–$F7] with spc_ports[] so the SPC's read of $F4
-        //      returns what the main CPU wrote.
-        //   3. Execute the opcode.
-        //   4. For each port i: if cpu.io_written_mask has bit (4+i) set, the
-        //      SPC wrote to $F4+i → update cpu_ports[i] from ARAM.
-        //      Otherwise restore the saved output so it isn't silently
-        //      overwritten by the stale input value written in step 2.
-        //
-        // io_written_mask (set inside write_mem when addr $F0–$FF is written)
-        // gives exact, value-independent write detection — no false negatives
-        // when the SPC echoes the same value it read.
+        // The masks make the sync exact and value-independent: echoing an
+        // unchanged value still counts as a write, and an untouched register
+        // is never spuriously re-applied from a stale ARAM byte.
 
-        // Step 1: save SPC output before it gets clobbered.
+        // Save SPC port output before sync-in clobbers ARAM $F4-$F7.
         let spc_out_save = self.cpu_ports;
 
         {
             let raw = self.aram.as_raw_mut();
-            // Step 2: Sync in: main-CPU-written ports → ARAM $F4–$F7
+            // Main-CPU-written ports -> ARAM $F4-$F7.
             raw[0xF4] = self.spc_ports[0];
             raw[0xF5] = self.spc_ports[1];
             raw[0xF6] = self.spc_ports[2];
             raw[0xF7] = self.spc_ports[3];
-            // Also sync DSP addr register so reads of $F2 return correct value.
+            // Control shadow (reads of $F1 observe the live control value).
+            raw[0xF1] = self.ctrl;
+            // DSP address/data ports.
             raw[0xF2] = self.dsp_addr;
-            // DSP data register ($F3): set to current DSP register value for reads.
             raw[0xF3] = self.dsp.read_reg(self.dsp_addr);
-            // Timer outputs ($FD–$FF) are updated by io_read; pre-clear to 0 for
-            // write-only registers ($FA–$FC).
-            // NOTE: timer output registers ($FD–$FF) have read-clear semantics;
-            // the SPC reading them via flat ARAM would not clear them. We live
-            // with this approximation for now (the SPC reads $FD–$FF infrequently
-            // and the timer values are small).
+            // Live timer outputs (clear-on-read applied in sync-out below).
+            raw[0xFD] = self.timers[0].peek_output();
+            raw[0xFE] = self.timers[1].peek_output();
+            raw[0xFF] = self.timers[2].peek_output();
         }
 
         // Execute the pre-fetched opcode. The cpu.pc is already advanced past it.
         let raw = self.aram.as_raw_mut();
         self.cpu.io_written_mask = 0;
+        self.cpu.io_read_mask = 0;
         let cycles = self.cpu.execute(raw, opcode);
 
-        // Step 4: Sync out using io_written_mask for precise write detection.
-        // Bits 4–7 of io_written_mask correspond to ARAM addresses $F4–$F7.
-        // If the SPC wrote to a port during execute(), its bit is set — use the
-        // updated ARAM value. Otherwise, restore the saved SPC-output so it is
-        // not silently clobbered by the stale input value we wrote in sync-in.
+        // Sync-out: ports first ($F4-$F7 are bidirectional — restore the
+        // saved SPC output unless this instruction actually wrote the port).
         let io_mask = self.cpu.io_written_mask;
         for (i, &saved) in spc_out_save.iter().enumerate() {
             let port_bit = 1u16 << (4 + i); // bit 4 = $F4, bit 5 = $F5, …
             if io_mask & port_bit != 0 {
-                // SPC wrote to this port; pick up the new value from ARAM.
                 self.cpu_ports[i] = self.aram.read(0xF4 + i as u16);
             } else {
-                // SPC did not write; restore previous SPC-output.
                 self.cpu_ports[i] = saved;
             }
         }
 
-        // Apply I/O side-effects for any writes the SPC just made to $F0–$FF.
-        // We do this by checking the ARAM values for the writeable I/O registers
-        // and applying their side-effects.
-        // Note: We cannot easily detect which registers were written, so we
-        // re-apply all of them. This is safe because the effects are idempotent
-        // when the values haven't changed.
-        let f0 = self.aram.read(0xF0);
-        let f1 = self.aram.read(0xF1);
-        let f2 = self.aram.read(0xF2);
-        let f3_val = self.aram.read(0xF3);
-        let fa = self.aram.read(0xFA);
-        let fb = self.aram.read(0xFB);
-        let fc = self.aram.read(0xFC);
-
-        // $F0: test register — check if set.
-        if f0 != 0 && self.halted.is_none() {
-            self.halted = Some(ApuHalt::TestTrigger(f0));
-            self.cpu.halted = self.halted;
+        // Write side effects, gated on the exact write mask.
+        if io_mask & (1 << 0x0) != 0 {
+            // $F0 test register: nonzero write halts (D9).
+            let f0 = self.aram.read(0xF0);
+            if f0 != 0 && self.halted.is_none() {
+                self.halted = Some(ApuHalt::TestTrigger(f0));
+                self.cpu.halted = self.halted;
+            }
         }
-
-        // $F1: control register — re-apply timer enables and port clears.
-        // Only apply if different from our shadow (avoid spurious resets).
-        if f1 != self.ctrl {
+        if io_mask & (1 << 0x1) != 0 {
+            // $F1 control register: timer enables, port clears, IPL enable.
+            let f1 = self.aram.read(0xF1);
             self.io_write(0xF1, f1);
         }
-
-        // $F2: DSP address register.
-        self.dsp_addr = f2;
-
-        // $F3: DSP data register — only apply if address < $80 (write port).
-        if self.dsp_addr & 0x80 == 0 {
-            self.dsp.write_reg(self.dsp_addr, f3_val);
+        if io_mask & (1 << 0x2) != 0 {
+            self.dsp_addr = self.aram.read(0xF2);
+        }
+        if io_mask & (1 << 0x3) != 0 {
+            // $F3 DSP data: a write goes to the currently addressed register
+            // (the documented read-only alias range $80-$FF is ignored).
+            if self.dsp_addr & 0x80 == 0 {
+                let f3 = self.aram.read(0xF3);
+                self.dsp.write_reg(self.dsp_addr, f3);
+            }
+        }
+        if io_mask & (1 << 0xA) != 0 {
+            let fa = self.aram.read(0xFA);
+            self.timers[0].write_target(fa);
+        }
+        if io_mask & (1 << 0xB) != 0 {
+            let fb = self.aram.read(0xFB);
+            self.timers[1].write_target(fb);
+        }
+        if io_mask & (1 << 0xC) != 0 {
+            let fc = self.aram.read(0xFC);
+            self.timers[2].write_target(fc);
         }
 
-        // $FA–$FC: timer target registers.
-        self.timers[0].write_target(fa);
-        self.timers[1].write_target(fb);
-        self.timers[2].write_target(fc);
+        // Read side effects: timer outputs clear on read.
+        let read_mask = self.cpu.io_read_mask;
+        if read_mask & (1 << 0xD) != 0 {
+            self.timers[0].clear_output();
+        }
+        if read_mask & (1 << 0xE) != 0 {
+            self.timers[1].clear_output();
+        }
+        if read_mask & (1 << 0xF) != 0 {
+            self.timers[2].clear_output();
+        }
 
         if let Some(h) = self.cpu.halted {
             self.halted = Some(h);

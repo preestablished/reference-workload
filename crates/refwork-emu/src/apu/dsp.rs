@@ -27,7 +27,7 @@
 //! | `0x5C`       | KOF   | Key-off bitmask (write to release voices)    |
 //! | `0x6C`       | FLG   | Flags: RESET (b7), MUTE (b6), ECEN (b5),    |
 //! |              |       |   NRATE (b4:b0) noise rate                   |
-//! | `0x7C`       | ENDX  | End-flag bitmask (BRR loop/end, read-clear)  |
+//! | `0x7C`       | ENDX  | End-flag bitmask (BRR loop/end, write-clears)|
 //! | `0x0D`       | EFB   | Echo feedback volume (signed)                |
 //! | `0x2D`       | PMON  | Pitch modulation enable (voices 1–7)         |
 //! | `0x3D`       | NON   | Noise enable per-voice                       |
@@ -377,6 +377,13 @@ impl Dsp {
     /// Write a DSP register.
     pub fn write_reg(&mut self, addr: u8, value: u8) {
         let a = addr & 0x7F;
+        // ENDX ($7C): any write clears all end flags (documented hardware
+        // behaviour — the written value is ignored).
+        if a == 0x7C {
+            self.regs[0x7C] = 0;
+            self.endx = 0;
+            return;
+        }
         // Most registers just store to regs[]; KON/KOF/FLG have side effects
         // handled in the per-sample step.
         self.regs[a as usize] = value;

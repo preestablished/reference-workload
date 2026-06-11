@@ -111,10 +111,11 @@ impl CandidateSet {
     /// Initialize with all valid offsets for the given region size and width.
     pub fn full(size: usize, width: SearchWidth) -> Self {
         let step = width.byte_size();
+        // Offsets are 0, step, 2*step, … while off + step <= size.
         let count = if step > size {
             0
         } else {
-            (size - step + 1) / step + 1
+            (size - step) / step + 1
         };
         let mut offsets = Vec::with_capacity(count);
         let mut off = 0u32;

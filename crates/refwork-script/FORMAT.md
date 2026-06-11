@@ -28,6 +28,9 @@ acceptance calls for a *hand-authored* script).
 
   Words are exactly 4 hex digits (case-insensitive on input), value
   ≤ `0x0FFF` (bits 12–15 zero — a violation is a parse error, not a mask).
+  The total frame count (run-lengths included) is capped at 10,000,000
+  (~46 hours); exceeding it is a parse error, so a hostile log cannot
+  demand an unbounded allocation.
 
 - **Comments**: `#` to end of line, anywhere. Blank lines ignored.
 

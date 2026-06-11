@@ -35,6 +35,9 @@ pub struct FeatureEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayReport {
     /// Last completed frame number (`Core::frame_counter()`).
+    /// Completed-frame count; `final_chain_hash` covers exactly this many
+    /// frames (a faulted frame does not complete and is not hashed unless
+    /// `continue_past_faults` kept the run going).
     pub final_frame: u64,
     /// Final chained hash (64 hex chars).
     pub final_chain_hash: String,

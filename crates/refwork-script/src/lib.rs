@@ -10,6 +10,11 @@
 /// Pad words may only use bits 0..=11 (API.md §3.4).
 pub const PAD_MASK: u16 = 0x0FFF;
 
+/// Upper bound on total frames in a parsed log (run-lengths included):
+/// ~46 hours of footage — far beyond any legitimate script, small enough
+/// that a hostile `.padlog` cannot demand a multi-GiB allocation.
+pub const MAX_FRAMES: u64 = 10_000_000;
+
 /// A parsed input log: optional advisory ROM hash + one pad word per frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PadLog {
@@ -36,6 +41,8 @@ pub enum PadLogError {
     ReservedBitsSet { line: usize, word: u16 },
     /// A run-length count of zero.
     ZeroRun { line: usize },
+    /// Total frame count exceeds [`MAX_FRAMES`].
+    TooManyFrames { line: usize },
     /// A pad word outside `PAD_MASK` passed to [`PadLog::from_frames`].
     ReservedBitsInFrames { index: usize, word: u16 },
 }
@@ -64,6 +71,13 @@ impl std::fmt::Display for PadLogError {
             }
             PadLogError::ZeroRun { line } => {
                 write!(f, "line {}: run-length count must be >= 1", line)
+            }
+            PadLogError::TooManyFrames { line } => {
+                write!(
+                    f,
+                    "line {}: total frame count exceeds the {}-frame limit",
+                    line, MAX_FRAMES
+                )
             }
             PadLogError::ReservedBitsInFrames { index, word } => {
                 write!(
@@ -130,6 +144,9 @@ pub fn parse(text: &str) -> Result<PadLog, PadLogError> {
                 line: line_no,
                 word,
             });
+        }
+        if log.frames.len() as u64 + count > MAX_FRAMES {
+            return Err(PadLogError::TooManyFrames { line: line_no });
         }
         log.frames.extend(std::iter::repeat_n(word, count as usize));
     }
@@ -363,6 +380,17 @@ mod tests {
             parse("padlog v1 rom=zz\n"),
             Err(PadLogError::BadRomHash { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_run_length_beyond_frame_limit() {
+        assert_eq!(
+            parse("padlog v1\n99999999999x0000\n"),
+            Err(PadLogError::TooManyFrames { line: 2 })
+        );
+        // Cumulative runs count too.
+        let text = format!("padlog v1\n{}x0000\n{}x0000\n", MAX_FRAMES, 1);
+        assert_eq!(parse(&text), Err(PadLogError::TooManyFrames { line: 3 }));
     }
 
     #[test]
