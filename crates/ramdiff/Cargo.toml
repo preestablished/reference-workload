@@ -1,0 +1,32 @@
+[package]
+name = "ramdiff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAM-address discovery tool (record/search/candidates/watch/emit)"
+
+[[bin]]
+name = "ramdiff"
+path = "src/main.rs"
+
+[lib]
+name = "ramdiff"
+path = "src/lib.rs"
+
+[features]
+# Interactive windowed mode — never enabled in CI (no display required).
+interactive = ["dep:minifb"]
+
+[dependencies]
+refwork-emu = { path = "../refwork-emu", features = ["introspect"] }
+refwork-script = { path = "../refwork-script" }
+refwork-featuremap = { path = "../refwork-featuremap" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+blake3 = "1"
+
+# Interactive-only dependencies (gated by the "interactive" feature).
+minifb = { version = "0.25", optional = true }
+
+[dev-dependencies]
+# Nothing extra: we use the workspace xtask lib via std::process for build-rom

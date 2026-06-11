@@ -1,0 +1,106 @@
+name: nightly
+# Heavy determinism gates (plan phase-2/07): everything here is too slow
+# for per-PR but must not drift. Synthetic ROM only — CI never sees game
+# content; demo-game runs are lab-runner jobs outside this repo's CI.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+jobs:
+  # SPC700 + 65816 single-step corpora (plan 07 item 1): neither ran in CI
+  # before M2, so both land here as nightly gates. The corpora are pinned
+  # in xtask/test-roms.lock (BLAKE3-verified fetch), cached on the lock
+  # file's hash.
+  corpora:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/control-plane
+          path: control-plane
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: repo/target/test-roms
+          key: test-roms-${{ hashFiles('repo/xtask/test-roms.lock') }}
+      - run: cargo run --locked -p xtask -- fetch-test-roms
+        working-directory: repo
+      - run: cargo run --locked --release -p xtask -- cpu-tests
+        working-directory: repo
+      - run: cargo run --locked --release -p xtask -- spc-tests
+        working-directory: repo
+  # 100k-frame double-run + zero-alloc, release (plan 07 item 2), plus the
+  # negative determinism test (item 5): the test-only divergence hook in
+  # refwork-verify (never the core — deny-gate scope) must make double-run
+  # FAIL, proving the gate can actually bite.
+  deep-determinism:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/control-plane
+          path: control-plane
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run --locked --release -p xtask -- build-rom --out target/synth-rom.rom
+        working-directory: repo
+      - run: printf 'padlog v1\n600x0000\n' > target/held.padlog
+        working-directory: repo
+      # 100k-frame double-run (held-input script; pad policy holds the last
+      # word for the remaining frames). The chained hash is published as a
+      # per-arch artifact for the cross-arch compare job (artifacts avoid
+      # the documented matrix-job output-overwrite hazard).
+      - run: |
+          set -euo pipefail
+          out=$(cargo run --locked --release -p refwork-verify -- double-run \
+            --rom target/synth-rom.rom --script target/held.padlog --frames 100000)
+          echo "$out"
+          chain=$(echo "$out" | sed -nE 's/.*chain=([0-9a-f]{64}).*/\1/p')
+          test -n "$chain" || { echo "could not extract a 64-hex chain"; exit 1; }
+          echo "$chain" > "/tmp/hash-$(uname -m).txt"
+        working-directory: repo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-100k-${{ matrix.runner }}
+          path: /tmp/hash-*.txt
+          if-no-files-found: error
+      - run: cargo test --release --locked -p xtask --test zero_alloc
+        working-directory: repo
+      # Negative test: the nondet hook must make double-run exit nonzero.
+      - run: |
+          if cargo run --locked --release -p refwork-verify -- double-run \
+            --rom target/synth-rom.rom --script target/held.padlog \
+            --frames 1000 --nondet-test; then
+            echo "nondet-test run unexpectedly PASSED — the gate cannot bite"
+            exit 1
+          fi
+          echo "nondet-test run failed as required"
+        working-directory: repo
+  # 100k cross-arch compare (plan 07 items 2-3): nightly depth for the
+  # per-PR 10k compare in ci.yaml.
+  cross-arch-100k:
+    needs: deep-determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-100k-*
+          merge-multiple: true
+          path: hashes
+      - run: |
+          set -euo pipefail
+          ls -l hashes
+          x=$(cat hashes/hash-x86_64.txt)
+          a=$(cat hashes/hash-aarch64.txt)
+          echo "x86_64:  $x"
+          echo "aarch64: $a"
+          test "$x" = "$a" || { echo "CROSS-ARCH HASH MISMATCH"; exit 1; }
+          echo "cross-arch 100k chained hashes identical"

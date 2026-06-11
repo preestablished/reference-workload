@@ -2,13 +2,12 @@
 //! (https://github.com/SingleStepTests/spc700, pinned in `test-roms.lock`
 //! as `spc700-singlestep`).
 //!
-//! The corpus is the planned M2 audio-CPU acceptance gate: 256 JSON files
-//! (one per opcode byte), 1,000 cases each, in the same shape as the 65816
-//! corpus the `cpu-tests` runner consumes:
+//! The corpus is the M2 audio-CPU acceptance gate: 256 JSON files (one per
+//! opcode byte), 1,000 cases each:
 //!
 //! ```json
 //! {
-//!   "name": "00 0000",
+//!   "name": "XX NNNN",
 //!   "initial": { "pc": N, "a": N, "x": N, "y": N, "sp": N, "psw": N,
 //!                "ram": [[addr, val], ...] },
 //!   "final":   { same fields },
@@ -16,14 +15,12 @@
 //! }
 //! ```
 //!
-//! Until the M2 SPC700 core exists in `refwork-emu`, this runner operates in
-//! corpus-validation mode: it parses every file, validates the schema and
-//! value ranges (16-bit pc, 8-bit registers, 64 KiB address space), and
-//! reports case counts — proving the pinned archive is healthy and the
-//! parse path works. `run_corpus_execution` is the single seam where the M2
-//! core plugs in; it mirrors `cpu_tests::run_single_test` (set state, step
-//! once, compare registers + listed ram bytes; cycle traces ignored for the
-//! same documented reason as the 65816 runner).
+//! Cycle traces are not deserialized (state-only gate, same rationale as the
+//! 65816 runner).
+//!
+//! In **corpus mode** the SPC700 core treats $F0–$FF as plain flat RAM so the
+//! corpus's bare-64-KiB model matches. This is controlled by the
+//! `Spc700::corpus_mode` flag, set via `Apu::new_corpus()`.
 
 use std::path::PathBuf;
 
@@ -59,6 +56,8 @@ pub struct SpcTestOpts {
     pub dir: PathBuf,
     /// Only files whose name contains this substring.
     pub filter: Option<String>,
+    /// Stop after this many failures (0 = unlimited).
+    pub max_fail: usize,
 }
 
 impl Default for SpcTestOpts {
@@ -66,15 +65,21 @@ impl Default for SpcTestOpts {
         SpcTestOpts {
             dir: PathBuf::from("target/test-roms/spc700-singlestep"),
             filter: None,
+            max_fail: 0,
         }
     }
 }
 
-/// Validate the pinned corpus: parse every JSON file, check schema + ranges,
-/// report counts. Returns `Err(n)` with a failure count for CI.
-///
-/// Once the M2 SPC700 core lands, `run_corpus_execution` replaces the tail
-/// of this function as the acceptance gate proper.
+/// Per-file result for reporting.
+struct FileResult {
+    file: String,
+    passed: usize,
+    failed: usize,
+    errors: Vec<String>,
+}
+
+/// Run the SPC700 single-step corpus. Returns `Ok(())` on all-pass, `Err(n)`
+/// where n is the total failure count.
 pub fn run_spc_tests(opts: &SpcTestOpts) -> Result<(), usize> {
     let mut dir = opts.dir.clone();
     if !dir.exists() {
@@ -107,56 +112,171 @@ pub fn run_spc_tests(opts: &SpcTestOpts) -> Result<(), usize> {
         return Err(1);
     }
 
-    let mut total_cases = 0usize;
-    let mut bad_files = 0usize;
-    for path in &json_files {
+    run_corpus_execution(opts, &json_files)
+}
+
+// ─── Execution gate ───────────────────────────────────────────────────────────
+
+fn run_corpus_execution(opts: &SpcTestOpts, json_files: &[PathBuf]) -> Result<(), usize> {
+    let mut total_pass = 0usize;
+    let mut total_fail = 0usize;
+    let mut file_results: Vec<FileResult> = Vec::new();
+
+    'files: for path in json_files {
         let fname = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("spc-tests: cannot read {}: {}", fname, e);
-                bad_files += 1;
+                total_fail += 1;
                 continue;
             }
         };
+
         let cases: Vec<SpcTestCase> = match serde_json::from_str(&content) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("spc-tests: cannot parse {}: {}", fname, e);
-                bad_files += 1;
+                total_fail += 1;
                 continue;
             }
         };
-        if let Err(msg) = validate_cases(&cases) {
-            eprintln!("spc-tests: {}: {}", fname, msg);
-            bad_files += 1;
-            continue;
+
+        let mut fr = FileResult {
+            file: fname.clone(),
+            passed: 0,
+            failed: 0,
+            errors: Vec::new(),
+        };
+
+        for tc in &cases {
+            match run_single_test(tc) {
+                Ok(()) => {
+                    fr.passed += 1;
+                    total_pass += 1;
+                }
+                Err(msg) => {
+                    fr.failed += 1;
+                    total_fail += 1;
+                    if fr.errors.len() < 5 {
+                        fr.errors.push(format!("[{}] {}", tc.name, msg));
+                    }
+                    if opts.max_fail > 0 && total_fail >= opts.max_fail {
+                        file_results.push(fr);
+                        break 'files;
+                    }
+                }
+            }
         }
-        total_cases += cases.len();
+
+        file_results.push(fr);
     }
 
-    println!(
-        "spc-tests: corpus OK — {} files, {} cases parsed and range-checked.",
-        json_files.len() - bad_files,
-        total_cases
-    );
-    println!(
-        "spc-tests: execution gate not yet active — the SPC700 core arrives \
-         with milestone M2; this run validates the pinned corpus only."
-    );
-
-    if bad_files > 0 {
-        eprintln!("spc-tests: {} file(s) failed validation.", bad_files);
-        return Err(bad_files);
+    println!("\nspc-tests results:");
+    println!("{:<40} {:>8} {:>8}", "file", "passed", "failed");
+    println!("{}", "-".repeat(60));
+    for fr in &file_results {
+        println!("{:<40} {:>8} {:>8}", fr.file, fr.passed, fr.failed);
+        for e in fr.errors.iter().take(3) {
+            println!("    {}", e);
+        }
+        if fr.errors.len() > 3 {
+            println!("    ... ({} more)", fr.errors.len() - 3);
+        }
     }
-    Ok(())
+    println!("{}", "-".repeat(60));
+    println!("TOTAL: {} passed, {} failed", total_pass, total_fail);
+
+    if total_fail == 0 {
+        println!("spc-tests: ALL PASSED");
+        Ok(())
+    } else {
+        eprintln!("spc-tests: {} FAILURE(S)", total_fail);
+        Err(total_fail)
+    }
 }
+
+// ─── Single-test executor ────────────────────────────────────────────────────
+
+/// Execute one corpus case against the SPC700 core (corpus mode: flat 64 KiB
+/// RAM, no I/O overlay). Compare registers and all `final.ram` entries.
+///
+/// Requires `--features refwork-emu/introspect`.
+fn run_single_test(tc: &SpcTestCase) -> Result<(), String> {
+    use refwork_emu::introspect::Spc700;
+
+    // Allocate a flat 64 KiB memory image for this test.
+    let mut mem: Box<[u8; 0x10000]> = Box::new([0u8; 0x10000]);
+
+    // Load initial RAM.
+    for pair in &tc.initial.ram {
+        mem[pair[0] as usize] = pair[1] as u8;
+    }
+
+    // Set registers from initial state.
+    let mut cpu = Spc700::new_corpus();
+    cpu.pc = tc.initial.pc;
+    cpu.a = tc.initial.a;
+    cpu.x = tc.initial.x;
+    cpu.y = tc.initial.y;
+    cpu.sp = tc.initial.sp;
+    cpu.psw = tc.initial.psw;
+
+    // Step once.
+    let _ = cpu.step(&mut mem);
+
+    // Compare registers.
+    let mut errors: Vec<String> = Vec::new();
+
+    macro_rules! check {
+        ($field:ident, $exp:expr, $actual:expr, $fmt:literal) => {
+            if $actual != $exp {
+                errors.push(format!(
+                    concat!("{}: expected ", $fmt, " got ", $fmt),
+                    stringify!($field),
+                    $exp,
+                    $actual
+                ));
+            }
+        };
+    }
+
+    check!(pc, tc.expected.pc, cpu.pc, "${:04X}");
+    check!(a, tc.expected.a, cpu.a, "${:02X}");
+    check!(x, tc.expected.x, cpu.x, "${:02X}");
+    check!(y, tc.expected.y, cpu.y, "${:02X}");
+    check!(sp, tc.expected.sp, cpu.sp, "${:02X}");
+    check!(psw, tc.expected.psw, cpu.psw, "${:02X}");
+
+    // Compare final RAM entries.
+    for pair in &tc.expected.ram {
+        let addr = pair[0] as usize;
+        let expected = pair[1] as u8;
+        let actual = mem[addr];
+        if actual != expected {
+            errors.push(format!(
+                "ram[${:04X}]: expected ${:02X} got ${:02X}",
+                addr, expected, actual
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+// ─── Range validation (kept for backward compat / schema checks) ─────────────
 
 /// Range-check parsed cases: every RAM address must fit the SPC700's 64 KiB
 /// space and every value must be a byte.
+#[cfg(test)]
 fn validate_cases(cases: &[SpcTestCase]) -> Result<(), String> {
     if cases.is_empty() {
         return Err("file contains no test cases".into());
@@ -180,16 +300,6 @@ fn validate_cases(cases: &[SpcTestCase]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// M2 seam: execute one corpus case against the SPC700 core and compare
-/// final state (registers + every `[addr, value]` listed in `final.ram`).
-/// Mirrors `cpu_tests::run_single_test`. Compiled but unreachable until the
-/// core exists; kept here so the M2 change is "fill this in", not "design a
-/// runner".
-#[allow(dead_code)]
-fn run_corpus_execution(_tc: &SpcTestCase) -> Result<(), String> {
-    Err("SPC700 core not yet implemented (arrives with milestone M2)".into())
 }
 
 #[cfg(test)]
@@ -225,5 +335,15 @@ mod tests {
         let bad = SAMPLE.replace("[30256, 0]", "[70000, 0]");
         let cases: Vec<SpcTestCase> = serde_json::from_str(&bad).unwrap();
         assert!(validate_cases(&cases).is_err());
+    }
+
+    /// Smoke-test the executor on the NOP case (opcode $00).
+    #[test]
+    fn executes_nop_case() {
+        let cases: Vec<SpcTestCase> = serde_json::from_str(SAMPLE).unwrap();
+        assert!(
+            run_single_test(&cases[0]).is_ok(),
+            "NOP corpus case should pass"
+        );
     }
 }

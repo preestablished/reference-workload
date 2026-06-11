@@ -127,13 +127,40 @@ impl Core {
             // bus unit-testable without a live PPU).
             if line == 0 {
                 self.bus.ppu.begin_frame();
+                // HDMA: initialize channel table pointers at start of frame
+                // (line 0 = end of v-blank, documented init point).
+                self.bus.init_hdma();
             } else if line == VBLANK_START_LINE {
                 self.bus.ppu.begin_vblank();
+            }
+
+            // HDMA: apply per-scanline register writes before rendering the
+            // line (writes land in h-blank before the visible raster begins).
+            // HDMA runs on visible lines only (1..=224); v-blank HDMA writes
+            // are skipped per the documented behavior — the channel state
+            // still advances so table reload at line 0 is consistent.
+            if (FIRST_VISIBLE_LINE..=LAST_VISIBLE_LINE).contains(&line) {
+                self.bus.execute_hdma();
+                if self.bus.fault.is_some() {
+                    faulted_early = true;
+                    break;
+                }
             }
 
             // Run CPU until the end of this scanline.
             let target = (line as u64 + 1) * MCLK_PER_LINE;
             run_cpu_until(&mut self.cpu, &mut self.bus, target);
+
+            if self.bus.fault.is_some() {
+                faulted_early = true;
+                break;
+            }
+
+            // APU catch-up at end of scanline (b): advance the APU to the
+            // current master-clock boundary so it stays within one scanline
+            // of the CPU's time view. This is the second catch-up point;
+            // the first fires on every CPU access to $2140–$2143.
+            self.bus.apu_catch_up();
 
             if self.bus.fault.is_some() {
                 faulted_early = true;
@@ -149,16 +176,6 @@ impl Core {
                 faulted_early = true;
                 break;
             }
-        }
-
-        // Harvest APU stub diagnostic flags.
-        if self.bus.apu.accessed {
-            self.bus.frame_flags.insert(FrameFlags::APU_STUB_ACCESS);
-            self.bus.apu.accessed = false;
-        }
-        if self.bus.apu.handshake_activity {
-            self.bus.frame_flags.insert(FrameFlags::APU_STUB_HANDSHAKE);
-            self.bus.apu.handshake_activity = false;
         }
 
         if faulted_early || self.bus.fault.is_some() {

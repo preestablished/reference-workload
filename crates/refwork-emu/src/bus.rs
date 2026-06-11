@@ -1,14 +1,23 @@
 //! Bus abstraction the CPU executes against, and the system bus wiring
-//! WRAM, cartridge, PPU, stub APU, DMA, joypads, and CPU I/O registers.
+//! WRAM, cartridge, PPU, stub APU, DMA, HDMA, joypads, and CPU I/O registers.
 //!
 //! OWNER (implementation): integration agent. The trait is also implemented
 //! by a flat test bus in `xtask` (single-step CPU tests), so its semantics
 //! must stay CPU-generic.
+//!
+//! M2 additions:
+//! - HDMA: per-scanline table-walk DMA; `execute_hdma` runs before each visible
+//!   line (called from `core_impl.rs` frame loop).
+//! - Auto-joypad stale reads: $4218/$4219 return the *previous* latch while
+//!   `auto_joy_busy` (lines 225-227). Simplification documented: games that
+//!   poll $4212 first (common idiom) are exact either way.
+//! - OPHCT real dot counter: `start_line` passes the current within-line dot
+//!   to `ppu.latch_hv_counters` so OPHCT reflects a real position.
 
-use crate::apu::ApuStub;
+use crate::apu::Apu;
 use crate::cart::Cartridge;
 use crate::cpu::Cpu;
-use crate::dma::{unit_pattern, Dma};
+use crate::dma::{unit_pattern, Dma, Hdma, HdmaState};
 use crate::fault::Fault;
 use crate::joypad::Joypad;
 use crate::ppu::Ppu;
@@ -40,12 +49,23 @@ pub struct SysBus {
     pub wram: &'static mut [u8; 0x20000],
     pub cart: Cartridge,
     pub ppu: Ppu,
-    pub apu: ApuStub,
+    pub apu: Apu,
+    /// Master-clock timestamp of the last APU catch-up. The APU is advanced
+    /// to the current `mclk_total` whenever the CPU accesses $2140–$2143 and
+    /// at the end of each scanline.
+    pub apu_mclk_base: u64,
     pub dma: Dma,
+    /// HDMA per-frame run-time state (D8: fixed-size, allocated in new).
+    pub hdma: Hdma,
+    /// HDMA enable register ($420C): bitmask of channels running this frame.
+    pub hdmaen: u8,
     pub joypad: Joypad,
 
     /// Master clocks elapsed since the start of the current frame.
     pub mclk_frame: u64,
+    /// Monotonically increasing total master clocks elapsed since power-on.
+    /// Used for APU catch-up scheduling (never resets between frames).
+    pub mclk_total: u64,
     /// Open-bus / memory-data-register latch (D3: documented constant
     /// behavior — reads of unmapped addresses return this).
     pub mdr: u8,
@@ -81,6 +101,10 @@ pub struct SysBus {
     pub line: u16,
     /// True during scanlines 225..=227 while auto-joypad read is "busy".
     pub auto_joy_busy: bool,
+    /// Previous joypad latch (before auto-read started): returned by $4218/$4219
+    /// while `auto_joy_busy`. Simplification: games that poll $4212 first are exact
+    /// either way; the new latch becomes visible when busy clears at line 228.
+    pub joy_prev: u16,
     /// Diagnostic flags accumulated during the current frame.
     pub frame_flags: crate::fault::FrameFlags,
 
@@ -100,11 +124,15 @@ impl SysBus {
             wram,
             cart,
             ppu,
-            apu: ApuStub::new(),
+            apu: Apu::new(),
+            apu_mclk_base: 0,
             dma: Dma::new(),
+            hdma: Hdma::new(),
+            hdmaen: 0,
             joypad: Joypad::new(),
 
             mclk_frame: 0,
+            mclk_total: 0,
             mdr: 0,
             fault: None,
 
@@ -124,6 +152,7 @@ impl SysBus {
             wmadd: 0,
             line: 0,
             auto_joy_busy: false,
+            joy_prev: 0,
             frame_flags: crate::fault::FrameFlags::default(),
 
             wrio: 0xFF,
@@ -158,6 +187,7 @@ impl SysBus {
     fn add_mclk(&mut self, mclk: u64) {
         let old = self.mclk_frame;
         self.mclk_frame = old + mclk;
+        self.mclk_total = self.mclk_total.wrapping_add(mclk);
         // Check if an IRQ target was crossed.
         if let Some(target) = self.irq_target_mclk {
             if old < target && self.mclk_frame >= target {
@@ -261,9 +291,43 @@ impl SysBus {
         }
     }
 
+    /// Catch the APU up to the current `mclk_total` timestamp.
+    ///
+    /// Called (a) whenever the CPU accesses $2140–$2143, and (b) at the end
+    /// of each scanline from `core_impl.rs`. This bounds the divergence window
+    /// deterministically: the APU is never more than one scanline behind the
+    /// CPU's master-clock view.
+    ///
+    /// If the catch-up encounters an APU halt condition (SLEEP/STOP/test-register
+    /// nonzero write), records the appropriate `Fault` (D9).
+    pub fn apu_catch_up(&mut self) {
+        if self.apu_mclk_base >= self.mclk_total {
+            return;
+        }
+        let delta = self.mclk_total - self.apu_mclk_base;
+        self.apu_mclk_base = self.mclk_total;
+
+        let halt = self.apu.advance_master_cycles(delta);
+        if let Some(h) = halt {
+            use crate::apu::spc700::ApuHalt;
+            match h {
+                ApuHalt::Stop => {
+                    let pc = self.apu.cpu.pc;
+                    self.fault(crate::fault::Fault::ApuStopped { pc });
+                }
+                ApuHalt::TestTrigger(v) => {
+                    let pc = self.apu.cpu.pc;
+                    self.fault(crate::fault::Fault::ApuTestTrigger { value: v, pc });
+                }
+                // SLEEP is not a fault; the APU will resume on the next interrupt.
+                ApuHalt::Sleep => {}
+            }
+        }
+    }
+
     /// Frame scheduler hook: called by `Core` at the start of every
     /// scanline. Handles v-blank entry (NMI flag/edge, OAM reload,
-    /// auto-joypad latch), v-blank exit, and per-line APU stub ticks.
+    /// auto-joypad latch), v-blank exit, and per-line APU catch-up.
     pub fn start_line(&mut self, line: u16, pad: u16) {
         let _ = pad; // pad is set on the joypad by Core before calling start_line
         self.line = line;
@@ -281,13 +345,163 @@ impl SysBus {
             if self.nmitimen & 0x80 != 0 {
                 self.nmi_pending = true;
             }
-            // If auto-joypad enabled (NMITIMEN bit0).
+            // If auto-joypad enabled (NMITIMEN bit0):
+            // Stale-read protocol (M2): snapshot the current latch into
+            // joy_prev before performing the new auto-read. While busy
+            // (lines 225-227), $4218/$4219 return joy_prev (the previous
+            // latch). The new latch becomes visible when busy clears at
+            // line 228. Games that poll $4212 bit0 first are fully exact.
             if self.nmitimen & 0x01 != 0 {
+                self.joy_prev = self.joypad.joy1;
                 self.joypad.auto_read();
                 self.auto_joy_busy = true;
             }
         } else if line == 228 {
             self.auto_joy_busy = false;
+        }
+    }
+
+    /// Initialize HDMA channels at the start of a new frame (line 0 reload).
+    ///
+    /// For every channel bit set in `hdmaen`:
+    ///   - Copy A1T → A2A (reset internal table pointer).
+    ///   - Read the first line-counter byte from (A1B:A2A); store in NTRL.
+    ///   - If indirect, load the DAS data address from (A1B:A2A+1/+2).
+    ///   - Advance A2A past the header bytes.
+    ///   - Mark channel active.
+    ///
+    /// Channels with a zero line-counter byte in their first entry are
+    /// terminated immediately (inactive for the entire frame).
+    ///
+    /// `a_read` is called for each table-byte fetch (A-bus, no B-bus traffic).
+    pub fn init_hdma(&mut self) {
+        for ch_idx in 0..8usize {
+            if self.hdmaen & (1 << ch_idx) == 0 {
+                self.hdma.state[ch_idx] = HdmaState::default(); // inactive
+                continue;
+            }
+            let a1b = self.dma.ch[ch_idx].a1b;
+            let a1t = self.dma.ch[ch_idx].a1t;
+            // Reset internal table pointer to start-of-table.
+            self.dma.ch[ch_idx].a2a = a1t;
+
+            let state = self.load_hdma_entry(ch_idx, a1b);
+            self.hdma.state[ch_idx] = state;
+        }
+    }
+
+    /// Load the next HDMA table entry for channel `ch_idx`.
+    ///
+    /// Reads the count byte from (table_bank:A2A) into NTRL, optionally loads
+    /// the indirect data address from the next 2 bytes into DAS, advances A2A
+    /// past the header, and returns the new state. Returns inactive state if
+    /// the count byte is 0 (table terminator).
+    fn load_hdma_entry(&mut self, ch_idx: usize, table_bank: u8) -> HdmaState {
+        let a2a = self.dma.ch[ch_idx].a2a;
+        let table_addr = ((table_bank as u32) << 16) | (a2a as u32);
+        let ntrl_byte = self.a_read(table_addr);
+        self.dma.ch[ch_idx].a2a = a2a.wrapping_add(1);
+        // NTRL is the live, raw down-counter (readable at $43xA).
+        self.dma.ch[ch_idx].ntrl = ntrl_byte;
+
+        if ntrl_byte == 0 {
+            // Terminator entry: channel is done for this frame.
+            return HdmaState {
+                active: false,
+                do_transfer: false,
+            };
+        }
+
+        if (self.dma.ch[ch_idx].dmap & 0x40) != 0 {
+            // Indirect: read the 2-byte data address from the table into DAS
+            // (the rolling data pointer; DASB is the bank).
+            let a2a_now = self.dma.ch[ch_idx].a2a;
+            let lo_addr = ((table_bank as u32) << 16) | (a2a_now as u32);
+            let lo = self.a_read(lo_addr);
+            let hi_addr = ((table_bank as u32) << 16) | (a2a_now.wrapping_add(1) as u32);
+            let hi = self.a_read(hi_addr);
+            self.dma.ch[ch_idx].a2a = a2a_now.wrapping_add(2);
+            self.dma.ch[ch_idx].das = (lo as u16) | ((hi as u16) << 8);
+        }
+        // Direct mode: the data bytes follow inline in the table — A2A is
+        // already the rolling data pointer.
+
+        HdmaState {
+            active: true,
+            // Every entry transfers on its first line, repeat or not.
+            do_transfer: true,
+        }
+    }
+
+    /// Execute HDMA for one scanline (called before rendering that line).
+    ///
+    /// For each active HDMA channel (bit set in `hdmaen`):
+    ///   1. If the channel is due a transfer (first line of an entry, or the
+    ///      entry's repeat bit is set), move `pattern` bytes from the rolling
+    ///      data pointer (A2A direct / DAS indirect, advanced per byte) to
+    ///      the B-bus register. Non-repeat entries transfer on their first
+    ///      line only; the written registers then hold for the remainder.
+    ///   2. Decrement NTRL (raw); when bits[6:0] reach 0, load the next
+    ///      table entry, else carry the repeat bit into `do_transfer`.
+    ///
+    /// Channel conflict (channel active in general DMA kicked this line) is
+    /// not modeled here; the caller must not kick MDMAEN while HDMA is enabled
+    /// for the same channel, or a fault results from the bus.rs $420B handler.
+    pub fn execute_hdma(&mut self) {
+        for ch_idx in 0..8usize {
+            if self.hdmaen & (1 << ch_idx) == 0 {
+                continue;
+            }
+            if !self.hdma.state[ch_idx].active {
+                continue;
+            }
+            if self.fault.is_some() {
+                break;
+            }
+
+            let dmap = self.dma.ch[ch_idx].dmap;
+            let bbad = self.dma.ch[ch_idx].bbad;
+            let indirect = dmap & 0x40 != 0;
+
+            if self.hdma.state[ch_idx].do_transfer {
+                let pattern = unit_pattern(dmap);
+                for &b_offset in pattern {
+                    // Rolling data pointer: DAS in indirect mode, A2A (the
+                    // table pointer, past inline data bytes) in direct mode.
+                    let (bank, addr) = if indirect {
+                        (self.dma.ch[ch_idx].dasb, self.dma.ch[ch_idx].das)
+                    } else {
+                        (self.dma.ch[ch_idx].a1b, self.dma.ch[ch_idx].a2a)
+                    };
+                    let v = self.a_read(((bank as u32) << 16) | (addr as u32));
+                    let b_addr: u32 = 0x002100 | ((bbad.wrapping_add(b_offset)) as u32);
+                    self.b_write(b_addr, v);
+                    if indirect {
+                        self.dma.ch[ch_idx].das = addr.wrapping_add(1);
+                    } else {
+                        self.dma.ch[ch_idx].a2a = addr.wrapping_add(1);
+                    }
+                    if self.fault.is_some() {
+                        break;
+                    }
+                }
+                if self.fault.is_some() {
+                    break;
+                }
+            }
+
+            // Decrement the raw NTRL counter; bits[6:0] hitting 0 exhausts
+            // the entry (a raw $80 count byte thus runs 128 non-repeat lines).
+            let ntrl = self.dma.ch[ch_idx].ntrl.wrapping_sub(1);
+            self.dma.ch[ch_idx].ntrl = ntrl;
+            if ntrl & 0x7F == 0 {
+                let table_bank = self.dma.ch[ch_idx].a1b;
+                let new_state = self.load_hdma_entry(ch_idx, table_bank);
+                self.hdma.state[ch_idx] = new_state;
+            } else {
+                // Mid-entry lines transfer again only in repeat mode.
+                self.hdma.state[ch_idx].do_transfer = ntrl & 0x80 != 0;
+            }
         }
     }
 
@@ -304,16 +518,16 @@ impl SysBus {
                 // Readable registers $34-$3F are handled below.
                 self.mdr
             }
-            // PPU readable registers $34-$3F.
+            // PPU readable registers $34-$3F: same path as CPU reads.
             0x34..=0x3F => {
-                // ppu.read is todo!() in the concurrent agent; open-bus for now.
-                self.mdr
+                let v = self.ppu.read(reg, self.mdr);
+                self.mdr = v;
+                v
             }
             // APU ports $40-$7F (mirrors: port = reg & 3).
             0x40..=0x7F => {
-                self.apu.accessed = true;
                 let port = reg & 3;
-                let v = self.apu.read(port);
+                let v = self.apu.cpu_read_port(port);
                 self.mdr = v;
                 v
             }
@@ -342,9 +556,8 @@ impl SysBus {
             }
             // APU ports $40-$7F.
             0x40..=0x7F => {
-                self.apu.accessed = true;
                 let port = reg & 3;
-                self.apu.write(port, value);
+                self.apu.cpu_write_port(port, value);
             }
             // WMDATA $80.
             0x80 => {
@@ -559,19 +772,24 @@ impl Bus for SysBus {
                         if reg <= 0x33 {
                             return self.mdr;
                         }
+                        // SLHV ($2137): latch H/V counters. Compute current
+                        // H dot from master clock before handing off to PPU.
+                        if reg == 0x37 {
+                            let dot = ((self.mclk_frame % MCLK_PER_LINE) / 4) as u16;
+                            self.ppu.latch_hv_counters(dot);
+                        }
                         // Readable registers $34-$3F.
-                        // ppu.read is implemented by PPU agent.
-                        // NOTE: this will panic with todo!() pre-merge.
                         let v = self.ppu.read(reg, self.mdr);
                         self.mdr = v;
                         v
                     }
 
                     // $2140-$217F: APU ports (mirrors every 4).
+                    // Catch the APU up to the current timestamp before reading.
                     0x2140..=0x217F => {
                         let port = (off & 3) as u8;
-                        self.apu.accessed = true;
-                        let v = self.apu.read(port);
+                        self.apu_catch_up();
+                        let v = self.apu.cpu_read_port(port);
                         self.mdr = v;
                         v
                     }
@@ -676,13 +894,27 @@ impl Bus for SysBus {
                     }
 
                     // $4218/$4219: JOY1 (little-endian).
+                    // Stale-read protocol (M2): while auto_joy_busy (lines
+                    // 225-227) return the previous latch (joy_prev); the new
+                    // latch becomes visible once busy clears at line 228.
+                    // Games that poll $4212 bit0 first are fully correct.
                     0x4218 => {
-                        let v = self.joypad.joy1 as u8; // low byte = JOY1L
+                        let joy = if self.auto_joy_busy {
+                            self.joy_prev
+                        } else {
+                            self.joypad.joy1
+                        };
+                        let v = joy as u8;
                         self.mdr = v;
                         v
                     }
                     0x4219 => {
-                        let v = (self.joypad.joy1 >> 8) as u8; // high byte = JOY1H
+                        let joy = if self.auto_joy_busy {
+                            self.joy_prev
+                        } else {
+                            self.joypad.joy1
+                        };
+                        let v = (joy >> 8) as u8;
                         self.mdr = v;
                         v
                     }
@@ -789,10 +1021,11 @@ impl Bus for SysBus {
                     }
 
                     // $2140-$217F: APU ports.
+                    // Catch the APU up to the current timestamp before writing.
                     0x2140..=0x217F => {
                         let port = (off & 3) as u8;
-                        self.apu.accessed = true;
-                        self.apu.write(port, value);
+                        self.apu_catch_up();
+                        self.apu.cpu_write_port(port, value);
                     }
 
                     // $2180: WMDATA write.
@@ -890,18 +1123,22 @@ impl Bus for SysBus {
                     }
 
                     // $420B: MDMAEN — kick general DMA.
+                    // D9: if a channel is simultaneously set in both MDMAEN and
+                    // HDMAEN, that is a channel conflict — fault loudly.
                     0x420B => {
                         if value != 0 {
-                            self.execute_dma(value);
+                            let conflict = value & self.hdmaen;
+                            if conflict != 0 {
+                                self.fault(Fault::HdmaDmaConflict { channels: conflict });
+                            } else {
+                                self.execute_dma(value);
+                            }
                         }
                     }
 
-                    // $420C: HDMAEN — fault if non-zero (M2 feature).
+                    // $420C: HDMAEN — store enable mask; HDMA runs each scanline.
                     0x420C => {
-                        if value != 0 {
-                            self.fault(Fault::HdmaUnimplemented { channels: value });
-                        }
-                        // else: store/ignore (no side effects when 0).
+                        self.hdmaen = value;
                     }
 
                     // $420D: MEMSEL.
@@ -1000,18 +1237,13 @@ pub fn run_cpu_until(cpu: &mut Cpu, bus: &mut SysBus, target_mclk: u64) {
     }
 }
 
-// ---- Unit tests (do not call cpu.step or ppu.render — those are todo!() in
-//      concurrent agents pre-merge) ----
+// ---- Unit tests ----
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cart::Cartridge;
     use crate::timing::MCLK_PER_LINE;
 
-    /// Build a minimal SysBus for unit tests without a live PPU.
-    /// IMPORTANT: We cannot call Ppu::new() because it is todo!() in the
-    /// concurrent PPU agent. We test bus pieces that do not touch PPU reads/writes.
-    // integration smoke test enabled post-merge (when Ppu::new is implemented).
     fn make_test_cart() -> Cartridge {
         let mut rom = vec![0u8; 0x8000];
         // Reset vector pointing at $8000 — valid.
@@ -1223,5 +1455,97 @@ mod tests {
     fn mclk_per_line_constant() {
         // Sanity: MCLK_PER_LINE = 1364.
         assert_eq!(MCLK_PER_LINE, 1364);
+    }
+
+    // ---- HDMA state-machine tests ----
+    //
+    // These pin the table-walk semantics: B-bus target is WMDATA ($80) so
+    // every transferred byte lands at wram[wmadd], directly observable.
+    // Tables live in WRAM bank $7E at $1000 (A-bus reachable); transfer
+    // destinations start at wmadd = 0.
+
+    fn make_hdma_bus(table: &[u8]) -> SysBus {
+        let wram: &'static mut [u8; 0x20000] = Box::leak(Box::new([0u8; 0x20000]));
+        wram[0x1000..0x1000 + table.len()].copy_from_slice(table);
+        let vram: &'static mut [u8; 0x10000] = Box::leak(Box::new([0u8; 0x10000]));
+        let mut bus = SysBus::new(wram, make_test_cart(), Ppu::new(vram));
+        bus.dma.ch[0].dmap = 0x00; // 1-byte pattern, direct mode
+        bus.dma.ch[0].bbad = 0x80; // WMDATA
+        bus.dma.ch[0].a1b = 0x7E;
+        bus.dma.ch[0].a1t = 0x1000;
+        bus.hdmaen = 0x01;
+        bus
+    }
+
+    #[test]
+    fn hdma_non_repeat_transfers_first_line_only() {
+        // 3 lines non-repeat, one inline data byte, then terminator.
+        let mut bus = make_hdma_bus(&[0x03, 0xAA, 0x00]);
+        bus.init_hdma();
+        for _ in 0..3 {
+            bus.execute_hdma();
+        }
+        // Exactly one byte transferred (first line of the entry).
+        assert_eq!(bus.wram[0], 0xAA);
+        assert_eq!(bus.wmadd, 1, "non-repeat entry must transfer once");
+        // Terminator reached after the 3rd line.
+        assert!(!bus.hdma.state[0].active);
+    }
+
+    #[test]
+    fn hdma_direct_table_pointer_advances_past_inline_data() {
+        // Two 1-line non-repeat entries with inline data, then terminator:
+        // the second entry's count byte must be read AFTER the first
+        // entry's data byte, not on top of it.
+        let mut bus = make_hdma_bus(&[0x01, 0xAA, 0x01, 0xBB, 0x00]);
+        bus.init_hdma();
+        bus.execute_hdma();
+        bus.execute_hdma();
+        assert_eq!(&bus.wram[0..2], &[0xAA, 0xBB]);
+        assert!(!bus.hdma.state[0].active);
+    }
+
+    #[test]
+    fn hdma_repeat_transfers_every_line() {
+        // $82 = repeat, 2 lines: consecutive inline bytes per line.
+        let mut bus = make_hdma_bus(&[0x82, 0xAA, 0xBB, 0x00]);
+        bus.init_hdma();
+        bus.execute_hdma();
+        bus.execute_hdma();
+        assert_eq!(&bus.wram[0..2], &[0xAA, 0xBB]);
+        assert_eq!(bus.wmadd, 2, "repeat entry must transfer every line");
+        assert!(!bus.hdma.state[0].active);
+    }
+
+    #[test]
+    fn hdma_raw_80_count_is_128_non_repeat_lines() {
+        // A raw $80 count byte is 128 lines non-repeat (NTRL decrements raw;
+        // bits[6:0] first hit 0 after 128 decrements), not 0 lines.
+        let mut bus = make_hdma_bus(&[0x80, 0xAA, 0x00]);
+        bus.init_hdma();
+        for line in 0..128 {
+            assert!(bus.hdma.state[0].active, "inactive at line {}", line);
+            bus.execute_hdma();
+        }
+        assert_eq!(bus.wmadd, 1, "single transfer across all 128 lines");
+        assert!(!bus.hdma.state[0].active, "entry exhausts after 128 lines");
+    }
+
+    #[test]
+    fn hdma_indirect_pointer_advances() {
+        // Indirect mode: table holds (count, addr_lo, addr_hi); data bytes
+        // come from DASB:DAS, advancing DAS per byte.
+        let mut bus = make_hdma_bus(&[0x82, 0x00, 0x20, 0x00]);
+        bus.dma.ch[0].dmap = 0x40; // 1-byte pattern, indirect
+        bus.dma.ch[0].dasb = 0x7E;
+        bus.wram[0x2000] = 0xAA;
+        bus.wram[0x2001] = 0xBB;
+        bus.init_hdma();
+        assert_eq!(bus.dma.ch[0].das, 0x2000);
+        bus.execute_hdma();
+        bus.execute_hdma();
+        assert_eq!(&bus.wram[0..2], &[0xAA, 0xBB]);
+        assert_eq!(bus.dma.ch[0].das, 0x2002);
+        assert!(!bus.hdma.state[0].active);
     }
 }
