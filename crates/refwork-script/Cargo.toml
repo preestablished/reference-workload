@@ -1,0 +1,11 @@
+[package]
+name = "refwork-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately dependency-light (plan 05 deliverable 1): this crate is the
+# shared `.padlog` seam between ramdiff and refwork-verify, and may later be
+# consumed by refwork-harness — keep it out of the dependency business so the
+# deny-gate question stays simple.
+[dependencies]

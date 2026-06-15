@@ -1,0 +1,29 @@
+[package]
+name = "refwork-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-side verification CLI: play, map-check, double-run"
+
+[[bin]]
+name = "refwork-verify"
+path = "src/main.rs"
+
+[lib]
+name = "refwork_verify"
+path = "src/lib.rs"
+
+[dependencies]
+refwork-emu     = { path = "../refwork-emu", features = ["introspect"] }
+refwork-script  = { path = "../refwork-script" }
+refwork-hash    = { path = "../refwork-hash" }
+refwork-featuremap = { path = "../refwork-featuremap" }
+serde           = { version = "1", features = ["derive"] }
+serde_yaml      = "0.9"
+serde_json      = "1"
+blake3          = "1"
+
+[dev-dependencies]
+# xtask exposes build_synth_rom() via its lib target; no cycle because xtask
+# does not depend on refwork-verify.
+xtask = { path = "../../xtask" }

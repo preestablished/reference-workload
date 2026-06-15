@@ -48,6 +48,12 @@ impl std::fmt::Display for Finding {
 /// replacing them with whitespace of the same length to preserve column
 /// numbers. Doc comments (`///`, `//!`) are also stripped (they legitimately
 /// mention banned words).
+///
+/// KNOWN LIMITATION (deliberate, fail-closed): this is a line-oriented
+/// scanner — raw strings (`r#"…"#`) and multi-line `/* … */` block comments
+/// are not modeled, so banned tokens inside them are still REPORTED. That
+/// can only cause a false positive (a finding to explain), never a missed
+/// token, which is the right failure direction for a deny gate.
 fn strip_non_code(line: &str) -> String {
     let bytes = line.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -239,6 +245,11 @@ pub fn scan_tree(root: &Path) -> Vec<Finding> {
 /// (`refwork-emu`, `refwork-harness`, and `refwork-protocol` — the protocol
 /// crate compiles into the guest harness binary and inherits D1-D4).
 /// Returns `Ok(())` on clean, `Err(count)` with findings printed to stderr.
+///
+/// Host-side CLIs (`ramdiff`, `refwork-verify`, `refwork-hash`) are
+/// deliberately OUTSIDE this scope — they may legitimately use floats,
+/// sleeps, etc. `refwork-script` joins the scope only if `refwork-harness`
+/// ever grows a dependency on it (plan phase-2/07 item 4).
 pub fn run_deny(workspace_root: &Path) -> Result<(), usize> {
     let dirs = [
         workspace_root.join("crates/refwork-emu/src"),

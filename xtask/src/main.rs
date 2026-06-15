@@ -45,8 +45,8 @@ fn usage() {
     println!("  cpu-tests [--dir DIR] [--filter SUBSTR] [--max-fail N]");
     println!("      Run the 65816 single-step JSON test corpus against the emulator CPU.");
     println!();
-    println!("  spc-tests [--dir DIR] [--filter SUBSTR]");
-    println!("      Validate the pinned SPC700 single-step corpus (M2 gate skeleton).");
+    println!("  spc-tests [--dir DIR] [--filter SUBSTR] [--max-fail N]");
+    println!("      Run the SPC700 single-step JSON corpus against the audio CPU.");
     println!();
     println!("  hash-chain [--frames N]");
     println!("      Print the chained synthetic-ROM frame hash (default 600 frames).");
@@ -144,6 +144,17 @@ fn cmd_spc_tests(args: &[String]) {
                     std::process::exit(2);
                 }
                 opts.filter = Some(args[i].clone());
+            }
+            "--max-fail" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("spc-tests: --max-fail requires a number");
+                    std::process::exit(2);
+                }
+                opts.max_fail = args[i].parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("spc-tests: --max-fail must be a non-negative integer");
+                    std::process::exit(2);
+                });
             }
             other => {
                 eprintln!("spc-tests: unknown option '{}'", other);

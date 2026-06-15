@@ -46,10 +46,13 @@ pub const WRAM_INIT_BYTE: u8 = 0x55;
 /// harness (API.md §3.6) and recorded in determinism reports.
 pub const EMU_VERSION: &str = "refwork-emu 0.1.0";
 
-// Test-only exports for the single-step CPU test runner (`xtask cpu-tests`)
-// and golden-trace tooling. Never part of the guest build.
+// Test-only exports for the single-step CPU test runner (`xtask cpu-tests`),
+// the SPC700 single-step runner (`xtask spc-tests`), and golden-trace tooling.
+// Never part of the guest build.
 #[cfg(feature = "introspect")]
 pub mod introspect {
+    pub use crate::apu::spc700::{ApuHalt, Spc700};
+    pub use crate::apu::Apu;
     pub use crate::bus::Bus;
     pub use crate::cpu::Cpu;
 }
