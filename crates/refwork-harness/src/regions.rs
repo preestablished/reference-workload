@@ -266,7 +266,7 @@ pub struct HarnessRegions {
 
 pub struct ActiveEmuRegions {
     _regions: ManuallyDrop<HarnessRegions>,
-    pub buffers: RegionBuffers,
+    buffers: Option<RegionBuffers>,
 }
 
 impl HarnessRegions {
@@ -370,7 +370,7 @@ impl HarnessRegions {
 
         Ok(ActiveEmuRegions {
             _regions: ManuallyDrop::new(self),
-            buffers,
+            buffers: Some(buffers),
         })
     }
 
@@ -380,6 +380,55 @@ impl HarnessRegions {
             expect_len(vram, VRAM_SIZE)?;
         }
         Ok(())
+    }
+}
+
+impl ActiveEmuRegions {
+    pub fn buffers(&self) -> &RegionBuffers {
+        self.buffers.as_ref().expect("emulator buffers were taken")
+    }
+
+    pub fn take_buffers(&mut self) -> RegionBuffers {
+        self.buffers
+            .take()
+            .expect("emulator buffers were already taken")
+    }
+
+    pub fn framebuffer(&self) -> Result<&[u8; FB_BYTES], RegionError> {
+        let bytes = self.regions().framebuffer.as_slice()?;
+        bytes.try_into().map_err(|_| RegionError::WrongSize {
+            name: "framebuffer",
+            expected: FB_BYTES,
+            actual: bytes.len(),
+        })
+    }
+
+    pub fn framebuffer_mut(&mut self) -> Result<&mut [u8; FB_BYTES], RegionError> {
+        let bytes = self.regions_mut().framebuffer.as_mut_slice()?;
+        let len = bytes.len();
+        bytes.try_into().map_err(|_| RegionError::WrongSize {
+            name: "framebuffer",
+            expected: FB_BYTES,
+            actual: len,
+        })
+    }
+
+    pub fn meta_mut(&mut self) -> Result<&mut [u8; META_SIZE], RegionError> {
+        let bytes = self.regions_mut().meta.as_mut_slice()?;
+        let len = bytes.len();
+        bytes.try_into().map_err(|_| RegionError::WrongSize {
+            name: "meta",
+            expected: META_SIZE,
+            actual: len,
+        })
+    }
+
+    fn regions(&self) -> &HarnessRegions {
+        &self._regions
+    }
+
+    fn regions_mut(&mut self) -> &mut HarnessRegions {
+        &mut self._regions
     }
 }
 
@@ -500,9 +549,9 @@ mod tests {
         // Safety: this test only inspects the returned active guard and does
         // not construct additional aliases.
         let active = unsafe { regions.activate_for_emu() }.unwrap();
-        assert_eq!(active.buffers.wram.len(), WRAM_SIZE);
-        assert_eq!(active.buffers.vram.as_ref().unwrap().len(), VRAM_SIZE);
-        assert_eq!(active.buffers.sram.as_ref().unwrap().len(), 2048);
+        assert_eq!(active.buffers().wram.len(), WRAM_SIZE);
+        assert_eq!(active.buffers().vram.as_ref().unwrap().len(), VRAM_SIZE);
+        assert_eq!(active.buffers().sram.as_ref().unwrap().len(), 2048);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use refwork_protocol::{CtlMsg, PROTO_VERSION};
 
 pub mod ctl;
+pub mod frame;
 pub mod game;
 pub mod meta;
 pub mod regions;

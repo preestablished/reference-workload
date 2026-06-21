@@ -378,6 +378,13 @@ mod tests {
             Ok(copied)
         }
 
+        fn try_recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+            if self.inbound.is_empty() {
+                return Ok(None);
+            }
+            self.recv_datagram(buf).map(Some)
+        }
+
         fn send_datagram(&mut self, bytes: &[u8]) -> io::Result<()> {
             let msg = refwork_protocol::decode(bytes)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;

@@ -63,6 +63,7 @@ impl From<EncodeError> for ControlError {
 
 pub trait DatagramTransport {
     fn recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    fn try_recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>>;
     fn send_datagram(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
@@ -88,10 +89,15 @@ impl<T: DatagramTransport> ControlChannel<T> {
     pub fn recv_msg(&mut self) -> Result<CtlMsg, ControlError> {
         let mut buf = [0u8; MAX_DATAGRAM + 1];
         let len = self.transport.recv_datagram(&mut buf)?;
-        if len > MAX_DATAGRAM {
-            return Err(ControlError::Oversize { len });
+        decode_datagram(&buf[..len.min(buf.len())], len)
+    }
+
+    pub fn try_recv_msg(&mut self) -> Result<Option<CtlMsg>, ControlError> {
+        let mut buf = [0u8; MAX_DATAGRAM + 1];
+        match self.transport.try_recv_datagram(&mut buf)? {
+            Some(len) => decode_datagram(&buf[..len.min(buf.len())], len).map(Some),
+            None => Ok(None),
         }
-        Ok(refwork_protocol::decode(&buf[..len])?)
     }
 
     pub fn send_msg(&mut self, msg: &CtlMsg) -> Result<(), ControlError> {
@@ -99,6 +105,13 @@ impl<T: DatagramTransport> ControlChannel<T> {
         self.transport.send_datagram(&bytes)?;
         Ok(())
     }
+}
+
+fn decode_datagram(bytes: &[u8], len: usize) -> Result<CtlMsg, ControlError> {
+    if len > MAX_DATAGRAM {
+        return Err(ControlError::Oversize { len });
+    }
+    Ok(refwork_protocol::decode(bytes)?)
 }
 
 pub struct SeqpacketFd {
@@ -205,6 +218,37 @@ impl DatagramTransport for SeqpacketFd {
             let err = io::Error::last_os_error();
             if err.kind() != io::ErrorKind::Interrupted {
                 return Err(err);
+            }
+        }
+    }
+
+    fn try_recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        loop {
+            // Safety: `buf` is a valid writable byte slice for its full length,
+            // and `fd` is owned by this transport.
+            let n = unsafe {
+                libc::recv(
+                    self.fd.as_raw_fd(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n >= 0 {
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "control socket closed",
+                    ));
+                }
+                return Ok(Some(n as usize));
+            }
+
+            let err = io::Error::last_os_error();
+            match err.kind() {
+                io::ErrorKind::Interrupted => {}
+                io::ErrorKind::WouldBlock => return Ok(None),
+                _ => return Err(err),
             }
         }
     }
