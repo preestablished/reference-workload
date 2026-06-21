@@ -188,6 +188,7 @@ impl Apu {
     }
 
     /// Write a byte to the SPC700's address space.
+    #[cfg_attr(not(any(test, feature = "introspect")), allow(dead_code))]
     pub fn mem_write(&mut self, addr: u16, value: u8) {
         if self.cpu.corpus_mode {
             self.aram.write(addr, value);

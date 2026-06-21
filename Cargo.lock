@@ -633,6 +633,8 @@ dependencies = [
 name = "refwork-harness"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "refwork-emu",
  "refwork-protocol",
 ]
 

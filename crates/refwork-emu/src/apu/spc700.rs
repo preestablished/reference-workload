@@ -647,6 +647,7 @@ impl Spc700 {
 impl Spc700 {
     /// Execute one instruction. Returns the number of SPC700 master-clock
     /// cycles consumed. When halted, returns 0 without executing anything.
+    #[cfg_attr(not(any(test, feature = "introspect")), allow(dead_code))]
     pub fn step(&mut self, mem: &mut [u8; 0x10000]) -> u32 {
         if self.halted.is_some() {
             return 0;
