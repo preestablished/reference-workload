@@ -310,6 +310,10 @@ impl HarnessRegions {
         &self.meta
     }
 
+    pub fn meta_mut(&mut self) -> &mut PublishedRegion {
+        &mut self.meta
+    }
+
     pub fn vram(&self) -> Option<&PublishedRegion> {
         self.vram.as_ref()
     }
