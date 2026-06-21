@@ -13,15 +13,16 @@ use refwork_harness::regions::{META_SIZE, WRAM_SIZE};
 use refwork_protocol::{CtlMsg, PROTO_VERSION};
 
 const FRAMES: u64 = 1_000;
-const REQUEST_WINDOW: u64 = 32;
 const FB_BYTES_U64: u64 = FB_BYTES as u64;
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 
 #[test]
 fn mock_agent_happy_path_1000_frames() {
     let rom = xtask::build_synth_rom();
     let rom_file = TempRom::write(&rom);
     let (agent_fd, harness_fd) = seqpacket_pair();
-    set_recv_timeout(agent_fd.as_raw_fd());
+    configure_socket(agent_fd.as_raw_fd());
+    configure_socket(harness_fd.as_raw_fd());
     let mut child = spawn_harness(harness_fd);
 
     send_msg(
@@ -38,31 +39,20 @@ fn mock_agent_happy_path_1000_frames() {
             dev_path: rom_file.path.display().to_string(),
         },
     );
-    send_msg(agent_fd.as_raw_fd(), &CtlMsg::Start {});
-    for frame in 1..=REQUEST_WINDOW {
-        send_msg(agent_fd.as_raw_fd(), &CtlMsg::HashRequest { frame });
-    }
-
     expect_game_loaded(agent_fd.as_raw_fd(), &rom);
     let regions = expect_regions_until_ready(agent_fd.as_raw_fd());
     assert_required_regions(&regions);
 
+    // Prime every frame request before validation. The harness frame loop
+    // free-runs and polls one queued datagram per frame boundary.
+    send_msg(agent_fd.as_raw_fd(), &CtlMsg::Start {});
+    for frame in 1..=FRAMES {
+        send_msg(agent_fd.as_raw_fd(), &CtlMsg::HashRequest { frame });
+    }
+
     let mut direct = DirectRun::new(&rom);
     for frame in 1..=FRAMES {
         let report = expect_hash_report(agent_fd.as_raw_fd(), frame);
-        let next_request = frame + REQUEST_WINDOW;
-        if next_request <= FRAMES {
-            send_msg(
-                agent_fd.as_raw_fd(),
-                &CtlMsg::HashRequest {
-                    frame: next_request,
-                },
-            );
-        }
-        if frame == FRAMES {
-            send_msg(agent_fd.as_raw_fd(), &CtlMsg::Shutdown {});
-        }
-
         let expected = direct.run_frame(frame);
         assert_eq!(
             report.wram, expected.wram,
@@ -74,6 +64,7 @@ fn mock_agent_happy_path_1000_frames() {
         );
     }
 
+    send_msg(agent_fd.as_raw_fd(), &CtlMsg::Shutdown {});
     wait_for_success(&mut child);
 }
 
@@ -222,13 +213,17 @@ fn expect_hash_report(fd: RawFd, expected_frame: u64) -> HashPair {
 
 fn send_msg(fd: RawFd, msg: &CtlMsg) {
     let bytes = refwork_protocol::encode(msg).expect("encode control message");
-    let sent = unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), 0) };
-    assert_eq!(
-        sent,
-        bytes.len() as isize,
-        "send failed for {msg:?}: {}",
-        io::Error::last_os_error()
-    );
+    loop {
+        let sent = unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), SEND_FLAGS) };
+        if sent == bytes.len() as isize {
+            return;
+        }
+        let err = io::Error::last_os_error();
+        if sent < 0 && err.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        panic!("send failed for {msg:?}: {err}");
+    }
 }
 
 fn recv_msg(fd: RawFd) -> CtlMsg {
@@ -240,14 +235,46 @@ fn recv_msg(fd: RawFd) -> CtlMsg {
 
 fn seqpacket_pair() -> (OwnedFd, OwnedFd) {
     let mut fds = [-1; 2];
-    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
     assert_eq!(rc, 0, "socketpair failed: {}", io::Error::last_os_error());
     let left = unsafe { OwnedFd::from_raw_fd(fds[0]) };
     let right = unsafe { OwnedFd::from_raw_fd(fds[1]) };
     (left, right)
 }
 
-fn set_recv_timeout(fd: RawFd) {
+fn configure_socket(fd: RawFd) {
+    set_socket_buffer(fd, libc::SO_RCVBUF, 4 * 1024 * 1024);
+    set_socket_buffer(fd, libc::SO_SNDBUF, 4 * 1024 * 1024);
+    set_socket_timeout(fd, libc::SO_RCVTIMEO);
+    set_socket_timeout(fd, libc::SO_SNDTIMEO);
+}
+
+fn set_socket_buffer(fd: RawFd, opt: libc::c_int, bytes: libc::c_int) {
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            opt,
+            (&bytes as *const libc::c_int).cast(),
+            std::mem::size_of_val(&bytes) as libc::socklen_t,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "setsockopt buffer option {opt} failed: {}",
+        io::Error::last_os_error()
+    );
+}
+
+fn set_socket_timeout(fd: RawFd, opt: libc::c_int) {
     let timeout = libc::timeval {
         tv_sec: 10,
         tv_usec: 0,
@@ -264,12 +291,12 @@ fn set_recv_timeout(fd: RawFd) {
     assert_eq!(
         rc,
         0,
-        "setsockopt SO_RCVTIMEO failed: {}",
+        "setsockopt timeout option {opt} failed: {}",
         io::Error::last_os_error()
     );
 }
 
-fn spawn_harness(harness_fd: OwnedFd) -> Child {
+fn spawn_harness(harness_fd: OwnedFd) -> HarnessChild {
     let raw_fd = harness_fd.as_raw_fd();
     let mut command = Command::new(env!("CARGO_BIN_EXE_refwork-harness"));
     command
@@ -287,21 +314,55 @@ fn spawn_harness(harness_fd: OwnedFd) -> Child {
                 }
                 libc::close(raw_fd);
             }
+            let flags = libc::fcntl(CONTROL_FD, libc::F_GETFD);
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(CONTROL_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
     }
 
     let child = command.spawn().expect("spawn refwork-harness");
     drop(harness_fd);
-    child
+    HarnessChild {
+        child,
+        reaped: false,
+    }
 }
 
-fn wait_for_success(child: &mut Child) {
+struct HarnessChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl Drop for HarnessChild {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            _ => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+}
+
+fn wait_for_success(harness: &mut HarnessChild) {
     for _ in 0..1_000 {
-        match child.try_wait().expect("poll child") {
-            Some(status) if status.success() => return,
+        match harness.child.try_wait().expect("poll child") {
+            Some(status) if status.success() => {
+                harness.reaped = true;
+                return;
+            }
             Some(status) => {
-                let stderr = read_child_stderr(child);
+                harness.reaped = true;
+                let stderr = read_child_stderr(&mut harness.child);
                 panic!("harness exited with {status}: {stderr}");
             }
             None => unsafe {
@@ -310,9 +371,10 @@ fn wait_for_success(child: &mut Child) {
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
-    let stderr = read_child_stderr(child);
+    let _ = harness.child.kill();
+    let _ = harness.child.wait();
+    harness.reaped = true;
+    let stderr = read_child_stderr(&mut harness.child);
     panic!("harness did not exit after Shutdown: {stderr}");
 }
 

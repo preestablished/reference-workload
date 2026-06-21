@@ -8,7 +8,7 @@ The guest-sdk happy-path fixture lives at
 Run it with:
 
 ```sh
-cargo test -p refwork-harness --test mock_agent -- mock_agent_happy_path_1000_frames --nocapture
+cargo test --locked -p refwork-harness --test mock_agent -- mock_agent_happy_path_1000_frames --nocapture
 ```
 
 The fixture launches `refwork-harness --fd3` with a real Linux
