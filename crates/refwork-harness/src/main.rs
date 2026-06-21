@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 fn main() {
     let mut args = std::env::args();
     let _program = args.next();

@@ -1,5 +1,5 @@
-use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::fmt;
+use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
 use refwork_emu::{RegionBuffers, FB_BYTES};
@@ -18,9 +18,13 @@ pub enum RegionError {
         name: &'static str,
         len: usize,
     },
-    Layout {
+    InvalidSramLen {
+        len: usize,
+    },
+    Map {
         name: &'static str,
         len: usize,
+        errno: i32,
     },
     Published {
         name: &'static str,
@@ -39,12 +43,13 @@ impl fmt::Display for RegionError {
             RegionError::NotPageMultiple { name, len } => {
                 write!(f, "region `{name}` length {len} is not a page multiple")
             }
-            RegionError::Layout { name, len } => {
-                write!(
-                    f,
-                    "region `{name}` length {len} cannot form an allocation layout"
-                )
+            RegionError::InvalidSramLen { len } => {
+                write!(f, "sram logical length {len} is not supported")
             }
+            RegionError::Map { name, len, errno } => write!(
+                f,
+                "mmap for region `{name}` length {len} failed with errno {errno}"
+            ),
             RegionError::Published { name } => {
                 write!(f, "region `{name}` is already published")
             }
@@ -66,11 +71,14 @@ pub struct PublishedRegion {
     name: &'static str,
     ptr: NonNull<u8>,
     len: usize,
-    layout: Layout,
     published: bool,
 }
 
 impl PublishedRegion {
+    /// Allocate a page-aligned, populated, locked mapping for a published
+    /// region. The mapping is zero-filled by the kernel and remains stable
+    /// until this owner is dropped before publication, or for process lifetime
+    /// once activated for the current emulator API.
     pub fn new(name: &'static str, len: usize) -> Result<Self, RegionError> {
         if len == 0 {
             return Err(RegionError::Empty { name });
@@ -78,16 +86,12 @@ impl PublishedRegion {
         if !len.is_multiple_of(PAGE_SIZE) {
             return Err(RegionError::NotPageMultiple { name, len });
         }
-        let layout = Layout::from_size_align(len, PAGE_SIZE)
-            .map_err(|_| RegionError::Layout { name, len })?;
-        // Safety: `layout` is non-zero-sized and uses a power-of-two alignment.
-        let raw = unsafe { alloc_zeroed(layout) };
-        let ptr = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
+
+        let ptr = map_region(name, len)?;
         Ok(Self {
             name,
             ptr,
             len,
-            layout,
             published: false,
         })
     }
@@ -116,19 +120,24 @@ impl PublishedRegion {
         (self.gva() as usize).is_multiple_of(PAGE_SIZE)
     }
 
-    pub fn as_slice(&self) -> &[u8] {
-        // Safety: `ptr` came from an allocation with `len` bytes and remains
-        // live until `Drop`.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    pub fn as_slice(&self) -> Result<&[u8], RegionError> {
+        self.ensure_unpublished()?;
+        // Safety: `ptr` came from an mmap with `len` bytes and remains live
+        // until `Drop`; publication has not handed out static aliases.
+        Ok(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) })
     }
 
     pub fn as_mut_slice(&mut self) -> Result<&mut [u8], RegionError> {
+        self.ensure_unpublished()?;
+        // Safety: caller has `&mut self`, and the region is unpublished.
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) })
+    }
+
+    fn ensure_unpublished(&self) -> Result<(), RegionError> {
         if self.published {
             return Err(RegionError::Published { name: self.name });
         }
-        // Safety: caller has `&mut self`, so no other mutable slice can be
-        // produced through this owner at the same time.
-        Ok(unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) })
+        Ok(())
     }
 
     fn mark_published(&mut self) {
@@ -136,6 +145,7 @@ impl PublishedRegion {
     }
 
     unsafe fn static_array<const N: usize>(&mut self) -> Result<&'static mut [u8; N], RegionError> {
+        self.ensure_unpublished()?;
         if self.len != N {
             return Err(RegionError::WrongSize {
                 name: self.name,
@@ -144,25 +154,65 @@ impl PublishedRegion {
             });
         }
         self.mark_published();
-        // Safety: upheld by the caller of `HarnessRegions::emu_buffers`.
+        // Safety: upheld by the caller of `HarnessRegions::activate_for_emu`.
         Ok(unsafe { &mut *(self.ptr.as_ptr() as *mut [u8; N]) })
     }
 
-    unsafe fn static_slice(&mut self) -> &'static mut [u8] {
+    unsafe fn static_prefix(&mut self, len: usize) -> Result<&'static mut [u8], RegionError> {
+        self.ensure_unpublished()?;
+        if len > self.len {
+            return Err(RegionError::WrongSize {
+                name: self.name,
+                expected: len,
+                actual: self.len,
+            });
+        }
         self.mark_published();
-        // Safety: upheld by the caller of `HarnessRegions::emu_buffers`.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+        // Safety: upheld by the caller of `HarnessRegions::activate_for_emu`;
+        // `len <= self.len` was checked above.
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), len) })
     }
 }
 
 impl Drop for PublishedRegion {
     fn drop(&mut self) {
-        // Safety: `ptr` was allocated with this exact `layout` in `new`, and
-        // `PublishedRegion` is the sole owner responsible for deallocation.
+        // Safety: `ptr` was returned by `mmap` for exactly `len` bytes and this
+        // owner is responsible for unmapping unless it is intentionally kept
+        // alive by `ActiveEmuRegions`.
         unsafe {
-            dealloc(self.ptr.as_ptr(), self.layout);
+            libc::munmap(self.ptr.as_ptr().cast(), self.len);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn map_region(name: &'static str, len: usize) -> Result<NonNull<u8>, RegionError> {
+    // Safety: arguments request a private anonymous read/write mapping. The
+    // returned pointer is checked against MAP_FAILED before use.
+    let raw = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_LOCKED | libc::MAP_POPULATE,
+            -1,
+            0,
+        )
+    };
+    if raw == libc::MAP_FAILED {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return Err(RegionError::Map { name, len, errno });
+    }
+    Ok(NonNull::new(raw.cast::<u8>()).expect("mmap returned null without MAP_FAILED"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn map_region(name: &'static str, len: usize) -> Result<NonNull<u8>, RegionError> {
+    Err(RegionError::Map {
+        name,
+        len,
+        errno: 0,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,12 +223,50 @@ pub struct RegionDescriptor {
     pub writable: bool,
 }
 
+pub struct SramRegion {
+    backing: PublishedRegion,
+    logical_len: usize,
+}
+
+impl SramRegion {
+    pub fn new(logical_len: usize) -> Result<Self, RegionError> {
+        validate_sram_len(logical_len)?;
+        let mapped_len = logical_len.next_multiple_of(PAGE_SIZE);
+        Ok(Self {
+            backing: PublishedRegion::new("sram", mapped_len)?,
+            logical_len,
+        })
+    }
+
+    pub fn logical_len(&self) -> usize {
+        self.logical_len
+    }
+
+    pub fn mapped_len(&self) -> usize {
+        self.backing.len()
+    }
+
+    fn descriptor(&self) -> RegionDescriptor {
+        descriptor_for(&self.backing)
+    }
+
+    unsafe fn emu_slice(&mut self) -> Result<&'static mut [u8], RegionError> {
+        // Safety: upheld by the caller of `HarnessRegions::activate_for_emu`.
+        unsafe { self.backing.static_prefix(self.logical_len) }
+    }
+}
+
 pub struct HarnessRegions {
-    pub wram: PublishedRegion,
-    pub framebuffer: PublishedRegion,
-    pub meta: PublishedRegion,
-    pub vram: Option<PublishedRegion>,
-    pub sram: Option<PublishedRegion>,
+    wram: PublishedRegion,
+    framebuffer: PublishedRegion,
+    meta: PublishedRegion,
+    vram: Option<PublishedRegion>,
+    sram: Option<SramRegion>,
+}
+
+pub struct ActiveEmuRegions {
+    _regions: ManuallyDrop<HarnessRegions>,
+    pub buffers: RegionBuffers,
 }
 
 impl HarnessRegions {
@@ -200,40 +288,65 @@ impl HarnessRegions {
             None
         };
         regions.sram = match sram_len {
-            Some(len) => Some(PublishedRegion::new("sram", len)?),
+            Some(len) => Some(SramRegion::new(len)?),
             None => None,
         };
         Ok(regions)
     }
 
+    pub fn wram(&self) -> &PublishedRegion {
+        &self.wram
+    }
+
+    pub fn wram_mut(&mut self) -> &mut PublishedRegion {
+        &mut self.wram
+    }
+
+    pub fn framebuffer(&self) -> &PublishedRegion {
+        &self.framebuffer
+    }
+
+    pub fn meta(&self) -> &PublishedRegion {
+        &self.meta
+    }
+
+    pub fn vram(&self) -> Option<&PublishedRegion> {
+        self.vram.as_ref()
+    }
+
+    pub fn sram(&self) -> Option<&SramRegion> {
+        self.sram.as_ref()
+    }
+
     pub fn descriptors(&self) -> Vec<RegionDescriptor> {
         let mut out = Vec::with_capacity(5);
-        push_descriptor(&mut out, &self.wram);
-        push_descriptor(&mut out, &self.framebuffer);
-        push_descriptor(&mut out, &self.meta);
+        out.push(descriptor_for(&self.wram));
+        out.push(descriptor_for(&self.framebuffer));
+        out.push(descriptor_for(&self.meta));
         if let Some(region) = &self.vram {
-            push_descriptor(&mut out, region);
+            out.push(descriptor_for(region));
         }
         if let Some(region) = &self.sram {
-            push_descriptor(&mut out, region);
+            out.push(region.descriptor());
         }
         out
     }
 
-    /// Bridge the owned region set into the current emulator core API.
+    /// Consume the region owner and bridge it into the current emulator API.
     ///
     /// # Safety
     ///
-    /// The returned references are widened to `'static` because
     /// `refwork_emu::RegionBuffers` currently requires static published
-    /// slices. The caller must keep this `HarnessRegions` value alive and must
-    /// not access or drop it until the `Core` built from the returned buffers
-    /// has stopped. This method marks the bridged regions as published so this
-    /// owner will no longer hand out mutable slices through safe APIs.
-    pub unsafe fn emu_buffers(&mut self) -> Result<RegionBuffers, RegionError> {
-        Ok(RegionBuffers {
-            // Safety: this method's contract requires the owner to outlive the
-            // emulator core and forbids aliasing access.
+    /// slices. This method therefore consumes the owner and returns an active
+    /// guard that keeps mappings alive for process lifetime. The returned guard
+    /// must live at least as long as the `Core` built from `buffers`, and code
+    /// must not manufacture additional mutable aliases to the same mappings.
+    pub unsafe fn activate_for_emu(mut self) -> Result<ActiveEmuRegions, RegionError> {
+        self.validate_emu_sizes()?;
+
+        let buffers = RegionBuffers {
+            // Safety: this method consumes the owner and stores it inside
+            // `ActiveEmuRegions`, preventing safe post-publication access.
             wram: unsafe { self.wram.static_array::<WRAM_SIZE>()? },
             vram: match &mut self.vram {
                 Some(region) => {
@@ -245,21 +358,54 @@ impl HarnessRegions {
             sram: match &mut self.sram {
                 Some(region) => {
                     // Safety: same contract as above.
-                    Some(unsafe { region.static_slice() })
+                    Some(unsafe { region.emu_slice()? })
                 }
                 None => None,
             },
+        };
+
+        Ok(ActiveEmuRegions {
+            _regions: ManuallyDrop::new(self),
+            buffers,
         })
+    }
+
+    fn validate_emu_sizes(&self) -> Result<(), RegionError> {
+        expect_len(&self.wram, WRAM_SIZE)?;
+        if let Some(vram) = &self.vram {
+            expect_len(vram, VRAM_SIZE)?;
+        }
+        Ok(())
     }
 }
 
-fn push_descriptor(out: &mut Vec<RegionDescriptor>, region: &PublishedRegion) {
-    out.push(RegionDescriptor {
+fn descriptor_for(region: &PublishedRegion) -> RegionDescriptor {
+    RegionDescriptor {
         name: region.name(),
         gva: region.gva(),
         len: region.len() as u64,
         writable: false,
-    });
+    }
+}
+
+fn expect_len(region: &PublishedRegion, expected: usize) -> Result<(), RegionError> {
+    if region.len() == expected {
+        Ok(())
+    } else {
+        Err(RegionError::WrongSize {
+            name: region.name(),
+            expected,
+            actual: region.len(),
+        })
+    }
+}
+
+fn validate_sram_len(len: usize) -> Result<(), RegionError> {
+    if len.is_power_of_two() && (2048..=512 * 1024).contains(&len) {
+        Ok(())
+    } else {
+        Err(RegionError::InvalidSramLen { len })
+    }
 }
 
 #[cfg(test)]
@@ -286,9 +432,9 @@ mod tests {
         let mut region = PublishedRegion::new("meta", META_SIZE).unwrap();
         assert_eq!(region.len(), META_SIZE);
         assert!(region.is_page_aligned());
-        assert!(region.as_slice().iter().all(|&b| b == 0));
+        assert!(region.as_slice().unwrap().iter().all(|&b| b == 0));
         region.as_mut_slice().unwrap()[0] = 7;
-        assert_eq!(region.as_slice()[0], 7);
+        assert_eq!(region.as_slice().unwrap()[0], 7);
     }
 
     #[test]
@@ -311,51 +457,71 @@ mod tests {
     #[test]
     fn optional_regions_are_explicit() {
         let regions = HarnessRegions::with_optional(true, Some(8192)).unwrap();
-        let names: Vec<_> = regions.descriptors().iter().map(|d| d.name).collect();
+        let desc = regions.descriptors();
+        let names: Vec<_> = desc.iter().map(|d| d.name).collect();
         assert_eq!(names, ["wram", "framebuffer", "meta", "vram", "sram"]);
+        assert_eq!(regions.sram().unwrap().logical_len(), 8192);
+        assert_eq!(regions.sram().unwrap().mapped_len(), 8192);
     }
 
     #[test]
-    fn emu_bridge_marks_regions_published_and_blocks_mutation() {
-        let mut regions = HarnessRegions::with_optional(true, Some(8192)).unwrap();
-        {
-            // Safety: this test immediately drops the returned buffer
-            // references before accessing the owner again.
-            let buffers = unsafe { regions.emu_buffers() }.unwrap();
-            assert_eq!(buffers.wram.len(), WRAM_SIZE);
-            assert_eq!(buffers.vram.as_ref().unwrap().len(), VRAM_SIZE);
-            assert_eq!(buffers.sram.as_ref().unwrap().len(), 8192);
-        }
+    fn sram_logical_len_can_be_smaller_than_mapping_len() {
+        let regions = HarnessRegions::with_optional(false, Some(2048)).unwrap();
+        let sram = regions.sram().unwrap();
+        assert_eq!(sram.logical_len(), 2048);
+        assert_eq!(sram.mapped_len(), PAGE_SIZE);
+        let sram_desc = regions
+            .descriptors()
+            .into_iter()
+            .find(|d| d.name == "sram")
+            .unwrap();
+        assert_eq!(sram_desc.len, PAGE_SIZE as u64);
+    }
 
-        assert!(regions.wram.is_published());
-        assert!(regions.vram.as_ref().unwrap().is_published());
-        assert!(regions.sram.as_ref().unwrap().is_published());
+    #[test]
+    fn rejects_invalid_sram_lengths() {
         assert!(matches!(
-            regions.wram.as_mut_slice(),
-            Err(RegionError::Published { name: "wram" })
+            HarnessRegions::with_optional(false, Some(1024)),
+            Err(RegionError::InvalidSramLen { len: 1024 })
+        ));
+        assert!(matches!(
+            HarnessRegions::with_optional(false, Some(3072)),
+            Err(RegionError::InvalidSramLen { len: 3072 })
         ));
     }
 
     #[test]
-    fn emu_bridge_rejects_wrong_sized_wram() {
-        let mut regions = HarnessRegions {
-            wram: PublishedRegion::new("wram", PAGE_SIZE).unwrap(),
-            framebuffer: PublishedRegion::new("framebuffer", FB_BYTES).unwrap(),
-            meta: PublishedRegion::new("meta", META_SIZE).unwrap(),
-            vram: None,
-            sram: None,
-        };
-        let err = match unsafe { regions.emu_buffers() } {
-            Ok(_) => panic!("wrong-sized wram should fail"),
-            Err(err) => err,
-        };
-        assert_eq!(
-            err,
-            RegionError::WrongSize {
-                name: "wram",
-                expected: WRAM_SIZE,
-                actual: PAGE_SIZE
-            }
-        );
+    fn activation_marks_regions_published_and_preserves_logical_sram_len() {
+        let regions = HarnessRegions::with_optional(true, Some(2048)).unwrap();
+        // Safety: this test only inspects the returned active guard and does
+        // not construct additional aliases.
+        let active = unsafe { regions.activate_for_emu() }.unwrap();
+        assert_eq!(active.buffers.wram.len(), WRAM_SIZE);
+        assert_eq!(active.buffers.vram.as_ref().unwrap().len(), VRAM_SIZE);
+        assert_eq!(active.buffers.sram.as_ref().unwrap().len(), 2048);
+    }
+
+    #[test]
+    fn published_region_blocks_owner_slices_and_repeated_publication() {
+        let mut region = PublishedRegion::new("wram", WRAM_SIZE).unwrap();
+        {
+            // Safety: this test drops the returned reference before checking
+            // the owner rejects further access.
+            let wram = unsafe { region.static_array::<WRAM_SIZE>() }.unwrap();
+            assert_eq!(wram.len(), WRAM_SIZE);
+        }
+
+        assert!(matches!(
+            region.as_slice(),
+            Err(RegionError::Published { name: "wram" })
+        ));
+        assert!(matches!(
+            region.as_mut_slice(),
+            Err(RegionError::Published { name: "wram" })
+        ));
+        assert!(matches!(
+            unsafe { region.static_array::<WRAM_SIZE>() },
+            Err(RegionError::Published { name: "wram" })
+        ));
     }
 }

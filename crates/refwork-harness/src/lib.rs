@@ -8,10 +8,8 @@ pub mod regions;
 /// Build the harness-side handshake reply message.
 ///
 /// Returns `CtlMsg::HelloAck` populated with the current protocol version and
-/// the supplied emulator identity strings.  The caller supplies `emu` and
-/// `emu_version` as parameters to avoid a compile-time dependency on
-/// `refwork-emu`; that dependency edge will be added in M3 when the harness
-/// gains its full state machine.
+/// the supplied emulator identity strings. The helper stays parameterized so
+/// tests and future harness modes can choose the advertised identity.
 ///
 /// See API.md §3.1 and §3.2 for the handshake state machine.
 pub fn hello_ack(emu: &str, emu_version: &str) -> CtlMsg {

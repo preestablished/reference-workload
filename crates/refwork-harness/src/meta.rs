@@ -1,3 +1,7 @@
+#![forbid(unsafe_code)]
+
+use std::sync::atomic::{compiler_fence, Ordering};
+
 use refwork_protocol::FaultCode;
 
 pub const META_SIZE: usize = 4096;
@@ -48,20 +52,22 @@ impl<'a> MetaPage<'a> {
     }
 
     pub fn set_ready(&mut self) {
-        self.set_status(MetaStatus::Ready);
         self.set_frame(0);
+        self.set_last_pad(0);
+        self.write_u32(FAULT_CODE_OFF, 0);
+        self.publish_status(MetaStatus::Ready);
     }
 
     pub fn set_running_frame(&mut self, frame: u64, last_pad: u16) {
-        self.set_status(MetaStatus::Running);
         self.set_frame(frame);
         self.set_last_pad(last_pad);
+        self.publish_status(MetaStatus::Running);
     }
 
     pub fn set_fault(&mut self, frame: u64, code: FaultCode) {
-        self.set_status(MetaStatus::Faulted);
         self.set_frame(frame);
         self.write_u32(FAULT_CODE_OFF, fault_code_value(code));
+        self.publish_status(MetaStatus::Faulted);
     }
 
     pub fn set_frame(&mut self, frame: u64) {
@@ -95,6 +101,11 @@ impl<'a> MetaPage<'a> {
 
     fn write_u64(&mut self, off: usize, value: u64) {
         self.bytes[off..off + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn publish_status(&mut self, status: MetaStatus) {
+        compiler_fence(Ordering::Release);
+        self.set_status(status);
     }
 }
 
