@@ -18,6 +18,7 @@ fn main() {
         "cpu-tests" => cmd_cpu_tests(&args[1..]),
         "spc-tests" => cmd_spc_tests(&args[1..]),
         "hash-chain" => cmd_hash_chain(&args[1..]),
+        "image" => cmd_image(&args[1..]),
         "--help" | "-h" | "help" => {
             usage();
         }
@@ -55,6 +56,12 @@ fn usage() {
     println!("  hash-chain [--frames N]");
     println!("      Print the chained synthetic-ROM frame hash (default 600 frames).");
     println!("      Identical across architectures = cross-arch determinism holds.");
+    println!();
+    println!("  image build --agent-bin PATH");
+    println!("      Build dist/workload-image-<version>/ image handoff artifacts.");
+    println!();
+    println!("  image validate PATH");
+    println!("      Validate a workload-image.yaml and its adjacent artifacts.");
 }
 
 // ─── audit-syms ──────────────────────────────────────────────────────────────
@@ -148,6 +155,74 @@ fn cmd_deny(_args: &[String]) {
     match xtask::deny::run_deny(&workspace_root) {
         Ok(()) => {}
         Err(_count) => std::process::exit(1),
+    }
+}
+
+// ─── image ───────────────────────────────────────────────────────────────────
+
+fn cmd_image(args: &[String]) {
+    let Some(subcommand) = args.first() else {
+        eprintln!("image: expected subcommand build or validate");
+        std::process::exit(2);
+    };
+    match subcommand.as_str() {
+        "build" => cmd_image_build(&args[1..]),
+        "validate" => cmd_image_validate(&args[1..]),
+        other => {
+            eprintln!("image: unknown subcommand '{}'", other);
+            std::process::exit(2);
+        }
+    }
+}
+
+fn cmd_image_build(args: &[String]) {
+    let mut agent_bin: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent-bin" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("image build: --agent-bin requires a path");
+                    std::process::exit(2);
+                }
+                agent_bin = Some(PathBuf::from(&args[i]));
+            }
+            other => {
+                eprintln!("image build: unknown option '{}'", other);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(agent_bin) = agent_bin else {
+        eprintln!("image build: --agent-bin is required");
+        std::process::exit(2);
+    };
+
+    let workspace_root = find_workspace_root();
+    match xtask::image::build_image(&workspace_root, &agent_bin) {
+        Ok(out_dir) => println!("image build: wrote {}", out_dir.display()),
+        Err(err) => {
+            eprintln!("image build: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_image_validate(args: &[String]) {
+    if args.len() != 1 {
+        eprintln!("image validate: expected exactly one manifest path");
+        std::process::exit(2);
+    }
+
+    match xtask::image::validate_manifest(&PathBuf::from(&args[0])) {
+        Ok(()) => println!("image validate: OK - {}", args[0]),
+        Err(err) => {
+            eprintln!("image validate: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
