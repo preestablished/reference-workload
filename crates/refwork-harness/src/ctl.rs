@@ -343,6 +343,19 @@ mod tests {
     }
 
     #[test]
+    fn seqpacket_try_recv_reports_empty_then_message() {
+        let (transport, mut peer) = seqpacket_pair();
+        let mut channel = ControlChannel::new(transport);
+
+        assert_eq!(channel.try_recv_msg().unwrap(), None);
+
+        let msg = refwork_protocol::encode(&CtlMsg::Shutdown {}).unwrap();
+        send_raw(&mut peer, &msg);
+
+        assert_eq!(channel.try_recv_msg().unwrap(), Some(CtlMsg::Shutdown {}));
+    }
+
+    #[test]
     fn closed_peer_send_returns_error_instead_of_sigpipe() {
         let (transport, peer) = seqpacket_pair();
         drop(peer);

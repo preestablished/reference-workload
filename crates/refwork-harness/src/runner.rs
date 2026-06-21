@@ -6,11 +6,10 @@ use refwork_emu::EMU_VERSION;
 use refwork_protocol::{CtlMsg, FaultCode, PROTO_VERSION};
 
 use crate::ctl::{ControlChannel, ControlError, DatagramTransport};
+use crate::fault_detail::bounded_fault_detail;
 use crate::game::{GameLoadError, GameLoader, LoadedGame};
 use crate::meta::{MetaPage, META_SIZE};
 use crate::regions::{HarnessRegions, RegionError};
-
-const MAX_FAULT_DETAIL_BYTES: usize = 512;
 
 pub struct SetupConfig {
     pub emu_name: &'static str,
@@ -330,18 +329,6 @@ where
     Ok(())
 }
 
-fn bounded_fault_detail(detail: &str) -> String {
-    let mut end = detail.len().min(MAX_FAULT_DETAIL_BYTES);
-    while !detail.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end < detail.len() {
-        format!("{}...", &detail[..end])
-    } else {
-        detail.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -351,6 +338,7 @@ mod tests {
 
     use super::*;
     use crate::ctl::DatagramTransport;
+    use crate::fault_detail::MAX_FAULT_DETAIL_BYTES;
     use crate::game::loaded_game_from_rom;
     use crate::meta::MetaStatus;
 

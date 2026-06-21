@@ -3,6 +3,7 @@
 use refwork_protocol::{CtlMsg, PROTO_VERSION};
 
 pub mod ctl;
+pub(crate) mod fault_detail;
 pub mod frame;
 pub mod game;
 pub mod meta;

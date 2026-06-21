@@ -6,11 +6,10 @@ use refwork_emu::{Core, CoreError, FrameFlags};
 use refwork_protocol::{CtlMsg, FaultCode};
 
 use crate::ctl::{ControlChannel, ControlError, DatagramTransport};
+use crate::fault_detail::bounded_fault_detail;
 use crate::meta::{MetaPage, META_SIZE};
 use crate::regions::{ActiveEmuRegions, RegionError};
 use crate::runner::SetupResult;
-
-const MAX_FAULT_DETAIL_BYTES: usize = 512;
 
 pub trait Platform {
     fn poll_input(&mut self, port: u8) -> u16;
@@ -129,7 +128,8 @@ impl FrameLoop {
             let flags = self.core.run_one_frame(pad);
             if flags.contains(FrameFlags::FAULTED) {
                 let frame = self.core.frame_counter();
-                return self.fault_emu(channel, frame, "core returned FAULTED");
+                let detail = self.core_fault_detail();
+                return self.fault_emu(channel, frame, &detail);
             }
 
             self.core
@@ -139,6 +139,8 @@ impl FrameLoop {
             platform.frame_mark(frame);
             platform.quiesce_check();
 
+            // Deliberately poll one datagram per completed-frame boundary.
+            // Additional queued control messages are observed on later frames.
             match self.recv_boundary_msg(channel, frame)? {
                 Some(BoundaryAction::Continue) | None => {}
                 Some(BoundaryAction::Shutdown) => return Ok(FrameLoopExit::Shutdown { frame }),
@@ -275,6 +277,13 @@ impl FrameLoop {
         })?;
         Ok(())
     }
+
+    fn core_fault_detail(&self) -> String {
+        self.core
+            .fault()
+            .map(|fault| format!("{fault:?}"))
+            .unwrap_or_else(|| "core returned FAULTED without fault detail".into())
+    }
 }
 
 pub fn run_frame_loop<T, P>(
@@ -295,22 +304,12 @@ enum BoundaryAction {
     Shutdown,
 }
 
-fn bounded_fault_detail(detail: &str) -> String {
-    let mut end = detail.len().min(MAX_FAULT_DETAIL_BYTES);
-    while !detail.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end < detail.len() {
-        format!("{}...", &detail[..end])
-    } else {
-        detail.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::io;
+
+    use refwork_protocol::MAX_DATAGRAM;
 
     use crate::game::loaded_game_from_rom;
     use crate::meta::{fault_code_value, MetaStatus};
@@ -420,8 +419,18 @@ mod tests {
         rom
     }
 
+    fn stp_rom() -> Vec<u8> {
+        let mut rom = nop_rom();
+        rom[0] = 0xdb;
+        rom
+    }
+
     fn setup_result() -> SetupResult {
-        let game = loaded_game_from_rom(nop_rom()).unwrap();
+        setup_result_for_rom(nop_rom())
+    }
+
+    fn setup_result_for_rom(rom: Vec<u8>) -> SetupResult {
+        let game = loaded_game_from_rom(rom).unwrap();
         let mut regions = HarnessRegions::required().unwrap();
         let meta_bytes: &mut [u8; META_SIZE] = regions
             .meta_mut()
@@ -462,19 +471,30 @@ mod tests {
     #[test]
     fn hash_request_reports_only_last_completed_frame() {
         let setup = setup_result();
+        let mut frame_loop = FrameLoop::new(setup).unwrap();
         let mut channel = ControlChannel::new(ScriptTransport::new(vec![
             Inbound::Bytes(wire(CtlMsg::HashRequest { frame: 1 })),
             Inbound::Bytes(wire(CtlMsg::Shutdown {})),
         ]));
         let mut platform = TestPlatform::with_pads(&[1, 2]);
 
-        let exit = run_frame_loop(&mut channel, setup, &mut platform).unwrap();
+        let exit = frame_loop.run(&mut channel, &mut platform).unwrap();
 
         assert_eq!(exit, FrameLoopExit::Shutdown { frame: 2 });
-        assert!(matches!(
+        let mut expected = FrameLoop::new(setup_result()).unwrap();
+        let flags = expected.core.run_one_frame(1);
+        assert!(!flags.contains(FrameFlags::FAULTED));
+        expected
+            .core
+            .blit_completed_frame(expected.active.framebuffer_mut().unwrap());
+        assert_eq!(
             channel.transport().sent.first(),
-            Some(CtlMsg::HashReport { frame: 1, .. })
-        ));
+            Some(&CtlMsg::HashReport {
+                frame: 1,
+                wram: blake3::hash(expected.core.wram()).into(),
+                fb: blake3::hash(expected.active.framebuffer().unwrap()).into(),
+            })
+        );
         assert_eq!(platform.marks, vec![1, 2]);
     }
 
@@ -540,6 +560,62 @@ mod tests {
     }
 
     #[test]
+    fn malformed_steady_state_datagram_faults_bad_proto() {
+        let setup = setup_result();
+        let mut malformed = wire(CtlMsg::Shutdown {});
+        malformed.push(0xff);
+        let mut frame_loop = FrameLoop::new(setup).unwrap();
+        let mut channel =
+            ControlChannel::new(ScriptTransport::new(vec![Inbound::Bytes(malformed)]));
+        let mut platform = TestPlatform::with_pads(&[0]);
+
+        let err = frame_loop.run(&mut channel, &mut platform).unwrap_err();
+
+        assert!(matches!(err, FrameLoopError::BadProto { frame: 1, .. }));
+        assert_fault(&channel.transport().sent, FaultCode::BadProto, 1);
+        assert_meta_fault(&mut frame_loop, FaultCode::BadProto);
+    }
+
+    #[test]
+    fn oversize_steady_state_datagram_faults_bad_proto() {
+        let setup = setup_result();
+        let mut frame_loop = FrameLoop::new(setup).unwrap();
+        let mut channel = ControlChannel::new(ScriptTransport::new(vec![Inbound::Bytes(vec![
+            0;
+            MAX_DATAGRAM + 2
+        ])]));
+        let mut platform = TestPlatform::with_pads(&[0]);
+
+        let err = frame_loop.run(&mut channel, &mut platform).unwrap_err();
+
+        assert!(matches!(err, FrameLoopError::BadProto { frame: 1, .. }));
+        assert_fault(&channel.transport().sent, FaultCode::BadProto, 1);
+        assert_meta_fault(&mut frame_loop, FaultCode::BadProto);
+    }
+
+    #[test]
+    fn emu_halt_fault_includes_core_fault_detail() {
+        let setup = setup_result_for_rom(stp_rom());
+        let mut frame_loop = FrameLoop::new(setup).unwrap();
+        let mut channel = ControlChannel::new(ScriptTransport::new(vec![]));
+        let mut platform = TestPlatform::with_pads(&[0]);
+
+        let err = frame_loop.run(&mut channel, &mut platform).unwrap_err();
+
+        assert!(
+            matches!(err, FrameLoopError::EmuHalt { frame: 0, ref detail } if detail.contains("CpuStopped")),
+            "expected CpuStopped detail, got {err:?}"
+        );
+        let fault_detail = fault_detail_with_code(&channel.transport().sent, FaultCode::EmuHalt);
+        assert!(
+            fault_detail.contains("CpuStopped"),
+            "expected CpuStopped detail, got {fault_detail}"
+        );
+        assert_fault(&channel.transport().sent, FaultCode::EmuHalt, 0);
+        assert_meta_fault(&mut frame_loop, FaultCode::EmuHalt);
+    }
+
+    #[test]
     fn no_control_message_continues_to_next_frame() {
         let setup = setup_result();
         let mut channel = ControlChannel::new(ScriptTransport::new(vec![
@@ -570,6 +646,30 @@ mod tests {
                 )
             }),
             "missing Fault({code:?}) at frame {frame} in {msgs:?}"
+        );
+    }
+
+    fn fault_detail_with_code(msgs: &[CtlMsg], code: FaultCode) -> &str {
+        msgs.iter()
+            .find_map(|msg| match msg {
+                CtlMsg::Fault {
+                    code: actual,
+                    detail,
+                    ..
+                } if *actual == code => Some(detail.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing Fault({code:?}) in {msgs:?}"))
+    }
+
+    fn assert_meta_fault(frame_loop: &mut FrameLoop, code: FaultCode) {
+        assert_eq!(
+            u32_at(frame_loop.meta_bytes().unwrap(), 0x04),
+            MetaStatus::Faulted as u32
+        );
+        assert_eq!(
+            u32_at(frame_loop.meta_bytes().unwrap(), 0x14),
+            fault_code_value(code)
         );
     }
 
