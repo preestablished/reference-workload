@@ -10,6 +10,7 @@ const WORKLOAD_NAME: &str = "refwork-demo";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const FPS_NUM: u64 = 21_477_272;
 const FPS_DEN: u64 = 357_366;
+const ZSTD_VERSION: &str = "1.5.5";
 
 const REQUIRED_REGIONS: &[RegionSpec] = &[
     RegionSpec {
@@ -227,6 +228,11 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
 }
 
 fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
+    let bin = workspace_root
+        .join("target")
+        .join("x86_64-unknown-linux-musl")
+        .join("release")
+        .join("refwork-harness");
     let status = Command::new("cargo")
         .arg("build")
         .arg("--locked")
@@ -235,6 +241,7 @@ fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
         .arg("x86_64-unknown-linux-musl")
         .arg("-p")
         .arg("refwork-harness")
+        .env("RUSTFLAGS", "-C panic=abort")
         .current_dir(workspace_root)
         .status()
         .map_err(|source| ImageError::Io {
@@ -242,12 +249,38 @@ fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
             source,
         })?;
     if status.success() {
-        Ok(())
+        ensure_no_panic_unwind(&bin)
     } else {
         Err(ImageError::CommandFailed {
             program: "cargo build --target x86_64-unknown-linux-musl -p refwork-harness".into(),
             status: status.to_string(),
         })
+    }
+}
+
+fn ensure_no_panic_unwind(bin: &Path) -> Result<(), ImageError> {
+    let output = Command::new("nm")
+        .arg("-a")
+        .arg(bin)
+        .output()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("nm"),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: format!("nm -a {}", bin.display()),
+            status: output.status.to_string(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("panic_unwind") {
+        Err(ImageError::InvalidInput(format!(
+            "static harness {} contains panic_unwind symbols",
+            bin.display()
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -289,6 +322,7 @@ fn init_script() -> Vec<u8> {
 }
 
 fn compress_zstd(input: &Path, output: &Path) -> Result<(), ImageError> {
+    enforce_zstd_version()?;
     let status = Command::new("zstd")
         .arg("-q")
         .arg("--no-progress")
@@ -309,6 +343,32 @@ fn compress_zstd(input: &Path, output: &Path) -> Result<(), ImageError> {
             program: "zstd".into(),
             status: status.to_string(),
         })
+    }
+}
+
+fn enforce_zstd_version() -> Result<(), ImageError> {
+    let output = Command::new("zstd")
+        .arg("--version")
+        .output()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("zstd"),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: "zstd --version".into(),
+            status: output.status.to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains(&format!("v{ZSTD_VERSION}")) {
+        Ok(())
+    } else {
+        Err(ImageError::InvalidInput(format!(
+            "zstd version must be {ZSTD_VERSION}, got {}",
+            stdout.trim()
+        )))
     }
 }
 
@@ -496,7 +556,7 @@ fn validate_artifacts(base: &Path, root: Option<&Mapping>, errors: &mut Vec<Stri
     let Some(artifacts) = child_map(root, "artifacts", "artifacts", errors) else {
         return;
     };
-    for key in ["kernel", "initramfs"] {
+    for (key, required_file) in [("kernel", "bzImage"), ("initramfs", "initramfs.cpio.zst")] {
         let Some(artifact) = child_map(Some(artifacts), key, &format!("artifacts.{key}"), errors)
         else {
             continue;
@@ -513,6 +573,12 @@ fn validate_artifacts(base: &Path, root: Option<&Mapping>, errors: &mut Vec<Stri
         ) else {
             continue;
         };
+        if file != required_file {
+            errors.push(format!(
+                "artifacts.{key}.file must be {required_file}, got {file}"
+            ));
+            continue;
+        }
         let path = base.join(file);
         match blake3_file(&path) {
             Ok(actual) if actual == expected => {}
@@ -532,13 +598,7 @@ fn validate_boot(root: Option<&Mapping>, errors: &mut Vec<String>) {
     let Some(cmdline) = string_field(boot, "cmdline", "boot.cmdline", errors) else {
         return;
     };
-    for banned in ["console=", "init=", "panic=", "random.trust_cpu="] {
-        if cmdline.contains(banned) {
-            errors.push(format!(
-                "boot.cmdline must be append-only and not restate {banned}"
-            ));
-        }
-    }
+    validate_cmdline(cmdline, errors);
 }
 
 fn validate_machine(root: Option<&Mapping>, errors: &mut Vec<String>) {
@@ -550,14 +610,118 @@ fn validate_machine(root: Option<&Mapping>, errors: &mut Vec<String>) {
     let Some(devices) = seq_field(machine, "devices", "machine.devices", errors) else {
         return;
     };
-    for required in ["virtio-blk", "detguest-channel", "pv-pad"] {
-        let found = devices.iter().any(|device| {
-            mapping(device, "machine.devices[]", errors)
-                .and_then(|map| string_field(map, "kind", "machine.devices[].kind", errors))
-                == Some(required)
-        });
-        if !found {
-            errors.push(format!("machine.devices missing {required}"));
+    expect_device(
+        devices,
+        DeviceSpec {
+            kind: "virtio-blk",
+            role: Some("game-image"),
+            readonly: Some(true),
+            required: true,
+        },
+        errors,
+    );
+    expect_device(
+        devices,
+        DeviceSpec {
+            kind: "detguest-channel",
+            role: None,
+            readonly: None,
+            required: true,
+        },
+        errors,
+    );
+    expect_device(
+        devices,
+        DeviceSpec {
+            kind: "pv-pad",
+            role: None,
+            readonly: None,
+            required: true,
+        },
+        errors,
+    );
+}
+
+struct DeviceSpec {
+    kind: &'static str,
+    role: Option<&'static str>,
+    readonly: Option<bool>,
+    required: bool,
+}
+
+fn expect_device(devices: &[Value], spec: DeviceSpec, errors: &mut Vec<String>) {
+    let mut found = false;
+    for device in devices {
+        let Some(map) = mapping(device, "machine.devices[]", errors) else {
+            continue;
+        };
+        let Some(kind) = string_field(map, "kind", "machine.devices[].kind", errors) else {
+            continue;
+        };
+        if kind != spec.kind {
+            continue;
+        }
+        found = true;
+        if let Some(role) = spec.role {
+            expect_string(
+                map,
+                "role",
+                role,
+                &format!("machine.devices.{}.role", spec.kind),
+                errors,
+            );
+        }
+        if let Some(readonly) = spec.readonly {
+            expect_bool(
+                map,
+                "readonly",
+                readonly,
+                &format!("machine.devices.{}.readonly", spec.kind),
+                errors,
+            );
+        }
+        expect_bool(
+            map,
+            "required",
+            spec.required,
+            &format!("machine.devices.{}.required", spec.kind),
+            errors,
+        );
+    }
+    if !found {
+        errors.push(format!("machine.devices missing {}", spec.kind));
+    }
+}
+
+fn validate_cmdline(cmdline: &str, errors: &mut Vec<String>) {
+    if !cmdline.is_ascii() || cmdline.contains('\0') {
+        errors.push("boot.cmdline must be ASCII text without NUL bytes".into());
+        return;
+    }
+    if cmdline.trim() != cmdline || cmdline.contains("  ") {
+        errors.push("boot.cmdline must use single spaces without leading/trailing space".into());
+        return;
+    }
+
+    let mut quiet_seen = false;
+    let mut loglevel_seen = false;
+    for token in cmdline.split(' ') {
+        match token {
+            "quiet" if !quiet_seen => quiet_seen = true,
+            "quiet" => errors.push("boot.cmdline duplicates quiet".into()),
+            value if value.starts_with("loglevel=") && !loglevel_seen => {
+                loglevel_seen = true;
+                let level = value.trim_start_matches("loglevel=");
+                match level.parse::<u8>() {
+                    Ok(0..=7) => {}
+                    _ => errors.push(format!("boot.cmdline has invalid loglevel token {value}")),
+                }
+            }
+            value if value.starts_with("loglevel=") => {
+                errors.push(format!("boot.cmdline duplicates loglevel token {value}"))
+            }
+            "" => errors.push("boot.cmdline contains an empty token".into()),
+            other => errors.push(format!("boot.cmdline token {other:?} is not whitelisted")),
         }
     }
 }
@@ -712,6 +876,14 @@ fn validate_handoff_files(base: &Path, errors: &mut Vec<String>) {
         Ok(content) => validate_expected_regions_toml(&content, errors),
         Err(err) => errors.push(format!("cannot read expected-regions.toml: {err}")),
     }
+    match read_to_string(&base.join("boot.toml")) {
+        Ok(content) => validate_boot_toml(&content, errors),
+        Err(err) => errors.push(format!("cannot read boot.toml: {err}")),
+    }
+    match read_to_string(&base.join("harness.toml")) {
+        Ok(content) => validate_harness_toml(&content, errors),
+        Err(err) => errors.push(format!("cannot read harness.toml: {err}")),
+    }
 }
 
 fn validate_expected_regions_toml(content: &str, errors: &mut Vec<String>) {
@@ -732,6 +904,80 @@ fn validate_expected_regions_toml(content: &str, errors: &mut Vec<String>) {
                 spec.name, spec.layout_version
             ));
         }
+    }
+}
+
+fn validate_boot_toml(content: &str, errors: &mut Vec<String>) {
+    if field_u64(content, "schema_version") != Some(1) {
+        errors.push("boot.toml schema_version must be 1".into());
+    }
+    if field_string(content, "schema_owner").as_deref() != Some("guest-sdk") {
+        errors.push("boot.toml schema_owner must be guest-sdk".into());
+    }
+    let Some(autostart) = table_block(content, "[autostart]") else {
+        errors.push("boot.toml missing [autostart]".into());
+        return;
+    };
+    if field_string(autostart, "name").as_deref() != Some("refwork-harness") {
+        errors.push("boot.toml autostart.name must be refwork-harness".into());
+    }
+    if field_string(autostart, "path").as_deref() != Some("/usr/bin/refwork-harness") {
+        errors.push("boot.toml autostart.path must be /usr/bin/refwork-harness".into());
+    }
+    if field_u64(autostart, "control_fd") != Some(3) {
+        errors.push("boot.toml autostart.control_fd must be 3".into());
+    }
+    if field_string(autostart, "load_game_device").as_deref() != Some("/dev/vdb") {
+        errors.push("boot.toml autostart.load_game_device must be /dev/vdb".into());
+    }
+    let Some(ready) = table_block(content, "[ready]") else {
+        errors.push("boot.toml missing [ready]".into());
+        return;
+    };
+    if field_string(ready, "after").as_deref() != Some("regions-registered-and-start-sent") {
+        errors.push("boot.toml ready.after must be regions-registered-and-start-sent".into());
+    }
+    if !ready.contains("expected_regions = [\"wram\", \"framebuffer\", \"meta\"]") {
+        errors.push("boot.toml ready.expected_regions must list wram/framebuffer/meta".into());
+    }
+    validate_expected_regions_toml(content, errors);
+}
+
+fn validate_harness_toml(content: &str, errors: &mut Vec<String>) {
+    if field_u64(content, "schema_version") != Some(1) {
+        errors.push("harness.toml schema_version must be 1".into());
+    }
+    if field_string(content, "schema_owner").as_deref() != Some("reference-workload") {
+        errors.push("harness.toml schema_owner must be reference-workload".into());
+    }
+    let Some(harness) = table_block(content, "[harness]") else {
+        errors.push("harness.toml missing [harness]".into());
+        return;
+    };
+    if field_string(harness, "binary").as_deref() != Some("/usr/bin/refwork-harness") {
+        errors.push("harness.toml harness.binary must be /usr/bin/refwork-harness".into());
+    }
+    if field_u64(harness, "control_fd") != Some(3) {
+        errors.push("harness.toml harness.control_fd must be 3".into());
+    }
+    if field_string(harness, "game_image_device").as_deref() != Some("/dev/vdb") {
+        errors.push("harness.toml harness.game_image_device must be /dev/vdb".into());
+    }
+    if field_u64(harness, "protocol_version") != Some(1) {
+        errors.push("harness.toml harness.protocol_version must be 1".into());
+    }
+    let Some(regions) = table_block(content, "[regions]") else {
+        errors.push("harness.toml missing [regions]".into());
+        return;
+    };
+    if !regions.contains("required = [\"wram\", \"framebuffer\", \"meta\"]") {
+        errors.push("harness.toml regions.required must list wram/framebuffer/meta".into());
+    }
+    if field_bool_toml(regions, "publish_vram") != Some(false) {
+        errors.push("harness.toml regions.publish_vram must be false".into());
+    }
+    if field_string(regions, "publish_sram").as_deref() != Some("cart-dependent") {
+        errors.push("harness.toml regions.publish_sram must be cart-dependent".into());
     }
 }
 
@@ -852,6 +1098,20 @@ fn u64_field(parent: &Mapping, key: &str, path: &str, errors: &mut Vec<String>) 
     }
 }
 
+fn bool_field(parent: &Mapping, key: &str, path: &str, errors: &mut Vec<String>) -> Option<bool> {
+    let Some(value) = parent.get(Value::String(key.into())) else {
+        errors.push(format!("missing {path}"));
+        return None;
+    };
+    match value {
+        Value::Bool(value) => Some(*value),
+        _ => {
+            errors.push(format!("{path} must be a boolean"));
+            None
+        }
+    }
+}
+
 fn expect_string(
     parent: &Mapping,
     key: &str,
@@ -868,6 +1128,14 @@ fn expect_string(
 
 fn expect_u64(parent: &Mapping, key: &str, expected: u64, path: &str, errors: &mut Vec<String>) {
     if let Some(actual) = u64_field(parent, key, path, errors) {
+        if actual != expected {
+            errors.push(format!("{path} expected {expected}, got {actual}"));
+        }
+    }
+}
+
+fn expect_bool(parent: &Mapping, key: &str, expected: bool, path: &str, errors: &mut Vec<String>) {
+    if let Some(actual) = bool_field(parent, key, path, errors) {
         if actual != expected {
             errors.push(format!("{path} expected {expected}, got {actual}"));
         }
@@ -894,12 +1162,26 @@ fn field_u64(block: &str, key: &str) -> Option<u64> {
     field_value(block, key)?.parse().ok()
 }
 
+fn field_bool_toml(block: &str, key: &str) -> Option<bool> {
+    field_value(block, key)?.parse().ok()
+}
+
 fn field_value<'a>(block: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key} = ");
     block
         .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix(&prefix))
+}
+
+fn table_block<'a>(content: &'a str, table: &str) -> Option<&'a str> {
+    let start = content.find(table)?;
+    let rest = &content[start + table.len()..];
+    let end = rest
+        .find("\n[")
+        .or_else(|| rest.find("\n[["))
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 fn quoted_value(content: &str, key: &str) -> Result<String, ImageError> {
@@ -1013,11 +1295,19 @@ mod tests {
         let tmp = TempDir::new();
         std::fs::write(tmp.path.join("bzImage"), b"kernel").unwrap();
         std::fs::write(tmp.path.join("initramfs.cpio.zst"), b"initramfs").unwrap();
-        std::fs::write(tmp.path.join("boot.toml"), b"boot").unwrap();
-        std::fs::write(tmp.path.join("harness.toml"), b"harness").unwrap();
+        std::fs::write(
+            tmp.path.join("boot.toml"),
+            include_bytes!("../../image/boot.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path.join("harness.toml"),
+            include_bytes!("../../image/harness.toml"),
+        )
+        .unwrap();
         std::fs::write(
             tmp.path.join("expected-regions.toml"),
-            b"schema_version = 1\n\n[[regions]]\nname = \"wram\"\nsize = 131072\nlayout_version = 1\n\n[[regions]]\nname = \"framebuffer\"\nsize = 229376\nlayout_version = 1\n\n[[regions]]\nname = \"meta\"\nsize = 4096\nlayout_version = 1\n",
+            include_bytes!("../../image/expected-regions.toml"),
         )
         .unwrap();
         std::fs::write(tmp.path.join("README.md"), b"readme").unwrap();
@@ -1071,6 +1361,56 @@ mod tests {
     }
 
     #[test]
+    fn validator_rejects_artifact_filename_drift() {
+        let tmp = valid_dist();
+        std::fs::rename(tmp.path.join("bzImage"), tmp.path.join("kernel.payload")).unwrap();
+        let manifest = manifest_text(&tmp).replace("file: bzImage", "file: kernel.payload");
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("artifacts.kernel.file must be bzImage")));
+    }
+
+    #[test]
+    fn validator_rejects_unsupported_cmdline_token() {
+        let tmp = valid_dist();
+        let manifest =
+            manifest_text(&tmp).replace("cmdline: \"quiet\"", "cmdline: \"quiet root=/dev/vda\"");
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("boot.cmdline token \"root=/dev/vda\"")));
+    }
+
+    #[test]
+    fn validator_rejects_device_contract_drift() {
+        let tmp = valid_dist();
+        let manifest = manifest_text(&tmp).replace(
+            "{ kind: virtio-blk, role: game-image, readonly: true, required: true }",
+            "{ kind: virtio-blk, role: host-root, readonly: false, required: false }",
+        );
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("machine.devices.virtio-blk.role")));
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("machine.devices.virtio-blk.readonly")));
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("machine.devices.virtio-blk.required")));
+    }
+
+    #[test]
     fn validator_rejects_float_fps() {
         let tmp = valid_dist();
         let manifest = manifest_text(&tmp).replace("  num: 21477272", "  num: 60.0");
@@ -1121,6 +1461,28 @@ mod tests {
         assert!(errors
             .iter()
             .any(|err| err.contains("game content-like file")));
+    }
+
+    #[test]
+    fn validator_rejects_sidecar_contract_drift() {
+        let tmp = valid_dist();
+        let boot = std::fs::read_to_string(tmp.path.join("boot.toml"))
+            .unwrap()
+            .replace("control_fd = 3", "control_fd = 4");
+        std::fs::write(tmp.path.join("boot.toml"), boot).unwrap();
+        let harness = std::fs::read_to_string(tmp.path.join("harness.toml"))
+            .unwrap()
+            .replace("protocol_version = 1", "protocol_version = 99");
+        std::fs::write(tmp.path.join("harness.toml"), harness).unwrap();
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("boot.toml autostart.control_fd")));
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("harness.toml harness.protocol_version")));
     }
 
     #[test]
