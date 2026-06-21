@@ -1,0 +1,16 @@
+schema_version = 1
+kind = "refwork-kernel-lock"
+
+[kernel]
+status = "pinned-placeholder"
+artifact = "bzImage"
+source = "guest-sdk-dh1-linux-direct-boot-placeholder"
+version = "dh1-direct-boot-placeholder-v1"
+placeholder_payload = "refwork-dh1-kernel-placeholder-v1\n"
+blake3 = "9ae72dbae3e7a6e0b89fd3d3f0420b991c6187429420345777c2173ae9600ab7"
+
+[policy]
+direct_boot = true
+modules = false
+network = false
+deterministic_build_required = true

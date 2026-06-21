@@ -1,0 +1,17 @@
+schema_version = 1
+schema_owner = "reference-workload"
+
+[harness]
+binary = "/usr/bin/refwork-harness"
+control_fd = 3
+game_image_device = "/dev/vdb"
+protocol_version = 1
+
+[regions]
+required = ["wram", "framebuffer", "meta"]
+publish_vram = false
+publish_sram = "cart-dependent"
+
+[frame_loop]
+pad_port = 0
+hash_reports = "suite-only"
