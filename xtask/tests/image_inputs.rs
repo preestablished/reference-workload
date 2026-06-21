@@ -1,5 +1,15 @@
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, PartialEq, Eq)]
+struct RegionRecord {
+    name: String,
+    size: u64,
+    format: Option<String>,
+    layout_version: u64,
+    required: bool,
+    writable: bool,
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -36,29 +46,14 @@ fn boot_toml_names_autostart_and_required_regions() {
 
     assert!(boot.contains("refwork-harness"));
     assert!(boot.contains("expected_regions = [\"wram\", \"framebuffer\", \"meta\"]"));
-    for region in ["wram", "framebuffer", "meta"] {
-        assert!(boot.contains(&format!("name = \"{region}\"")));
-    }
+    assert_eq!(regions_from_toml(&boot), required_region_records());
 }
 
 #[test]
 fn expected_regions_include_sizes_and_layout_versions() {
     let expected = read_workspace_file("image/expected-regions.toml");
 
-    for (name, size) in [("wram", 131_072), ("framebuffer", 229_376), ("meta", 4_096)] {
-        let name_index = expected
-            .find(&format!("name = \"{name}\""))
-            .unwrap_or_else(|| panic!("missing expected region {name}"));
-        let region_block = &expected[name_index..];
-        assert!(
-            region_block.contains(&format!("size = {size}")),
-            "{name} missing size {size}"
-        );
-        assert!(
-            region_block.contains("layout_version = 1"),
-            "{name} missing layout_version"
-        );
-    }
+    assert_eq!(regions_from_toml(&expected), required_region_records());
 }
 
 #[test]
@@ -116,6 +111,102 @@ fn quoted_value(content: &str, key: &str) -> String {
         .and_then(|value| value.strip_suffix('"'))
         .unwrap_or_else(|| panic!("malformed quoted value for {key}"));
     value.replace("\\n", "\n")
+}
+
+fn required_region_records() -> Vec<RegionRecord> {
+    vec![
+        RegionRecord {
+            name: "wram".into(),
+            size: 131_072,
+            format: None,
+            layout_version: 1,
+            required: true,
+            writable: false,
+        },
+        RegionRecord {
+            name: "framebuffer".into(),
+            size: 229_376,
+            format: Some("xrgb8888-256x224-stride1024".into()),
+            layout_version: 1,
+            required: true,
+            writable: false,
+        },
+        RegionRecord {
+            name: "meta".into(),
+            size: 4_096,
+            format: None,
+            layout_version: 1,
+            required: true,
+            writable: false,
+        },
+    ]
+}
+
+fn regions_from_toml(content: &str) -> Vec<RegionRecord> {
+    content
+        .split("[[regions]]")
+        .skip(1)
+        .map(parse_region_record)
+        .collect()
+}
+
+fn parse_region_record(block: &str) -> RegionRecord {
+    RegionRecord {
+        name: field_string(block, "name"),
+        size: field_u64(block, "size"),
+        format: field_optional_string(block, "format"),
+        layout_version: field_u64(block, "layout_version"),
+        required: field_bool(block, "required"),
+        writable: field_bool(block, "writable"),
+    }
+}
+
+fn field_string(block: &str, key: &str) -> String {
+    let value = field_value(block, key);
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("field {key} is not a quoted string"))
+        .to_owned()
+}
+
+fn field_optional_string(block: &str, key: &str) -> Option<String> {
+    let line = block
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&format!("{key} = ")))?;
+    let value = line
+        .split_once('=')
+        .map(|(_, value)| value.trim())
+        .unwrap_or_else(|| panic!("malformed {key} line"));
+    Some(
+        value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("field {key} is not a quoted string"))
+            .to_owned(),
+    )
+}
+
+fn field_u64(block: &str, key: &str) -> u64 {
+    field_value(block, key)
+        .parse()
+        .unwrap_or_else(|err| panic!("field {key} is not u64: {err}"))
+}
+
+fn field_bool(block: &str, key: &str) -> bool {
+    field_value(block, key)
+        .parse()
+        .unwrap_or_else(|err| panic!("field {key} is not bool: {err}"))
+}
+
+fn field_value<'a>(block: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key} = ");
+    block
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing field {key} in region block:\n{block}"))
 }
 
 fn assert_no_rom_like_files(dir: &Path) {
