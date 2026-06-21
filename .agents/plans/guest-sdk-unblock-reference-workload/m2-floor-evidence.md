@@ -9,9 +9,10 @@ goldens, WRAM dumps, or padlog semantics.
 ## Scope Verdict
 
 The repo-side synthetic M2 floor is present and green on this checkout. The
-operator-game first-room floor is not present in this checkout and is covered by
-the narrow waiver below; packages 05 and 06 must continue to treat real
-operator-game/in-VM evidence as blocked until lab artifacts are supplied.
+operator-game first-room floor is not present in this checkout, and no durable
+operator-approved waiver is currently recorded. Packages 05 and 06 must continue
+to treat real operator-game/in-VM evidence as blocked until lab artifacts or an
+operator-approved waiver are supplied.
 
 ## Local Run Context
 
@@ -22,7 +23,8 @@ operator-game/in-VM evidence as blocked until lab artifacts are supplied.
 | Machine | `infra-control` |
 | Architecture | `x86_64` |
 | Branch | `ralph/iteration-1-record-proto-and-m2-floor-evidence` |
-| Starting repo rev | `8c21d5d3fc76c2ea16ab3f76ea168218b8ac4c63` |
+| Checked source rev | `8c21d5d3fc76c2ea16ab3f76ea168218b8ac4c63` |
+| Evidence note introduced by | `34efa457f7ba2a4403bb3e1e9dac89b7baafeda1` |
 | Rust toolchain | `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-unknown-linux-gnu` |
 
 ## `determinism-proto` Source
@@ -33,6 +35,7 @@ operator-game/in-VM evidence as blocked until lab artifacts are supplied.
 | Remote | `git@github.com:preestablished/control-plane.git` |
 | Branch | `main` |
 | Rev | `ca9ee9048d7fca8eec5fe512011b011128e2b0c3` |
+| Worktree state | clean (`git -C ../control-plane status --short` produced no output) |
 | Build check | `cargo build --locked --manifest-path ../control-plane/Cargo.toml -p determinism-proto --all-features` |
 | Result | PASS |
 
@@ -75,27 +78,61 @@ The 100k synthetic hashes are equal across x86_64 and aarch64. This is CI
 synthetic-ROM evidence only; it is not a substitute for the operator-game M2 lab
 run on real aarch64 hardware.
 
+## Cross-Architecture Evidence Applicability
+
+The downloaded nightly evidence was produced at
+`9afaa0a69a3ea57ed4e10ff29a53b716b5559990`. The checked source rev for this
+evidence note is `8c21d5d3fc76c2ea16ab3f76ea168218b8ac4c63`; the checkpoint that
+introduced this note is `34efa457f7ba2a4403bb3e1e9dac89b7baafeda1`.
+
+Applicability check:
+
+```sh
+git diff --name-only 9afaa0a69a3ea57ed4e10ff29a53b716b5559990..8c21d5d3fc76c2ea16ab3f76ea168218b8ac4c63
+```
+
+Result:
+
+```text
+.beads/.gitignore
+.beads/README.md
+.beads/config.yaml
+.beads/metadata.json
+.gitignore
+```
+
+Only bead metadata and `.gitignore` changed between the nightly evidence SHA and
+the checked source rev; no crates, Cargo manifests, feature maps, scoring files,
+xtask gates, or CI workflow inputs changed. The branch checkpoint adds only
+Markdown plan/evidence files. If any source, test, gate, feature-map, scoring,
+or workflow input differs in a future branch, rerun the cross-arch hash job at
+that branch or base SHA before citing it as RW-0 synthetic evidence.
+
 ## Operator-Game Evidence / Waiver
 
 `feature-maps/demo-game.yaml` still begins with:
 
-> PLACEHOLDER FILE -- offsets shown here are NOT validated game addresses.
+> PLACEHOLDER FILE — offsets shown here are NOT validated game addresses.
 
 No operator ROM, first-room padlog, lab `m2-run.json`, lab `map-check` report,
 golden framebuffer hashes, or real aarch64 operator-game double-run artifacts
 are present in this checkout. The phase-2 bring-up log also leaves the M2
 operator-game provenance block empty.
 
-### Waiver
+### Waiver Status
 
 | Field | Value |
 |---|---|
-| Date | 2026-06-21 |
-| Owner | Matt Spurlin (`refwork-d7t.1` owner); recorded by Codex during `/ralph` |
+| Status | BLOCKED: no operator-approved waiver is currently recorded. |
+| Checked date | 2026-06-21 |
+| Checked by | Codex during `/ralph` |
+| Bead owner | Matt Spurlin (`refwork-d7t.1` owner) |
+| Approval source | None found in this checkout; `.agents/plans/phase-2/bringup-log.md` still has an empty M2 provenance block. |
 | Reason | Operator-game lab artifacts are not available in this checkout, and the feature map remains explicitly placeholder/unvalidated. |
-| Scope | Waives only the requirement to attach host-side operator-game first-room, map-check, and real-hardware aarch64 demo-game evidence before starting synthetic M3 harness/mock-agent and M4 image-handoff preparation. |
-| Non-scope | Does not waive synthetic protocol/hash gates, `determinism-proto` provenance, image reproducibility, in-VM first-room readiness, package 05, package 06, or final M2/M5 lab acceptance. |
-| Required follow-up | Before package 05/06 closure, replace this waiver with lab artifact pointers for `refwork-verify play`, `refwork-verify map-check`, and `refwork-verify double-run --frames 100000` on x86_64 and real aarch64 hardware. |
+| Required approval shape | Operator name/role plus durable approval artifact such as a bead comment, issue comment, or lab note path, cross-linked from the phase-2 bring-up log. |
+| Permitted before approval | Synthetic M3 harness/mock-agent work and asset-only M4 preparation may proceed if their own gates pass. |
+| Not permitted before approval or lab evidence | Closing RW-0 as full M2 acceptance, package 05, package 06, final M2/M5 lab acceptance, or any claim that operator-game first-room/map/real-aarch64 evidence is complete. |
+| Required follow-up | Replace this blocked status with lab artifact pointers for `refwork-verify play`, `refwork-verify map-check`, and `refwork-verify double-run --frames 100000` on x86_64 and real aarch64 hardware, or with a durable operator-approved waiver. |
 
 ## Acceptance Mapping
 
@@ -103,7 +140,7 @@ operator-game provenance block empty.
 |---|---|
 | `m2-floor-evidence.md` exists and maps acceptance clauses | This file. |
 | M2 engine packages and `refwork-verify` are present and build | Workspace clippy/test gates passed; `refwork-verify` integration tests passed. |
-| Host-side first-room script and feature-map offset evidence, or explicit waiver | Narrow waiver recorded above; placeholder feature map remains a stop condition for package 05/06. |
-| x86_64 and aarch64 deterministic hash evidence | Local x86_64 10k hash plus latest nightly x86_64/aarch64 100k synthetic artifact hashes above. |
+| Host-side first-room script and feature-map offset evidence, or explicit waiver | BLOCKED for operator-game M2 acceptance: no lab artifacts and no operator-approved waiver are recorded. Placeholder feature map remains a stop condition for package 05/06. |
+| x86_64 and aarch64 deterministic hash evidence | Synthetic-only evidence: local x86_64 10k hash and nightly run `27900976973` matching 100k-frame x86_64/aarch64 hashes on the synthetic ROM. Operator-game host-side 100k x86_64/aarch64 evidence is not recorded here and remains BLOCKED unless replaced by lab artifacts or a durable operator-approved waiver. |
 | `determinism-proto` source recorded and buildable | Sibling `../control-plane` provenance and successful build command above. |
 | No game content committed | This note records only revisions, command results, hashes, and artifact pointers. |

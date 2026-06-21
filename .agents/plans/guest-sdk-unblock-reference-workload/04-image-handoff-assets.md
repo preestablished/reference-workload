@@ -15,8 +15,9 @@ does not claim real-agent READY validation; package 05 owns that.
 - A pinned or prebuilt `detguest-agent` from guest-sdk. Until guest-sdk's real
   build path is available, accept `--agent-bin <path>` and record the source
   revision in the manifest.
-- Hypervisor Linux boot floor available for final smoke, but most asset work can
-  proceed before it.
+- DH-1 / hypervisor Linux direct-boot floor cited before RW-2 closeout.
+  Asset-only preparation may proceed before DH-1, but it must not close
+  `guest-sdk-ext-refwork-m4-image-handoff` or claim package-04 acceptance.
 
 ## Deliverables
 
@@ -73,8 +74,10 @@ does not claim real-agent READY validation; package 05 owns that.
      A, B, X, Y, L, R, Up, Down, Left, Right, Start, Select on bits 0-11 and
      reserved bits 12-15.
    - Include defaults for `feature_map` and `scoring_program`.
-   - Include `determinism.last_green` field shape, initially empty or marked
-     unstamped until package 06.
+   - Include the API.md `determinism` block in a stable shape. Before package
+     06, emit an explicit unschedulable sidecar such as
+     `determinism.unstamped.yaml`; do not invent alternate
+     `workload-image.yaml` fields unless API.md is updated.
 5. Handoff files:
    - `dist/.../expected-regions.yaml` or equivalent machine-readable list for
      guest-sdk READY gating. It must include each required region name, size,
@@ -107,6 +110,9 @@ The image validation command must fail if:
   produced manifest.
 - `cargo run --locked -p xtask -- image double-build` proves byte-identical
   kernel, initramfs, and manifest from two clean build roots.
+- A DH-1 artifact or CI/lab run is cited showing the package-04
+  kernel/initramfs shape is compatible with the hypervisor Linux direct-boot
+  baseline. This is not real-agent READY validation; package 05 still owns that.
 - Guest-sdk can consume `boot.toml`, expected-region list, region names/sizes,
   region `layout_version` values, and pad layout without parsing feature maps.
 - The manifest and handoff files name `wram`, `framebuffer`, and `meta` exactly;

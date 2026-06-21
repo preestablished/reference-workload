@@ -56,7 +56,10 @@ startup, published regions, `meta` page, and the free-running frame loop.
    - Compute the cart BLAKE3 and emit `GameLoaded { cart_hash, mapper,
      sram_size }`.
 5. Region buffers:
-   - Allocate page-aligned, page-sized regions before `Core::new`.
+   - Allocate page-aligned mappings whose lengths are exact page multiples and
+     match the API/manifest sizes before `Core::new`: `wram` = 131072 bytes,
+     `framebuffer` = 229376 bytes, `meta` = 4096 bytes; optional `vram` and
+     `sram` use their manifest or harness-configured sizes.
    - Bridge the current `RegionBuffers` API, which takes `&'static mut` slices,
      through the owned mapping type above. The code must make the lifetime
      extension explicit and justified by process lifetime/owner invariants, not

@@ -26,7 +26,11 @@ stop and reconcile the docs first; do not silently invent a new protocol.
 
 ## Current State Verified
 
-Verified on 2026-06-21, branch `main`, `HEAD` `9afaa0a`.
+Verified on 2026-06-21. Product baseline `origin/main` is
+`9afaa0a69a3ea57ed4e10ff29a53b716b5559990`. Local review base `main` is
+`8c21d5d3fc76c2ea16ab3f76ea168218b8ac4c63`, which adds bead metadata on top of
+that product baseline. The RW-0 evidence-note checkpoint is
+`34efa457f7ba2a4403bb3e1e9dac89b7baafeda1`.
 
 | Surface | State |
 |---|---|
@@ -65,7 +69,7 @@ control-plane proto checkout/pin
         +------------+------------+
                      |
                      v
-04 image handoff assets
+04 image handoff assets  <---- external before closeout: hypervisor DH-1 Linux direct-boot floor
         |
         v
 05 in-VM first-room gate  <---- external: guest-sdk GS-5/GS-6, hypervisor DH-2/DH-5
@@ -77,11 +81,12 @@ control-plane proto checkout/pin
 07 CI/evidence closeout
 ```
 
-Packages 02 and 03 are the first implementation priority. Package 04 can start
-once the harness binary shape is known, but it should not claim real READY
-validation until package 05. Packages 05 and 06 are integration gates and must
-wait for the guest-sdk, hypervisor, and snapshot-store surfaces named in their
-files.
+Packages 02 and 03 are the first implementation priority. Package 04 asset prep
+can start once the harness binary shape is known, but package-04 closeout must
+cite the hypervisor DH-1 Linux direct-boot floor before claiming RW-2 or M4
+handoff acceptance. Package 04 still must not claim real READY validation;
+package 05 owns that. Packages 05 and 06 are integration gates and must wait for
+the guest-sdk, hypervisor, and snapshot-store surfaces named in their files.
 
 ## Standing Constraints
 
