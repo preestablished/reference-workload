@@ -19,6 +19,7 @@ pub mod cpu_tests;
 pub mod deny;
 pub mod fetch;
 pub mod hash_chain;
+pub mod image;
 pub mod spc_tests;
 pub mod synth_rom;
 

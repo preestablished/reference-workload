@@ -11,6 +11,10 @@ source_date_epoch = 0
 
 [tools]
 cpio_writer = "xtask-newc"
-zstd = "pinned-by-cargo-lock"
+zstd = "external-cli"
+zstd_version = "1.5.5"
+zstd_args = ["-19", "--no-progress"]
 rust_target = "x86_64-unknown-linux-musl"
 panic = "abort"
+panic_enforced_by = "RUSTFLAGS=-C panic=abort for workspace image build"
+prebuilt_std_unwind_symbols = "allowed"
