@@ -7,7 +7,13 @@ use refwork_harness::runner::{run_setup, SetupConfig};
 fn main() {
     let mut args = std::env::args();
     let _program = args.next();
-    match args.next().as_deref() {
+    let mode = args.next();
+    if let Some(extra) = args.next() {
+        eprintln!("refwork-harness: unexpected extra argument `{extra}`");
+        std::process::exit(2);
+    }
+
+    match mode.as_deref() {
         Some("--help") | Some("-h") => print_help(),
         Some("--fd3") | None => run_fd3(),
         Some(other) => {
@@ -28,10 +34,16 @@ fn run_fd3() {
     let mut channel = ControlChannel::new(transport);
     let mut loader = FilesystemGameLoader;
 
-    if let Err(err) = run_setup(&mut channel, &mut loader, SetupConfig::default()) {
-        eprintln!("refwork-harness: setup failed: {err}");
-        std::process::exit(1);
-    }
+    let _setup = match run_setup(&mut channel, &mut loader, SetupConfig::default()) {
+        Ok(setup) => setup,
+        Err(err) => {
+            eprintln!("refwork-harness: setup failed: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!("refwork-harness: frame loop is not implemented in this build");
+    std::process::exit(1);
 }
 
 fn print_help() {

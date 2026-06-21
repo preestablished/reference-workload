@@ -10,6 +10,8 @@ use crate::game::{GameLoadError, GameLoader, LoadedGame};
 use crate::meta::{MetaPage, META_SIZE};
 use crate::regions::{HarnessRegions, RegionError};
 
+const MAX_FAULT_DETAIL_BYTES: usize = 512;
+
 pub struct SetupConfig {
     pub emu_name: &'static str,
     pub emu_version: &'static str,
@@ -41,6 +43,9 @@ pub enum SetupError {
     },
     BadGame(GameLoadError),
     Region(RegionError),
+    UnsupportedSram {
+        len: usize,
+    },
     ProtocolOrder {
         expected: &'static str,
         actual: CtlMsg,
@@ -54,6 +59,12 @@ impl fmt::Display for SetupError {
             SetupError::BadProto { detail } => write!(f, "bad protocol: {detail}"),
             SetupError::BadGame(err) => write!(f, "bad game: {err}"),
             SetupError::Region(err) => write!(f, "region preparation failed: {err}"),
+            SetupError::UnsupportedSram { len } => {
+                write!(
+                    f,
+                    "sram publication is not wired in setup-only runner: {len} bytes"
+                )
+            }
             SetupError::ProtocolOrder { expected, actual } => {
                 write!(f, "expected {expected}, got {actual:?}")
             }
@@ -68,6 +79,7 @@ impl std::error::Error for SetupError {
             SetupError::BadProto { .. } => None,
             SetupError::BadGame(err) => Some(err),
             SetupError::Region(err) => Some(err),
+            SetupError::UnsupportedSram { .. } => None,
             SetupError::ProtocolOrder { .. } => None,
         }
     }
@@ -136,7 +148,24 @@ fn expect_start<T>(
 where
     T: DatagramTransport,
 {
-    match recv_agent_msg(channel)? {
+    let msg = match channel.recv_msg() {
+        Ok(msg) => msg,
+        Err(ControlError::Oversize { len }) => {
+            mark_meta_fault(regions, FaultCode::BadProto);
+            let detail = format!("oversize control datagram: {len} bytes");
+            send_fault(channel, FaultCode::BadProto, &detail)?;
+            return Err(SetupError::BadProto { detail });
+        }
+        Err(ControlError::Decode(err)) => {
+            mark_meta_fault(regions, FaultCode::BadProto);
+            let detail = err.to_string();
+            send_fault(channel, FaultCode::BadProto, &detail)?;
+            return Err(SetupError::BadProto { detail });
+        }
+        Err(err) => return Err(SetupError::Control(err)),
+    };
+
+    match msg {
         CtlMsg::Start {} => Ok(()),
         actual => {
             mark_meta_fault(regions, FaultCode::ProtocolOrder);
@@ -192,6 +221,12 @@ fn prepare_regions_or_fault<T>(
 where
     T: DatagramTransport,
 {
+    if let Some(len) = config.sram_len {
+        let detail = format!("sram publication requires frame-loop cartridge wiring: {len} bytes");
+        send_fault(channel, FaultCode::RegionRegFailed, &detail)?;
+        return Err(SetupError::UnsupportedSram { len });
+    }
+
     let result =
         HarnessRegions::with_optional(config.vram, config.sram_len).and_then(|mut regions| {
             init_meta(&mut regions, game.cart_hash, config.emu_version)?;
@@ -290,9 +325,21 @@ where
     channel.send_msg(&CtlMsg::Fault {
         frame: 0,
         code,
-        detail: detail.into(),
+        detail: bounded_fault_detail(detail),
     })?;
     Ok(())
+}
+
+fn bounded_fault_detail(detail: &str) -> String {
+    let mut end = detail.len().min(MAX_FAULT_DETAIL_BYTES);
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < detail.len() {
+        format!("{}...", &detail[..end])
+    } else {
+        detail.into()
+    }
 }
 
 #[cfg(test)]
@@ -300,12 +347,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
 
-    use refwork_emu::CoreError;
     use refwork_protocol::MAX_DATAGRAM;
 
     use super::*;
     use crate::ctl::DatagramTransport;
     use crate::game::loaded_game_from_rom;
+    use crate::meta::MetaStatus;
 
     struct ScriptTransport {
         inbound: VecDeque<Vec<u8>>,
@@ -367,7 +414,10 @@ mod tests {
         fn load_game(&mut self, dev_path: &str) -> Result<LoadedGame, GameLoadError> {
             self.paths.push(dev_path.into());
             if self.fail {
-                return Err(GameLoadError::Cart(CoreError::BadRomSize { len: 0 }));
+                return Err(GameLoadError::Read {
+                    path: dev_path.into(),
+                    source: io::Error::new(io::ErrorKind::NotFound, "missing test ROM"),
+                });
             }
             loaded_game_from_rom(self.rom.take().expect("single fake ROM"))
         }
@@ -527,7 +577,10 @@ mod tests {
             config,
         );
 
-        assert!(matches!(result, Err(SetupError::Region(_))));
+        assert!(matches!(
+            result,
+            Err(SetupError::UnsupportedSram { len: 1024 })
+        ));
         assert!(matches!(sent[0], CtlMsg::HelloAck { .. }));
         assert_fault(&sent[1..], FaultCode::RegionRegFailed);
     }
@@ -554,6 +607,91 @@ mod tests {
         assert_fault(&sent[6..], FaultCode::ProtocolOrder);
     }
 
+    #[test]
+    fn post_ready_malformed_datagram_marks_meta_faulted() {
+        let mut loader = FakeLoader::ok();
+        let mut channel = ControlChannel::new(ScriptTransport::new(vec![
+            wire(CtlMsg::Hello {
+                proto_version: PROTO_VERSION,
+            }),
+            wire(CtlMsg::LoadGame {
+                dev_path: "/dev/vdb".into(),
+            }),
+        ]));
+        expect_hello(&mut channel, &SetupConfig::default()).unwrap();
+        let dev_path = expect_load_game(&mut channel).unwrap();
+        let game = load_game_or_fault(&mut channel, &mut loader, &dev_path).unwrap();
+        let mut regions =
+            prepare_regions_or_fault(&mut channel, &game, &SetupConfig::default()).unwrap();
+        send_game_loaded(&mut channel, &game).unwrap();
+        send_regions(&mut channel, &regions).unwrap();
+        channel.send_msg(&CtlMsg::Ready { frame: 0 }).unwrap();
+        channel.transport_mut().inbound.push_back({
+            let mut malformed = wire(CtlMsg::Start {});
+            malformed.push(0);
+            malformed
+        });
+
+        assert!(matches!(
+            expect_start(&mut channel, &mut regions),
+            Err(SetupError::BadProto { .. })
+        ));
+        assert_meta_fault(&mut regions, FaultCode::BadProto);
+        assert_fault(&channel.transport().sent, FaultCode::BadProto);
+    }
+
+    #[test]
+    fn post_ready_oversize_datagram_marks_meta_faulted() {
+        let mut regions = HarnessRegions::required().unwrap();
+        init_meta(&mut regions, [0u8; 32], EMU_VERSION).unwrap();
+        let transport = ScriptTransport::new(vec![vec![0u8; MAX_DATAGRAM + 2]]);
+        let mut channel = ControlChannel::new(transport);
+
+        assert!(matches!(
+            expect_start(&mut channel, &mut regions),
+            Err(SetupError::BadProto { .. })
+        ));
+        assert_meta_fault(&mut regions, FaultCode::BadProto);
+        assert_fault(&channel.transport().sent, FaultCode::BadProto);
+    }
+
+    #[test]
+    fn long_bad_game_detail_still_emits_fault() {
+        let mut loader = FakeLoader::fail();
+        let long_path = "x".repeat(4050);
+        let (_result, sent) = run_with(
+            vec![
+                wire(CtlMsg::Hello {
+                    proto_version: PROTO_VERSION,
+                }),
+                wire(CtlMsg::LoadGame {
+                    dev_path: long_path,
+                }),
+            ],
+            &mut loader,
+            SetupConfig::default(),
+        );
+
+        let fault = fault_with_code(&sent, FaultCode::BadGame);
+        assert!(fault.len() <= MAX_FAULT_DETAIL_BYTES + 3);
+    }
+
+    #[test]
+    fn long_out_of_order_message_still_emits_fault() {
+        let mut loader = FakeLoader::ok();
+        let long_path = "x".repeat(4050);
+        let (_result, sent) = run_with(
+            vec![wire(CtlMsg::LoadGame {
+                dev_path: long_path,
+            })],
+            &mut loader,
+            SetupConfig::default(),
+        );
+
+        let fault = fault_with_code(&sent, FaultCode::ProtocolOrder);
+        assert!(fault.len() <= MAX_FAULT_DETAIL_BYTES + 3);
+    }
+
     fn assert_region(msg: &CtlMsg, name: &str) {
         match msg {
             CtlMsg::RegisterRegion {
@@ -576,5 +714,28 @@ mod tests {
                 .any(|msg| matches!(msg, CtlMsg::Fault { code: actual, .. } if *actual == code)),
             "missing Fault({code:?}) in {msgs:?}"
         );
+    }
+
+    fn fault_with_code(msgs: &[CtlMsg], code: FaultCode) -> &str {
+        msgs.iter()
+            .find_map(|msg| match msg {
+                CtlMsg::Fault {
+                    code: actual,
+                    detail,
+                    ..
+                } if *actual == code => Some(detail.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing Fault({code:?}) in {msgs:?}"))
+    }
+
+    fn assert_meta_fault(regions: &mut HarnessRegions, code: FaultCode) {
+        let bytes = regions.meta_mut().as_mut_slice().unwrap();
+        assert_eq!(u32_at(bytes, 0x04), MetaStatus::Faulted as u32);
+        assert_eq!(u32_at(bytes, 0x14), crate::meta::fault_code_value(code));
+    }
+
+    fn u32_at(bytes: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
     }
 }
