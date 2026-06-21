@@ -9,3 +9,6 @@ blake3 = "1"
 libc = "0.2"
 refwork-emu = { path = "../refwork-emu" }
 refwork-protocol = { path = "../refwork-protocol" }
+
+[dev-dependencies]
+xtask = { path = "../../xtask" }

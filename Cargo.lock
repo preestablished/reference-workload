@@ -637,6 +637,7 @@ dependencies = [
  "libc",
  "refwork-emu",
  "refwork-protocol",
+ "xtask",
 ]
 
 [[package]]
