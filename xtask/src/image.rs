@@ -4,6 +4,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_yaml::{Mapping, Value};
 
 const WORKLOAD_NAME: &str = "refwork-demo";
@@ -11,6 +14,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const FPS_NUM: u64 = 21_477_272;
 const FPS_DEN: u64 = 357_366;
 const ZSTD_VERSION: &str = "1.5.5";
+const DOUBLE_BUILD_ROOT: &str = "image-double-build";
+const UNSTAMPED_FILE: &str = "determinism.unstamped.yaml";
+const GREEN_STAMP_FILE: &str = "determinism.last_green";
+const GREEN_STAMP_SENTINEL: &str = "image/register-requires-green-stamp";
+const M5_EVIDENCE_NOTE: &str =
+    ".agents/plans/guest-sdk-unblock-reference-workload/m5-suite-evidence.md";
 
 const REQUIRED_REGIONS: &[RegionSpec] = &[
     RegionSpec {
@@ -56,6 +65,44 @@ struct RegionSpec {
     layout_version: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactComparison {
+    pub file: &'static str,
+    pub bytes: u64,
+    pub blake3: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoubleBuildReport {
+    pub first_manifest: PathBuf,
+    pub second_manifest: PathBuf,
+    pub artifacts: Vec<ArtifactComparison>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterMode {
+    DirectDistUnstamped,
+    DirectDistStamped,
+}
+
+impl fmt::Display for RegisterMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegisterMode::DirectDistUnstamped => {
+                f.write_str("unstamped sidecar accepted until package 06 green stamp lands")
+            }
+            RegisterMode::DirectDistStamped => f.write_str("green stamp present"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterReport {
+    pub manifest: PathBuf,
+    pub manifest_blake3: String,
+    pub mode: RegisterMode,
+}
+
 #[derive(Debug)]
 pub enum ImageError {
     Io {
@@ -95,6 +142,14 @@ impl fmt::Display for ImageError {
 impl std::error::Error for ImageError {}
 
 pub fn build_image(workspace_root: &Path, agent_bin: &Path) -> Result<PathBuf, ImageError> {
+    build_image_with_git_rev(workspace_root, agent_bin, None)
+}
+
+fn build_image_with_git_rev(
+    workspace_root: &Path,
+    agent_bin: &Path,
+    source_rev: Option<&str>,
+) -> Result<PathBuf, ImageError> {
     if !agent_bin.is_file() {
         return Err(ImageError::MissingInput(format!(
             "agent binary does not exist: {}",
@@ -175,7 +230,10 @@ pub fn build_image(workspace_root: &Path, agent_bin: &Path) -> Result<PathBuf, I
     )?;
     compress_zstd(&raw_cpio, &out_dir.join("initramfs.cpio.zst"))?;
 
-    let git_rev = git_rev(workspace_root)?;
+    let git_rev = match source_rev {
+        Some(rev) => rev.to_owned(),
+        None => git_rev(workspace_root)?,
+    };
     let kernel_hash = blake3_file(&out_dir.join("bzImage"))?;
     let initramfs_hash = blake3_file(&out_dir.join("initramfs.cpio.zst"))?;
     write_workload_manifest(
@@ -227,12 +285,313 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
     }
 }
 
+pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageError> {
+    let source_rev = git_rev(workspace_root)?;
+    let control_plane = control_plane_checkout(workspace_root)?;
+    ensure_clean_git_checkout(&control_plane, "control-plane")?;
+
+    let double_root = workspace_root.join("target").join(DOUBLE_BUILD_ROOT);
+    if double_root.exists() {
+        remove_dir_all(&double_root)?;
+    }
+    create_dir_all(&double_root)?;
+
+    let first_dir = build_from_clean_root(
+        workspace_root,
+        &control_plane,
+        &double_root,
+        "root-a",
+        &source_rev,
+    )?;
+    let second_dir = build_from_clean_root(
+        workspace_root,
+        &control_plane,
+        &double_root,
+        "root-b",
+        &source_rev,
+    )?;
+
+    let first_manifest = first_dir.join("workload-image.yaml");
+    let second_manifest = second_dir.join("workload-image.yaml");
+    validate_manifest(&first_manifest)?;
+    validate_manifest(&second_manifest)?;
+
+    let artifacts = compare_double_build_artifacts(&first_dir, &second_dir)?;
+    Ok(DoubleBuildReport {
+        first_manifest,
+        second_manifest,
+        artifacts,
+    })
+}
+
+pub fn register_image(
+    workspace_root: &Path,
+    manifest: Option<&Path>,
+    require_green_stamp: bool,
+) -> Result<RegisterReport, ImageError> {
+    let manifest = manifest.map(Path::to_path_buf).unwrap_or_else(|| {
+        workspace_root
+            .join("dist")
+            .join(format!("workload-image-{VERSION}"))
+            .join("workload-image.yaml")
+    });
+
+    validate_manifest(&manifest)?;
+    let base = manifest.parent().ok_or_else(|| {
+        ImageError::InvalidInput(format!("manifest has no parent: {}", manifest.display()))
+    })?;
+    let manifest_blake3 = blake3_file(&manifest)?;
+    let green_stamp = base.join(GREEN_STAMP_FILE);
+    let unstamped = base.join(UNSTAMPED_FILE);
+
+    if green_stamp.is_file() && unstamped.is_file() {
+        return Err(ImageError::InvalidInput(format!(
+            "{} must not coexist with {UNSTAMPED_FILE}",
+            green_stamp.display()
+        )));
+    }
+    if green_stamp.is_file() {
+        return Ok(RegisterReport {
+            manifest,
+            manifest_blake3,
+            mode: RegisterMode::DirectDistStamped,
+        });
+    }
+
+    if require_green_stamp || green_stamp_support_landed(workspace_root) {
+        return Err(ImageError::MissingInput(format!(
+            "missing determinism green stamp {}; package 06 registration refuses unstamped manifests",
+            green_stamp.display()
+        )));
+    }
+    if !unstamped.is_file() {
+        return Err(ImageError::MissingInput(format!(
+            "missing determinism sidecar {}; expected {UNSTAMPED_FILE} before package 06",
+            unstamped.display()
+        )));
+    }
+
+    Ok(RegisterReport {
+        manifest,
+        manifest_blake3,
+        mode: RegisterMode::DirectDistUnstamped,
+    })
+}
+
+fn build_from_clean_root(
+    source_workspace: &Path,
+    control_plane: &Path,
+    double_root: &Path,
+    name: &str,
+    source_rev: &str,
+) -> Result<PathBuf, ImageError> {
+    let root = double_root.join(name);
+    let workspace = root.join("reference-workload");
+    create_dir_all(&root)?;
+    materialize_tracked_source(source_workspace, &workspace)?;
+    symlink_path(control_plane, &root.join("control-plane"))?;
+    let agent = write_placeholder_agent(&workspace)?;
+    build_image_with_git_rev(&workspace, &agent, Some(source_rev))
+}
+
+fn materialize_tracked_source(source: &Path, dest: &Path) -> Result<(), ImageError> {
+    let output = Command::new("git")
+        .arg("ls-files")
+        .arg("-z")
+        .current_dir(source)
+        .output()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("git"),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: "git ls-files -z".into(),
+            status: output.status.to_string(),
+        });
+    }
+
+    create_dir_all(dest)?;
+    for rel in output.stdout.split(|byte| *byte == 0) {
+        if rel.is_empty() {
+            continue;
+        }
+        let rel = String::from_utf8_lossy(rel);
+        let src = source.join(rel.as_ref());
+        let dst = dest.join(rel.as_ref());
+        copy_source_entry(&src, &dst)?;
+    }
+    Ok(())
+}
+
+fn copy_source_entry(src: &Path, dst: &Path) -> Result<(), ImageError> {
+    if let Some(parent) = dst.parent() {
+        create_dir_all(parent)?;
+    }
+    let metadata = std::fs::symlink_metadata(src).map_err(|source| ImageError::Io {
+        path: src.to_owned(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(src).map_err(|source| ImageError::Io {
+            path: src.to_owned(),
+            source,
+        })?;
+        symlink_path(&target, dst)
+    } else {
+        std::fs::copy(src, dst).map_err(|source| ImageError::Io {
+            path: dst.to_owned(),
+            source,
+        })?;
+        std::fs::set_permissions(dst, metadata.permissions()).map_err(|source| ImageError::Io {
+            path: dst.to_owned(),
+            source,
+        })
+    }
+}
+
+fn write_placeholder_agent(workspace_root: &Path) -> Result<PathBuf, ImageError> {
+    let guest_sdk_lock = read_to_string(&workspace_root.join("image").join("guest-sdk.lock"))?;
+    let payload = quoted_value(&guest_sdk_lock, "placeholder_payload")?;
+    let agent = workspace_root
+        .join("target")
+        .join("detguest-agent-placeholder");
+    write(&agent, payload.as_bytes())?;
+    set_executable(&agent)?;
+    Ok(agent)
+}
+
+fn compare_double_build_artifacts(
+    first_dir: &Path,
+    second_dir: &Path,
+) -> Result<Vec<ArtifactComparison>, ImageError> {
+    let mut errors = Vec::new();
+    let mut comparisons = Vec::new();
+    for file in ["bzImage", "initramfs.cpio.zst", "workload-image.yaml"] {
+        let first = read(&first_dir.join(file))?;
+        let second = read(&second_dir.join(file))?;
+        let first_hash = blake3::hash(&first).to_hex().to_string();
+        let second_hash = blake3::hash(&second).to_hex().to_string();
+        if first != second {
+            errors.push(format!(
+                "double-build artifact {file} differs: first bytes={} blake3={}, second bytes={} blake3={}",
+                first.len(),
+                first_hash,
+                second.len(),
+                second_hash
+            ));
+            continue;
+        }
+        comparisons.push(ArtifactComparison {
+            file,
+            bytes: first.len() as u64,
+            blake3: first_hash,
+        });
+    }
+
+    if errors.is_empty() {
+        Ok(comparisons)
+    } else {
+        Err(ImageError::Validation(errors))
+    }
+}
+
+fn control_plane_checkout(workspace_root: &Path) -> Result<PathBuf, ImageError> {
+    let Some(parent) = workspace_root.parent() else {
+        return Err(ImageError::MissingInput(format!(
+            "workspace has no parent: {}",
+            workspace_root.display()
+        )));
+    };
+    let control_plane = parent.join("control-plane");
+    if control_plane.join("Cargo.toml").is_file() {
+        Ok(control_plane)
+    } else {
+        Err(ImageError::MissingInput(format!(
+            "missing sibling control-plane checkout at {}; clean image double-build requires ../control-plane or an approved recorded proto source",
+            control_plane.display()
+        )))
+    }
+}
+
+fn ensure_clean_git_checkout(path: &Path, label: &str) -> Result<(), ImageError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .arg("status")
+        .arg("--short")
+        .output()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("git"),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: format!("git -C {} status --short", path.display()),
+            status: output.status.to_string(),
+        });
+    }
+    if output.stdout.is_empty() {
+        Ok(())
+    } else {
+        Err(ImageError::InvalidInput(format!(
+            "{label} checkout is dirty:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )))
+    }
+}
+
+fn green_stamp_support_landed(workspace_root: &Path) -> bool {
+    workspace_root.join(GREEN_STAMP_SENTINEL).is_file()
+        || workspace_root.join(M5_EVIDENCE_NOTE).is_file()
+}
+
+#[cfg(unix)]
+fn symlink_path(src: &Path, dst: &Path) -> Result<(), ImageError> {
+    if let Some(parent) = dst.parent() {
+        create_dir_all(parent)?;
+    }
+    std::os::unix::fs::symlink(src, dst).map_err(|source| ImageError::Io {
+        path: dst.to_owned(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn symlink_path(_src: &Path, dst: &Path) -> Result<(), ImageError> {
+    Err(ImageError::InvalidInput(format!(
+        "cannot create clean-root sibling symlink on this platform: {}",
+        dst.display()
+    )))
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<(), ImageError> {
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|source| ImageError::Io {
+            path: path.to_owned(),
+            source,
+        })?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<(), ImageError> {
+    Ok(())
+}
+
 fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
     let bin = workspace_root
         .join("target")
         .join("x86_64-unknown-linux-musl")
         .join("release")
         .join("refwork-harness");
+    let rustflags = harness_rustflags(workspace_root);
     let status = Command::new("cargo")
         .arg("build")
         .arg("--locked")
@@ -241,7 +600,7 @@ fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
         .arg("x86_64-unknown-linux-musl")
         .arg("-p")
         .arg("refwork-harness")
-        .env("RUSTFLAGS", "-C panic=abort")
+        .env("RUSTFLAGS", rustflags)
         .current_dir(workspace_root)
         .status()
         .map_err(|source| ImageError::Io {
@@ -256,6 +615,33 @@ fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
             status: status.to_string(),
         })
     }
+}
+
+fn harness_rustflags(workspace_root: &Path) -> String {
+    let mut flags = vec![
+        "-C".to_owned(),
+        "panic=abort".to_owned(),
+        format!(
+            "--remap-path-prefix={}=/reference-workload",
+            workspace_root.display()
+        ),
+    ];
+    if let Some(parent) = workspace_root.parent() {
+        let control_plane = parent.join("control-plane");
+        flags.push(format!(
+            "--remap-path-prefix={}=/control-plane",
+            control_plane.display()
+        ));
+        if let Ok(canonical) = control_plane.canonicalize() {
+            if canonical != control_plane {
+                flags.push(format!(
+                    "--remap-path-prefix={}=/control-plane",
+                    canonical.display()
+                ));
+            }
+        }
+    }
+    flags.join(" ")
 }
 
 fn ensure_no_panic_unwind(bin: &Path) -> Result<(), ImageError> {
@@ -543,7 +929,22 @@ Validate with:
 ```sh
 cargo run --locked -p xtask -- image validate {}/workload-image.yaml
 ```
+
+Before publishing a package-04 handoff, run:
+
+```sh
+cargo run --locked -p xtask -- image double-build
+cargo run --locked -p xtask -- image register --manifest {}/workload-image.yaml
+```
+
+`image register` is a direct `dist/` handoff/no-op until control-plane artifact
+registration exists. Once package 06 green-stamp support lands, registration
+refuses unstamped manifests.
 "#,
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("dist/workload-image"),
         path.parent()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
@@ -865,11 +1266,21 @@ fn validate_handoff_files(base: &Path, errors: &mut Vec<String>) {
         "harness.toml",
         "expected-regions.toml",
         "README.md",
-        "determinism.unstamped.yaml",
     ] {
         if !base.join(rel).is_file() {
             errors.push(format!("missing dist handoff file {rel}"));
         }
+    }
+    let unstamped = base.join(UNSTAMPED_FILE);
+    let green_stamp = base.join(GREEN_STAMP_FILE);
+    match (unstamped.is_file(), green_stamp.is_file()) {
+        (true, false) | (false, true) => {}
+        (true, true) => errors.push(format!(
+            "{UNSTAMPED_FILE} must not coexist with {GREEN_STAMP_FILE}"
+        )),
+        (false, false) => errors.push(format!(
+            "missing determinism sidecar {UNSTAMPED_FILE} or {GREEN_STAMP_FILE}"
+        )),
     }
 
     match read_to_string(&base.join("expected-regions.toml")) {
@@ -1341,10 +1752,96 @@ mod tests {
         }
     }
 
+    fn write_double_build_artifacts(dir: &Path, initramfs: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("bzImage"), b"kernel").unwrap();
+        std::fs::write(dir.join("initramfs.cpio.zst"), initramfs).unwrap();
+        std::fs::write(dir.join("workload-image.yaml"), b"manifest").unwrap();
+    }
+
     #[test]
     fn validator_accepts_generated_manifest_shape() {
         let tmp = valid_dist();
         validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    #[test]
+    fn double_build_artifact_compare_accepts_equal_outputs() {
+        let tmp = TempDir::new();
+        let first = tmp.path.join("first");
+        let second = tmp.path.join("second");
+        write_double_build_artifacts(&first, b"initramfs");
+        write_double_build_artifacts(&second, b"initramfs");
+
+        let artifacts = compare_double_build_artifacts(&first, &second).unwrap();
+
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(artifacts[0].file, "bzImage");
+        assert_eq!(artifacts[1].file, "initramfs.cpio.zst");
+        assert_eq!(artifacts[2].file, "workload-image.yaml");
+    }
+
+    #[test]
+    fn double_build_artifact_compare_rejects_mismatch() {
+        let tmp = TempDir::new();
+        let first = tmp.path.join("first");
+        let second = tmp.path.join("second");
+        write_double_build_artifacts(&first, b"initramfs-a");
+        write_double_build_artifacts(&second, b"initramfs-b");
+
+        let err = compare_double_build_artifacts(&first, &second).unwrap_err();
+
+        match err {
+            ImageError::Validation(errors) => assert!(errors
+                .iter()
+                .any(|err| err.contains("double-build artifact initramfs.cpio.zst differs"))),
+            err => panic!("unexpected error: {err}"),
+        }
+    }
+
+    #[test]
+    fn register_accepts_unstamped_direct_handoff_before_package_06() {
+        let tmp = valid_dist();
+
+        let report = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.mode, RegisterMode::DirectDistUnstamped);
+        assert_eq!(report.manifest, tmp.path.join("workload-image.yaml"));
+    }
+
+    #[test]
+    fn register_rejects_unstamped_manifest_when_green_stamp_is_required() {
+        let tmp = valid_dist();
+
+        let err = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("missing determinism green stamp"));
+    }
+
+    #[test]
+    fn register_accepts_green_stamped_manifest() {
+        let tmp = valid_dist();
+        std::fs::remove_file(tmp.path.join("determinism.unstamped.yaml")).unwrap();
+        std::fs::write(tmp.path.join("determinism.last_green"), b"green").unwrap();
+
+        let report = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(report.mode, RegisterMode::DirectDistStamped);
     }
 
     #[test]
