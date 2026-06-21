@@ -1,0 +1,16 @@
+schema_version = 1
+kind = "refwork-image-builder-lock"
+
+[builder]
+status = "pinned-placeholder"
+container = "ghcr.io/preestablished/refwork-image-builder"
+digest = "placeholder:refwork-image-builder-placeholder-v1"
+placeholder_payload = "refwork-image-builder-placeholder-v1\n"
+blake3 = "9f5bb8fbb237da11a7ac6370811332cfbe3336e9959cda65d05fcb8a23e3f01b"
+source_date_epoch = 0
+
+[tools]
+cpio_writer = "xtask-newc"
+zstd = "pinned-by-cargo-lock"
+rust_target = "x86_64-unknown-linux-musl"
+panic = "abort"

@@ -1,0 +1,15 @@
+schema_version = 1
+kind = "refwork-guest-sdk-lock"
+
+[guest_sdk]
+status = "pinned-placeholder"
+repo = "guest-sdk"
+rev = "placeholder:refwork-guest-sdk-placeholder-v1"
+agent = "detguest-agent"
+placeholder_payload = "refwork-guest-sdk-placeholder-v1\n"
+blake3 = "8d694f0aad53a40c3a73548e168f18fdb9ca73bfade6e6b79ad1059d0a852f84"
+
+[boot_contract]
+boot_toml_schema_owner = "guest-sdk"
+expected_regions_schema_owner = "guest-sdk"
+ready_after = "regions-registered-and-start-sent"

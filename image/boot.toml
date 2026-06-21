@@ -1,0 +1,35 @@
+schema_version = 1
+schema_owner = "guest-sdk"
+
+[autostart]
+name = "refwork-harness"
+path = "/usr/bin/refwork-harness"
+argv = ["/usr/bin/refwork-harness", "--fd3"]
+control_fd = 3
+load_game_device = "/dev/vdb"
+
+[ready]
+after = "regions-registered-and-start-sent"
+expected_regions = ["wram", "framebuffer", "meta"]
+
+[[regions]]
+name = "wram"
+size = 131072
+layout_version = 1
+required = true
+writable = false
+
+[[regions]]
+name = "framebuffer"
+size = 229376
+format = "xrgb8888-256x224-stride1024"
+layout_version = 1
+required = true
+writable = false
+
+[[regions]]
+name = "meta"
+size = 4096
+layout_version = 1
+required = true
+writable = false

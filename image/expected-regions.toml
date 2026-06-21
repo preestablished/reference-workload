@@ -1,0 +1,25 @@
+schema_version = 1
+schema_owner = "guest-sdk"
+kind = "expected-regions"
+
+[[regions]]
+name = "wram"
+size = 131072
+layout_version = 1
+required = true
+writable = false
+
+[[regions]]
+name = "framebuffer"
+size = 229376
+format = "xrgb8888-256x224-stride1024"
+layout_version = 1
+required = true
+writable = false
+
+[[regions]]
+name = "meta"
+size = 4096
+layout_version = 1
+required = true
+writable = false
