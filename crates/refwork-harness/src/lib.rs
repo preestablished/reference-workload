@@ -1,6 +1,9 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use refwork_protocol::{CtlMsg, PROTO_VERSION};
+
+pub mod meta;
+pub mod regions;
 
 /// Build the harness-side handshake reply message.
 ///

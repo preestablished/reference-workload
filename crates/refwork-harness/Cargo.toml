@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+refwork-emu = { path = "../refwork-emu" }
 refwork-protocol = { path = "../refwork-protocol" }
