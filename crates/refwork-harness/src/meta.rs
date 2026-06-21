@@ -39,6 +39,10 @@ impl<'a> MetaPage<'a> {
         page
     }
 
+    pub fn from_existing(bytes: &'a mut [u8; META_SIZE]) -> Self {
+        Self { bytes }
+    }
+
     pub fn bytes(&self) -> &[u8; META_SIZE] {
         self.bytes
     }

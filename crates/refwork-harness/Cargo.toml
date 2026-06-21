@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = "1"
 libc = "0.2"
 refwork-emu = { path = "../refwork-emu" }
 refwork-protocol = { path = "../refwork-protocol" }
