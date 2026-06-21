@@ -633,6 +633,32 @@ mod tests {
         assert!(channel.transport().sent.is_empty());
     }
 
+    #[test]
+    fn empty_boundaries_poll_latch_and_mark_once_per_frame() {
+        let setup = setup_result();
+        let mut frame_loop = FrameLoop::new(setup).unwrap();
+        let mut channel = ControlChannel::new(ScriptTransport::new(vec![
+            Inbound::EmptyPoll,
+            Inbound::EmptyPoll,
+            Inbound::Bytes(wire(CtlMsg::Shutdown {})),
+        ]));
+        let mut platform = TestPlatform::with_pads(&[0x1001, 0x1002, 0x1fff]);
+
+        let exit = frame_loop.run(&mut channel, &mut platform).unwrap();
+
+        assert_eq!(exit, FrameLoopExit::Shutdown { frame: 3 });
+        assert_eq!(platform.polls, vec![0, 0, 0]);
+        assert_eq!(platform.marks, vec![1, 2, 3]);
+        assert_eq!(platform.quiesce_checks, 3);
+        assert_eq!(
+            u32_at(frame_loop.meta_bytes().unwrap(), 0x04),
+            MetaStatus::Running as u32
+        );
+        assert_eq!(u64_at(frame_loop.meta_bytes().unwrap(), 0x08), 3);
+        assert_eq!(u16_at(frame_loop.meta_bytes().unwrap(), 0x10), 0x0fff);
+        assert!(channel.transport().sent.is_empty());
+    }
+
     fn assert_fault(msgs: &[CtlMsg], code: FaultCode, frame: u64) {
         assert!(
             msgs.iter().any(|msg| {

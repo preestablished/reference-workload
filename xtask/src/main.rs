@@ -11,6 +11,7 @@ fn main() {
     }
 
     match args[0].as_str() {
+        "audit-syms" => cmd_audit_syms(&args[1..]),
         "build-rom" => cmd_build_rom(&args[1..]),
         "deny" => cmd_deny(&args[1..]),
         "fetch-test-roms" => cmd_fetch_test_roms(&args[1..]),
@@ -32,6 +33,9 @@ fn usage() {
     println!("Usage: cargo xtask <SUBCOMMAND> [OPTIONS]");
     println!();
     println!("Subcommands:");
+    println!("  audit-syms --bin PATH");
+    println!("      Audit a release binary for banned clock, sleep, and scheduler symbols.");
+    println!();
     println!("  build-rom [--out PATH]");
     println!("      Assemble the synthetic test ROM. Default output: target/synth-rom.rom");
     println!();
@@ -51,6 +55,44 @@ fn usage() {
     println!("  hash-chain [--frames N]");
     println!("      Print the chained synthetic-ROM frame hash (default 600 frames).");
     println!("      Identical across architectures = cross-arch determinism holds.");
+}
+
+// ─── audit-syms ──────────────────────────────────────────────────────────────
+
+fn cmd_audit_syms(args: &[String]) {
+    let mut bin: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bin" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("audit-syms: --bin requires a path");
+                    std::process::exit(2);
+                }
+                if bin.is_some() {
+                    eprintln!("audit-syms: --bin may only be supplied once");
+                    std::process::exit(2);
+                }
+                bin = Some(PathBuf::from(&args[i]));
+            }
+            other => {
+                eprintln!("audit-syms: unknown option '{}'", other);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(bin) = bin else {
+        eprintln!("audit-syms: --bin is required");
+        std::process::exit(2);
+    };
+
+    if let Err(err) = xtask::audit_syms::run_audit_syms(&bin) {
+        eprintln!("audit-syms: {err}");
+        std::process::exit(1);
+    }
 }
 
 // ─── build-rom ───────────────────────────────────────────────────────────────

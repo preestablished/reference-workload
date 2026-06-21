@@ -1,6 +1,8 @@
 //! xtask — developer tooling for the deterministic emulator workspace.
 //!
 //! Subcommands:
+//! - `cargo xtask audit-syms --bin PATH` — audit a release binary for banned
+//!   clock, sleep, and scheduler entry points.
 //! - `cargo xtask build-rom [--out PATH]` — assemble the synthetic test ROM.
 //! - `cargo xtask deny` — determinism deny gate (banned token scan).
 //! - `cargo xtask fetch-test-roms` — download and verify test ROM archives.
@@ -12,6 +14,7 @@
 //!   frame hash (cross-architecture determinism probe).
 
 pub mod asm;
+pub mod audit_syms;
 pub mod cpu_tests;
 pub mod deny;
 pub mod fetch;

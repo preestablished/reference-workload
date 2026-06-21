@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use refwork_emu::{Cartridge, Core, FrameFlags, RegionBuffers, FB_BYTES, WRAM_INIT_BYTE};
 use refwork_harness::ctl::CONTROL_FD;
 use refwork_harness::regions::{META_SIZE, WRAM_SIZE};
-use refwork_protocol::{CtlMsg, PROTO_VERSION};
+use refwork_protocol::{CtlMsg, FaultCode, MAX_DATAGRAM, PROTO_VERSION};
 
 const FRAMES: u64 = 1_000;
 const FB_BYTES_U64: u64 = FB_BYTES as u64;
@@ -18,41 +18,24 @@ const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 
 #[test]
 fn mock_agent_happy_path_1000_frames() {
-    let rom = xtask::build_synth_rom();
-    let rom_file = TempRom::write(&rom);
-    let (agent_fd, harness_fd) = seqpacket_pair();
-    configure_socket(agent_fd.as_raw_fd());
-    configure_socket(harness_fd.as_raw_fd());
-    let mut child = spawn_harness(harness_fd);
+    let mut harness = spawn_mock_harness();
 
-    send_msg(
-        agent_fd.as_raw_fd(),
-        &CtlMsg::Hello {
-            proto_version: PROTO_VERSION,
-        },
-    );
-    expect_hello_ack(agent_fd.as_raw_fd());
-
-    send_msg(
-        agent_fd.as_raw_fd(),
-        &CtlMsg::LoadGame {
-            dev_path: rom_file.path.display().to_string(),
-        },
-    );
-    expect_game_loaded(agent_fd.as_raw_fd(), &rom);
-    let regions = expect_regions_until_ready(agent_fd.as_raw_fd());
+    perform_hello(harness.fd());
+    send_load_game(harness.fd(), &harness.rom_file);
+    expect_game_loaded(harness.fd(), &harness.rom);
+    let regions = expect_regions_until_ready(harness.fd());
     assert_required_regions(&regions);
 
     // Prime every frame request before validation. The harness frame loop
     // free-runs and polls one queued datagram per frame boundary.
-    send_msg(agent_fd.as_raw_fd(), &CtlMsg::Start {});
+    send_msg(harness.fd(), &CtlMsg::Start {});
     for frame in 1..=FRAMES {
-        send_msg(agent_fd.as_raw_fd(), &CtlMsg::HashRequest { frame });
+        send_msg(harness.fd(), &CtlMsg::HashRequest { frame });
     }
 
-    let mut direct = DirectRun::new(&rom);
+    let mut direct = DirectRun::new(&harness.rom);
     for frame in 1..=FRAMES {
-        let report = expect_hash_report(agent_fd.as_raw_fd(), frame);
+        let report = expect_hash_report(harness.fd(), frame);
         let expected = direct.run_frame(frame);
         assert_eq!(
             report.wram, expected.wram,
@@ -64,8 +47,142 @@ fn mock_agent_happy_path_1000_frames() {
         );
     }
 
-    send_msg(agent_fd.as_raw_fd(), &CtlMsg::Shutdown {});
-    wait_for_success(&mut child);
+    send_msg(harness.fd(), &CtlMsg::Shutdown {});
+    wait_for_success(&mut harness.child);
+}
+
+#[test]
+fn start_before_load_game_faults_protocol_order() {
+    let mut harness = spawn_mock_harness();
+
+    perform_hello(harness.fd());
+    send_msg(harness.fd(), &CtlMsg::Start {});
+
+    expect_fault(harness.fd(), FaultCode::ProtocolOrder, 0);
+    let stderr = wait_for_failure(&mut harness.child);
+    assert!(
+        stderr.contains("setup failed"),
+        "unexpected harness stderr: {stderr}"
+    );
+}
+
+#[test]
+fn hash_request_before_start_faults_protocol_order() {
+    let mut harness = spawn_mock_harness();
+
+    perform_hello(harness.fd());
+    send_load_game(harness.fd(), &harness.rom_file);
+    expect_game_loaded(harness.fd(), &harness.rom);
+    let regions = expect_regions_until_ready(harness.fd());
+    assert_required_regions(&regions);
+    send_msg(harness.fd(), &CtlMsg::HashRequest { frame: 1 });
+
+    expect_fault(harness.fd(), FaultCode::ProtocolOrder, 0);
+    let stderr = wait_for_failure(&mut harness.child);
+    assert!(
+        stderr.contains("setup failed"),
+        "unexpected harness stderr: {stderr}"
+    );
+}
+
+#[test]
+fn double_start_faults_protocol_order_at_first_frame_boundary() {
+    let mut harness = spawn_mock_harness();
+
+    complete_setup_until_ready(&harness);
+    send_msg(harness.fd(), &CtlMsg::Start {});
+    send_msg(harness.fd(), &CtlMsg::Start {});
+
+    expect_fault(harness.fd(), FaultCode::ProtocolOrder, 1);
+    let stderr = wait_for_failure(&mut harness.child);
+    assert!(
+        stderr.contains("frame loop failed"),
+        "unexpected harness stderr: {stderr}"
+    );
+}
+
+#[test]
+fn malformed_postcard_datagram_faults_bad_proto() {
+    let mut harness = spawn_mock_harness();
+
+    send_raw(harness.fd(), &[0xff]);
+
+    expect_fault(harness.fd(), FaultCode::BadProto, 0);
+    let stderr = wait_for_failure(&mut harness.child);
+    assert!(
+        stderr.contains("setup failed"),
+        "unexpected harness stderr: {stderr}"
+    );
+}
+
+#[test]
+fn oversize_datagram_faults_bad_proto() {
+    let mut harness = spawn_mock_harness();
+    let bytes = vec![0u8; MAX_DATAGRAM + 2];
+
+    send_raw(harness.fd(), &bytes);
+
+    expect_fault(harness.fd(), FaultCode::BadProto, 0);
+    let stderr = wait_for_failure(&mut harness.child);
+    assert!(
+        stderr.contains("setup failed"),
+        "unexpected harness stderr: {stderr}"
+    );
+}
+
+struct MockHarness {
+    fd: OwnedFd,
+    child: HarnessChild,
+    rom: Vec<u8>,
+    rom_file: TempRom,
+}
+
+impl MockHarness {
+    fn fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+fn spawn_mock_harness() -> MockHarness {
+    let rom = xtask::build_synth_rom();
+    let rom_file = TempRom::write(&rom);
+    let (fd, harness_fd) = seqpacket_pair();
+    configure_socket(fd.as_raw_fd());
+    configure_socket(harness_fd.as_raw_fd());
+    let child = spawn_harness(harness_fd);
+    MockHarness {
+        fd,
+        child,
+        rom,
+        rom_file,
+    }
+}
+
+fn perform_hello(fd: RawFd) {
+    send_msg(
+        fd,
+        &CtlMsg::Hello {
+            proto_version: PROTO_VERSION,
+        },
+    );
+    expect_hello_ack(fd);
+}
+
+fn send_load_game(fd: RawFd, rom_file: &TempRom) {
+    send_msg(
+        fd,
+        &CtlMsg::LoadGame {
+            dev_path: rom_file.path.display().to_string(),
+        },
+    );
+}
+
+fn complete_setup_until_ready(harness: &MockHarness) {
+    perform_hello(harness.fd());
+    send_load_game(harness.fd(), &harness.rom_file);
+    expect_game_loaded(harness.fd(), &harness.rom);
+    let regions = expect_regions_until_ready(harness.fd());
+    assert_required_regions(&regions);
 }
 
 struct HashPair {
@@ -211,8 +328,30 @@ fn expect_hash_report(fd: RawFd, expected_frame: u64) -> HashPair {
     }
 }
 
+fn expect_fault(fd: RawFd, expected_code: FaultCode, expected_frame: u64) {
+    match recv_msg(fd) {
+        CtlMsg::Fault {
+            frame,
+            code,
+            detail,
+        } => {
+            assert_eq!(frame, expected_frame);
+            assert_eq!(code, expected_code);
+            assert!(
+                !detail.is_empty(),
+                "Fault({expected_code:?}) should include bounded detail"
+            );
+        }
+        other => panic!("expected Fault({expected_code:?}), got {other:?}"),
+    }
+}
+
 fn send_msg(fd: RawFd, msg: &CtlMsg) {
     let bytes = refwork_protocol::encode(msg).expect("encode control message");
+    send_raw(fd, &bytes);
+}
+
+fn send_raw(fd: RawFd, bytes: &[u8]) {
     loop {
         let sent = unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), SEND_FLAGS) };
         if sent == bytes.len() as isize {
@@ -222,7 +361,7 @@ fn send_msg(fd: RawFd, msg: &CtlMsg) {
         if sent < 0 && err.kind() == io::ErrorKind::Interrupted {
             continue;
         }
-        panic!("send failed for {msg:?}: {err}");
+        panic!("send failed for {} byte datagram: {err}", bytes.len());
     }
 }
 
@@ -283,7 +422,7 @@ fn set_socket_timeout(fd: RawFd, opt: libc::c_int) {
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
-            libc::SO_RCVTIMEO,
+            opt,
             (&timeout as *const libc::timeval).cast(),
             std::mem::size_of_val(&timeout) as libc::socklen_t,
         )
@@ -376,6 +515,30 @@ fn wait_for_success(harness: &mut HarnessChild) {
     harness.reaped = true;
     let stderr = read_child_stderr(&mut harness.child);
     panic!("harness did not exit after Shutdown: {stderr}");
+}
+
+fn wait_for_failure(harness: &mut HarnessChild) -> String {
+    for _ in 0..1_000 {
+        match harness.child.try_wait().expect("poll child") {
+            Some(status) if !status.success() => {
+                harness.reaped = true;
+                return read_child_stderr(&mut harness.child);
+            }
+            Some(status) => {
+                harness.reaped = true;
+                panic!("harness unexpectedly exited successfully with {status}");
+            }
+            None => unsafe {
+                libc::usleep(10_000);
+            },
+        }
+    }
+
+    let _ = harness.child.kill();
+    let _ = harness.child.wait();
+    harness.reaped = true;
+    let stderr = read_child_stderr(&mut harness.child);
+    panic!("harness did not exit after protocol fault: {stderr}");
 }
 
 fn read_child_stderr(child: &mut Child) -> String {
