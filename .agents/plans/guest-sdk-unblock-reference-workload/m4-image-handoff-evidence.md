@@ -11,16 +11,22 @@ goldens, WRAM dumps, SRAM, or padlog semantics.
 
 | Field | Value |
 |---|---|
-| Date | 2026-06-21T23:57:31Z |
+| Date | 2026-06-22T00:11:38Z |
 | Owner | Matt Spurlin (`refwork-d7t.9` owner); recorded by Codex during `/ralph` |
 | Machine | `infra-control` |
 | Architecture | `x86_64` |
 | Branch | `ralph/iteration-9-implement-image-double-build-and-register-guard` |
-| Implementation rev | `3068fc815a3b9161acf308874bd55054e71f5a37` |
+| Verified artifact source rev | `1721437865678cb7da29058d7940764cec570c22` |
 | Control-plane source | sibling checkout `../control-plane` |
 | Control-plane rev | `ca9ee9048d7fca8eec5fe512011b011128e2b0c3` |
 | Control-plane worktree | clean (`git -C ../control-plane status --short` produced no output) |
 | Guest agent input | placeholder payload from `image/guest-sdk.lock` |
+
+This note records the artifact hashes produced at the verified artifact source
+rev above. Later documentation-only commits change `meta.built_from.git_rev` in
+newly generated manifests by design, so branch-head rebuilds produce a new
+manifest hash while preserving the kernel, initramfs, boot, region, and pad
+contracts recorded here.
 
 ## Commands
 
@@ -30,25 +36,30 @@ printf 'refwork-guest-sdk-placeholder-v1\n' > target/detguest-agent-placeholder
 chmod 755 target/detguest-agent-placeholder
 cargo run --locked -p xtask -- image build --agent-bin target/detguest-agent-placeholder
 cargo run --locked -p xtask -- image register --manifest dist/workload-image-0.1.0/workload-image.yaml
+cargo run --locked -p xtask -- image register --manifest dist/workload-image-0.1.0/workload-image.yaml --require-green-stamp
 ```
 
-All commands passed locally.
+The first four commands passed locally. The final command intentionally failed
+closed because only `determinism.unstamped.yaml` exists before package 06:
+`missing determinism green stamp ... determinism.last_green`.
 
 ## Direct Handoff
 
 | Artifact | Path | BLAKE3 |
 |---|---|---|
-| WorkloadImage manifest | `dist/workload-image-0.1.0/workload-image.yaml` | `91d0d3f40a1919b00cb8c303023b02f74ca75bf8d71c5f2e3c1a3750ddb0f941` |
+| WorkloadImage manifest | `dist/workload-image-0.1.0/workload-image.yaml` | `b09dae3b79d1fa6fc314b91c1ccb54bb0b1317682481039ffb69afe157ba3fc3` |
 | `boot.toml` | `dist/workload-image-0.1.0/boot.toml` | `802fa34f70b9a1f1fc96f0c79611b0d38cc84bda0556907f12ab241a97d89a23` |
 | Expected-region handoff | `dist/workload-image-0.1.0/expected-regions.toml` | `55c95af82bef1712d6252f8c4f491592a1d6d6aa8e1e4a80bdd9c43a6a365d5c` |
 | Harness config | `dist/workload-image-0.1.0/harness.toml` | `d5623fe12a28a10736f70ca298c687c8fc8723786f77a8144bd8da2b5d9c3edd` |
 | README | `dist/workload-image-0.1.0/README.md` | `a85cb7552071b1c1a06f0c4678fb482de23f1c1800cd1afe06d6af32fe637c5e` |
-| Unstamped determinism sidecar | `dist/workload-image-0.1.0/determinism.unstamped.yaml` | `3a1339c22ca030122d104c6fea87919c60303404203660a72fcf415aef0a227e` |
+| Unstamped determinism sidecar | `dist/workload-image-0.1.0/determinism.unstamped.yaml` | `6b613fc6ff13ddae996aa68ccda1bcfcd5f9dd6f25ca10e8e1d06387584eaf58` |
 
 `image register` validated the manifest and reported a direct `dist/` handoff.
 No control-plane registry upload was attempted because full registry support is
-not present yet. The command accepts the unstamped sidecar before package 06 and
-has a `--require-green-stamp` guard for package-06 registration.
+not present yet. The command accepts the unstamped sidecar before package 06,
+but `--require-green-stamp` fails closed. When a green stamp is present,
+validation requires a structured `determinism.last_green` sidecar tied to this
+manifest hash and reference-workload git rev.
 
 ## Double-Build Result
 
@@ -60,7 +71,7 @@ sibling `control-plane` symlink to the recorded checkout above.
 |---|---:|---|---|
 | `bzImage` | 34 | `9ae72dbae3e7a6e0b89fd3d3f0420b991c6187429420345777c2173ae9600ab7` | byte-identical |
 | `initramfs.cpio.zst` | 302127 | `7467720ac006be828edfda4f21b4269cdf0bdfc709e4707e784d5a228afabe9b` | byte-identical |
-| `workload-image.yaml` | 1577 | `91d0d3f40a1919b00cb8c303023b02f74ca75bf8d71c5f2e3c1a3750ddb0f941` | byte-identical |
+| `workload-image.yaml` | 1577 | `b09dae3b79d1fa6fc314b91c1ccb54bb0b1317682481039ffb69afe157ba3fc3` | byte-identical |
 
 The double-build manifest path for root A was
 `target/image-double-build/root-a/reference-workload/dist/workload-image-0.1.0/workload-image.yaml`.
@@ -115,7 +126,9 @@ Pad layout in `workload-image.yaml`:
 
 ## Scope Notes
 
-This package proves deterministic package-04 handoff construction and manifest
-validation. It does not prove real `detguest-agent` READY behavior, first-room
-operator-game progress, or package-06 full determinism green-stamp acceptance;
-those remain owned by packages 05 and 06.
+This bead proves deterministic package-04 handoff construction, direct
+registration/no-op behavior, and manifest validation. It does not prove the
+external DH-1 Linux direct-boot baseline, real `detguest-agent` READY behavior,
+first-room operator-game progress, or package-06 full determinism green-stamp
+acceptance. The DH-1 external-readiness citation remains open for
+`refwork-d7t.10`; packages 05 and 06 own the READY and full-suite evidence.
