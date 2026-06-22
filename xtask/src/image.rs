@@ -18,8 +18,6 @@ const DOUBLE_BUILD_ROOT: &str = "image-double-build";
 const UNSTAMPED_FILE: &str = "determinism.unstamped.yaml";
 const GREEN_STAMP_FILE: &str = "determinism.last_green";
 const GREEN_STAMP_SENTINEL: &str = "image/register-requires-green-stamp";
-const M5_EVIDENCE_NOTE: &str =
-    ".agents/plans/guest-sdk-unblock-reference-workload/m5-suite-evidence.md";
 
 const REQUIRED_REGIONS: &[RegionSpec] = &[
     RegionSpec {
@@ -258,6 +256,16 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
     })?;
 
     let mut errors = Vec::new();
+    let manifest_blake3 = match blake3_file(manifest) {
+        Ok(hash) => Some(hash),
+        Err(err) => {
+            errors.push(format!(
+                "cannot hash manifest {}: {err}",
+                manifest.display()
+            ));
+            None
+        }
+    };
     let root = mapping(&yaml, "root", &mut errors);
 
     if let Some(root) = root {
@@ -275,7 +283,7 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
     validate_fps(root, &mut errors);
     validate_pad_layout(root, &mut errors);
     validate_defaults(root, &mut errors);
-    validate_handoff_files(base, &mut errors);
+    validate_handoff_files(base, root, manifest_blake3.as_deref(), &mut errors);
     validate_no_game_content(base, &mut errors);
 
     if errors.is_empty() {
@@ -286,6 +294,7 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
 }
 
 pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageError> {
+    ensure_clean_git_checkout(workspace_root, "reference-workload")?;
     let source_rev = git_rev(workspace_root)?;
     let control_plane = control_plane_checkout(workspace_root)?;
     ensure_clean_git_checkout(&control_plane, "control-plane")?;
@@ -543,7 +552,6 @@ fn ensure_clean_git_checkout(path: &Path, label: &str) -> Result<(), ImageError>
 
 fn green_stamp_support_landed(workspace_root: &Path) -> bool {
     workspace_root.join(GREEN_STAMP_SENTINEL).is_file()
-        || workspace_root.join(M5_EVIDENCE_NOTE).is_file()
 }
 
 #[cfg(unix)]
@@ -1260,7 +1268,12 @@ fn validate_defaults(root: Option<&Mapping>, errors: &mut Vec<String>) {
     );
 }
 
-fn validate_handoff_files(base: &Path, errors: &mut Vec<String>) {
+fn validate_handoff_files(
+    base: &Path,
+    root: Option<&Mapping>,
+    manifest_blake3: Option<&str>,
+    errors: &mut Vec<String>,
+) {
     for rel in [
         "boot.toml",
         "harness.toml",
@@ -1274,7 +1287,10 @@ fn validate_handoff_files(base: &Path, errors: &mut Vec<String>) {
     let unstamped = base.join(UNSTAMPED_FILE);
     let green_stamp = base.join(GREEN_STAMP_FILE);
     match (unstamped.is_file(), green_stamp.is_file()) {
-        (true, false) | (false, true) => {}
+        (true, false) => {}
+        (false, true) => {
+            validate_green_stamp_sidecar(&green_stamp, root, manifest_blake3, errors);
+        }
         (true, true) => errors.push(format!(
             "{UNSTAMPED_FILE} must not coexist with {GREEN_STAMP_FILE}"
         )),
@@ -1294,6 +1310,97 @@ fn validate_handoff_files(base: &Path, errors: &mut Vec<String>) {
     match read_to_string(&base.join("harness.toml")) {
         Ok(content) => validate_harness_toml(&content, errors),
         Err(err) => errors.push(format!("cannot read harness.toml: {err}")),
+    }
+}
+
+fn validate_green_stamp_sidecar(
+    path: &Path,
+    root: Option<&Mapping>,
+    manifest_blake3: Option<&str>,
+    errors: &mut Vec<String>,
+) {
+    let content = match read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            errors.push(format!("cannot read {GREEN_STAMP_FILE}: {err}"));
+            return;
+        }
+    };
+    let yaml: Value = match serde_yaml::from_str(&content) {
+        Ok(yaml) => yaml,
+        Err(err) => {
+            errors.push(format!("{GREEN_STAMP_FILE} yaml parse failed: {err}"));
+            return;
+        }
+    };
+    let Some(stamp) = mapping(&yaml, GREEN_STAMP_FILE, errors) else {
+        return;
+    };
+
+    expect_u64(
+        stamp,
+        "schema_version",
+        1,
+        "determinism.last_green.schema_version",
+        errors,
+    );
+    expect_string(
+        stamp,
+        "kind",
+        "determinism-last-green",
+        "determinism.last_green.kind",
+        errors,
+    );
+    expect_string(
+        stamp,
+        "workload_image",
+        &format!("{WORKLOAD_NAME}@{VERSION}"),
+        "determinism.last_green.workload_image",
+        errors,
+    );
+
+    if let Some(manifest_blake3) = manifest_blake3 {
+        expect_string(
+            stamp,
+            "image_manifest_hash",
+            manifest_blake3,
+            "determinism.last_green.image_manifest_hash",
+            errors,
+        );
+    }
+    if let Some(git_rev) = manifest_git_rev(root, errors) {
+        expect_string(
+            stamp,
+            "reference_workload_git_rev",
+            &git_rev,
+            "determinism.last_green.reference_workload_git_rev",
+            errors,
+        );
+    }
+
+    expect_nonempty_string(
+        stamp,
+        "suite_version",
+        "determinism.last_green.suite_version",
+        errors,
+    );
+    expect_nonempty_string(
+        stamp,
+        "timestamp",
+        "determinism.last_green.timestamp",
+        errors,
+    );
+    if let Some(report_hash) = string_field(
+        stamp,
+        "suite_report_blake3",
+        "determinism.last_green.suite_report_blake3",
+        errors,
+    ) {
+        if !is_blake3_hex(report_hash) {
+            errors.push(
+                "determinism.last_green.suite_report_blake3 must be 64 lowercase hex chars".into(),
+            );
+        }
     }
 }
 
@@ -1537,6 +1644,14 @@ fn expect_string(
     }
 }
 
+fn expect_nonempty_string(parent: &Mapping, key: &str, path: &str, errors: &mut Vec<String>) {
+    if let Some(actual) = string_field(parent, key, path, errors) {
+        if actual.is_empty() {
+            errors.push(format!("{path} must not be empty"));
+        }
+    }
+}
+
 fn expect_u64(parent: &Mapping, key: &str, expected: u64, path: &str, errors: &mut Vec<String>) {
     if let Some(actual) = u64_field(parent, key, path, errors) {
         if actual != expected {
@@ -1555,6 +1670,20 @@ fn expect_bool(parent: &Mapping, key: &str, expected: bool, path: &str, errors: 
 
 fn has_key(parent: &Mapping, key: &str) -> bool {
     parent.contains_key(Value::String(key.into()))
+}
+
+fn manifest_git_rev(root: Option<&Mapping>, errors: &mut Vec<String>) -> Option<String> {
+    let meta = child_map(root, "meta", "meta", errors)?;
+    let built_from = child_map(Some(meta), "built_from", "meta.built_from", errors)?;
+    string_field(built_from, "git_rev", "meta.built_from.git_rev", errors).map(ToOwned::to_owned)
+}
+
+fn is_blake3_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn region_block<'a>(content: &'a str, name: &str) -> Option<&'a str> {
@@ -1759,10 +1888,57 @@ mod tests {
         std::fs::write(dir.join("workload-image.yaml"), b"manifest").unwrap();
     }
 
+    fn write_valid_green_stamp(tmp: &TempDir) {
+        std::fs::remove_file(tmp.path.join("determinism.unstamped.yaml")).unwrap();
+        let manifest_hash = blake3_file(&tmp.path.join("workload-image.yaml")).unwrap();
+        let content = format!(
+            r#"schema_version: 1
+kind: determinism-last-green
+workload_image: {WORKLOAD_NAME}@{VERSION}
+image_manifest_hash: "{manifest_hash}"
+reference_workload_git_rev: "0123456789012345678901234567890123456789"
+suite_version: "refwork-verify-suite-v1"
+timestamp: "2026-06-21T23:57:31Z"
+suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"#
+        );
+        std::fs::write(tmp.path.join("determinism.last_green"), content).unwrap();
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
+
     #[test]
     fn validator_accepts_generated_manifest_shape() {
         let tmp = valid_dist();
         validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    #[test]
+    fn double_build_cleanliness_check_rejects_dirty_checkout() {
+        let tmp = TempDir::new();
+        git(&tmp.path, &["init"]);
+        git(
+            &tmp.path,
+            &["config", "user.email", "codex@example.invalid"],
+        );
+        git(&tmp.path, &["config", "user.name", "Codex"]);
+        std::fs::write(tmp.path.join("tracked.txt"), b"clean").unwrap();
+        git(&tmp.path, &["add", "tracked.txt"]);
+        git(&tmp.path, &["commit", "-m", "init"]);
+        std::fs::write(tmp.path.join("tracked.txt"), b"dirty").unwrap();
+
+        let err = ensure_clean_git_checkout(&tmp.path, "reference-workload").unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("reference-workload checkout is dirty"));
     }
 
     #[test]
@@ -1831,8 +2007,7 @@ mod tests {
     #[test]
     fn register_accepts_green_stamped_manifest() {
         let tmp = valid_dist();
-        std::fs::remove_file(tmp.path.join("determinism.unstamped.yaml")).unwrap();
-        std::fs::write(tmp.path.join("determinism.last_green"), b"green").unwrap();
+        write_valid_green_stamp(&tmp);
 
         let report = register_image(
             Path::new("/missing-workspace"),
@@ -1842,6 +2017,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.mode, RegisterMode::DirectDistStamped);
+    }
+
+    #[test]
+    fn register_rejects_dummy_green_stamp() {
+        let tmp = valid_dist();
+        std::fs::remove_file(tmp.path.join("determinism.unstamped.yaml")).unwrap();
+        std::fs::write(tmp.path.join("determinism.last_green"), b"green").unwrap();
+
+        let err = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("determinism.last_green must be a mapping"));
     }
 
     #[test]
