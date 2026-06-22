@@ -26,7 +26,8 @@ durable lab artifact pointers and hashes.
 | Machine | `infra-control` |
 | Architecture | `x86_64` |
 | Branch | `ralph/iteration-10-record-m4-external-readiness-evidence` |
-| Reference-workload rev | `01535d8b072be49c4031e83f44796cba2cc82edd` |
+| Reference-workload base rev inspected | `01535d8b072be49c4031e83f44796cba2cc82edd` |
+| Evidence note rev | `9a6f8d48b4c129973d091efc9d12f6c523a79105` |
 | guest-sdk checkout rev | `08abbbc36f6afa6ad3aec0ce062c3383f8dcfcce` |
 | determinism-hypervisor checkout rev | `b9737538f5fc2708d9cb09979df775c0ab388390` |
 | snapshot-store checkout rev | `cac52afe66b0975601bc9ecbc67cd16b52cc181e` |
@@ -64,6 +65,7 @@ Key files and hashes:
 |---|---|
 | `08-linux-ready.log` | `bb916006a249426286fa2b0ba49a619fe8c84c6207144e036b9d032e7ca88f80` |
 | `14-linux-m4-transparency.log` | `4869bbef54856ee21dc92725c974924471d0a9b5bf46f22b750eba219b093fda` |
+| `15-linux-m5-frame-scheduling.log` | `ae76a534fe1c8a7847f06fa1737502cf0f50bd56c45ca1108c4947378070e055` |
 | `18-linux-worker-api.log` | `4f4ac3f2698ef7d11f85c647909b2ae281b84dfeb1bd7eaebfee5edb2d384b9f` |
 | `06-artifacts-and-cache.log` | `cb2ca4874c27322601a808ab8a0e5ca242f168d3f93e238cf55dd69f8e20abf3` |
 
