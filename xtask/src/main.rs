@@ -62,6 +62,12 @@ fn usage() {
     println!();
     println!("  image validate PATH");
     println!("      Validate a workload-image.yaml and its adjacent artifacts.");
+    println!();
+    println!("  image double-build");
+    println!("      Build image artifacts from two clean roots and byte-compare outputs.");
+    println!();
+    println!("  image register [--manifest PATH] [--require-green-stamp]");
+    println!("      Validate and expose a direct dist/ handoff until registry support exists.");
 }
 
 // ─── audit-syms ──────────────────────────────────────────────────────────────
@@ -162,12 +168,14 @@ fn cmd_deny(_args: &[String]) {
 
 fn cmd_image(args: &[String]) {
     let Some(subcommand) = args.first() else {
-        eprintln!("image: expected subcommand build or validate");
+        eprintln!("image: expected subcommand build, validate, double-build, or register");
         std::process::exit(2);
     };
     match subcommand.as_str() {
         "build" => cmd_image_build(&args[1..]),
         "validate" => cmd_image_validate(&args[1..]),
+        "double-build" => cmd_image_double_build(&args[1..]),
+        "register" => cmd_image_register(&args[1..]),
         other => {
             eprintln!("image: unknown subcommand '{}'", other);
             std::process::exit(2);
@@ -221,6 +229,79 @@ fn cmd_image_validate(args: &[String]) {
         Ok(()) => println!("image validate: OK - {}", args[0]),
         Err(err) => {
             eprintln!("image validate: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_image_double_build(args: &[String]) {
+    if !args.is_empty() {
+        eprintln!("image double-build: expected no arguments");
+        std::process::exit(2);
+    }
+
+    let workspace_root = find_workspace_root();
+    match xtask::image::double_build(&workspace_root) {
+        Ok(report) => {
+            println!("image double-build: OK");
+            println!(
+                "image double-build: first manifest {}",
+                report.first_manifest.display()
+            );
+            println!(
+                "image double-build: second manifest {}",
+                report.second_manifest.display()
+            );
+            for artifact in report.artifacts {
+                println!(
+                    "image double-build: {} bytes={} blake3={}",
+                    artifact.file, artifact.bytes, artifact.blake3
+                );
+            }
+        }
+        Err(err) => {
+            eprintln!("image double-build: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_image_register(args: &[String]) {
+    let mut manifest: Option<PathBuf> = None;
+    let mut require_green_stamp = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("image register: --manifest requires a path");
+                    std::process::exit(2);
+                }
+                manifest = Some(PathBuf::from(&args[i]));
+            }
+            "--require-green-stamp" => {
+                require_green_stamp = true;
+            }
+            other => {
+                eprintln!("image register: unknown option '{}'", other);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    let workspace_root = find_workspace_root();
+    match xtask::image::register_image(&workspace_root, manifest.as_deref(), require_green_stamp) {
+        Ok(report) => {
+            println!("image register: direct dist handoff");
+            println!("image register: manifest {}", report.manifest.display());
+            println!("image register: manifest blake3={}", report.manifest_blake3);
+            println!("image register: determinism {}", report.mode);
+            println!("image register: registry not configured; no upload performed");
+        }
+        Err(err) => {
+            eprintln!("image register: {err}");
             std::process::exit(1);
         }
     }
