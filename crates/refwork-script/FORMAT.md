@@ -6,6 +6,12 @@ reserved, must be zero). Frame 0 is the first `run_one_frame` after
 `Core::new`. Nothing else is recorded — no timestamps, no events; this is
 the host twin of "the latch word per frame" (D6).
 
+This is the `console16-12btn-v1` pad layout, layout version 1. Button
+names are exact and mixed-case: `A`, `B`, `X`, `Y`, `L`, `R`, `Up`,
+`Down`, `Left`, `Right`, `Start`, `Select`. `UP`, `DOWN`, `LEFT`,
+`RIGHT`, `START`, and `SELECT` are not aliases. Bits 12–15 are reserved
+and any set reserved bit is a parse error, never masked.
+
 The format is text, line-oriented, diff-able and hand-editable (M2
 acceptance calls for a *hand-authored* script).
 

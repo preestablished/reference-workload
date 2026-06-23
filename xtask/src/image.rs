@@ -18,6 +18,7 @@ const DOUBLE_BUILD_ROOT: &str = "image-double-build";
 const UNSTAMPED_FILE: &str = "determinism.unstamped.yaml";
 const GREEN_STAMP_FILE: &str = "determinism.last_green";
 const GREEN_STAMP_SENTINEL: &str = "image/register-requires-green-stamp";
+const PAD_LAYOUT_ID: &str = "console16-12btn-v1";
 
 const REQUIRED_REGIONS: &[RegionSpec] = &[
     RegionSpec {
@@ -880,6 +881,7 @@ fps:
   num: {FPS_NUM}
   den: {FPS_DEN}
 pad_layout:
+  layout_id: {PAD_LAYOUT_ID}
   layout_version: 1
   buttons:
     - {{ name: A, bit: 0 }}
@@ -1197,6 +1199,13 @@ fn validate_pad_layout(root: Option<&Mapping>, errors: &mut Vec<String>) {
     let Some(pad) = child_map(root, "pad_layout", "pad_layout", errors) else {
         return;
     };
+    expect_string(
+        pad,
+        "layout_id",
+        PAD_LAYOUT_ID,
+        "pad_layout.layout_id",
+        errors,
+    );
     expect_u64(
         pad,
         "layout_version",
@@ -1921,6 +1930,14 @@ suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
     }
 
     #[test]
+    fn generated_manifest_contains_pad_layout_id() {
+        let tmp = valid_dist();
+        let manifest = manifest_text(&tmp);
+
+        assert!(manifest.contains("  layout_id: console16-12btn-v1"));
+    }
+
+    #[test]
     fn double_build_cleanliness_check_rejects_dirty_checkout() {
         let tmp = TempDir::new();
         git(&tmp.path, &["init"]);
@@ -2123,6 +2140,48 @@ suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
         assert!(errors
             .iter()
             .any(|err| err.contains("pad_layout.buttons[10].bit expected 10")));
+    }
+
+    #[test]
+    fn validator_rejects_pad_layout_id_drift() {
+        let tmp = valid_dist();
+        let manifest = manifest_text(&tmp).replace(
+            "layout_id: console16-12btn-v1",
+            "layout_id: console16-12btn-v2",
+        );
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("pad_layout.layout_id expected")));
+    }
+
+    #[test]
+    fn validator_rejects_missing_pad_layout_id() {
+        let tmp = valid_dist();
+        let manifest = manifest_text(&tmp).replace("  layout_id: console16-12btn-v1\n", "");
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("missing pad_layout.layout_id")));
+    }
+
+    #[test]
+    fn validator_rejects_pad_button_name_casing_drift() {
+        let tmp = valid_dist();
+        let manifest = manifest_text(&tmp).replace("{ name: Up, bit: 6 }", "{ name: UP, bit: 6 }");
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(errors
+            .iter()
+            .any(|err| err.contains("pad_layout.buttons[6].name expected")));
     }
 
     #[test]
