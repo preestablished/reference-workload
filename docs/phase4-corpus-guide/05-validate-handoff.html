@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Step 5 - Validate And Handoff</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Step 5 - Validate And Handoff</h1>
+        <p>Assemble manifest, run validators, and publish only sanitized evidence.</p>
+        <nav class="nav" aria-label="Guide navigation">
+          <a href="04-label-score-trace.html">Previous: Labels And Trace</a>
+          <a href="index.html">Overview</a>
+        </nav>
+      </header>
+
+      <h2>Goal</h2>
+      <p>
+        The private bundle is complete only when the bundle checker passes and
+        the public fulfillment note can be updated without exposing private
+        data.
+      </p>
+
+      <h2>Create Manifest</h2>
+      <p>
+        Write <code>manifest.json</code> in the private bundle. It must include
+        the reference-workload commit, WorkloadImage identity or ref, operator
+        metadata policy, feature-map hash, scoring-program hash, layout hash,
+        capture count, framebuffer format, storage ref, access requirement,
+        retention, compression format, max expected size, and clean-room
+        provenance note.
+      </p>
+
+      <h2>Run Source Tests</h2>
+      <pre><code>cargo fmt --all -- --check
+cargo test --locked -p refwork-featuremap
+cargo test --locked -p refwork-verify phase4 -- --nocapture
+cargo test --locked -p xtask
+git diff --check</code></pre>
+
+      <h2>Run Private Validators</h2>
+      <pre><code>cargo run --locked -p refwork-featuremap -- validate \
+  &lt;private-bundle-dir&gt;/feature-map.yaml \
+  --scoring &lt;private-bundle-dir&gt;/scoring-program.yaml
+
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --bundle &lt;private-bundle-dir&gt; \
+  --out &lt;private-bundle-dir&gt;/validation/checksum-manifest.json
+
+cargo run --locked -p refwork-verify -- phase4-bundle-check \
+  --bundle &lt;private-bundle-dir&gt; \
+  --report &lt;private-bundle-dir&gt;/validation/phase4-bundle-check.json</code></pre>
+
+      <h2>Redaction Scan Public Notes</h2>
+      <p>
+        Before editing public request notes, scan the intended public text.
+        Add a forbid-file with operator-known private literals when available.
+      </p>
+
+      <pre><code>cargo run --locked -p refwork-verify -- redaction-scan \
+  --input &lt;public-fulfillment-note&gt; \
+  --report &lt;private-bundle-dir&gt;/validation/redaction-scan-report.json \
+  --forbid-file &lt;private-redaction-literals.txt&gt;</code></pre>
+
+      <h2>Public Handoff May Include</h2>
+      <ul>
+        <li>Opaque private bundle artifact id or registry ref.</li>
+        <li>Role-based access requirement.</li>
+        <li>Retention expectation.</li>
+        <li>Compression format and maximum expected size.</li>
+        <li>Top-level hashes and validation report hashes.</li>
+        <li>Capture count and framebuffer metadata summary.</li>
+        <li>K=32 score-plan statement and trajectory coverage summary.</li>
+        <li>Redacted command templates.</li>
+      </ul>
+
+      <h2>Public Handoff Must Not Include</h2>
+      <ul>
+        <li>Exact ROM filename or path.</li>
+        <li>Exact private root path.</li>
+        <li>Private capture ids.</li>
+        <li>Decoded real feature vectors.</li>
+        <li>Raw WRAM, framebuffer bytes, screenshots, save RAM, or ROM bytes.</li>
+        <li>Operator labels or trajectory JSONL.</li>
+        <li>Secret retrieval commands or token-owner details.</li>
+      </ul>
+
+      <h2>Done Criteria</h2>
+      <ul class="checklist">
+        <li><code>phase4-bundle-check</code> passes.</li>
+        <li>Capture count is at least 1,000.</li>
+        <li>Framebuffer metadata exists for the primary corpus.</li>
+        <li>Feature-map/scoring validation passes.</li>
+        <li>Trace report passes.</li>
+        <li>Checksum manifest exists.</li>
+        <li>Redaction scan passes against the public note.</li>
+        <li>The fulfillment note is updated with sanitized evidence only.</li>
+      </ul>
+    </main>
+  </body>
+</html>

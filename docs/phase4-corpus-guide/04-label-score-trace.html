@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Step 4 - Labels, Score Plan, And Trace</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Step 4 - Labels, Score Plan, And Trace</h1>
+        <p>Create consumer-aid files from the captured corpus.</p>
+        <nav class="nav" aria-label="Guide navigation">
+          <a href="03-capture-export.html">Previous: Capture Export</a>
+          <a href="index.html">Overview</a>
+          <a href="05-validate-handoff.html">Next: Validate And Handoff</a>
+        </nav>
+      </header>
+
+      <h2>Goal</h2>
+      <p>
+        Add labels and trajectory evidence that prove the corpus contains useful
+        states for state-scorer: same-canonical examples, distinct-stable
+        examples, first-boss coverage, goal-positive fixtures, and goal-negative
+        fixtures.
+      </p>
+
+      <h2>Create Dedup Labels</h2>
+      <p>
+        Write <code>dedup-groups.jsonl</code>. Use capture ids only inside the
+        private bundle.
+      </p>
+
+      <pre><code>{"schema_version":1,"group_id":"dedup-001","expected_relation":"same_canonical_state","capture_ids":["&lt;capture-id&gt;","&lt;capture-id&gt;"],"changed_features":["&lt;volatile-feature&gt;"],"notes":"volatile-only change"}
+{"schema_version":1,"group_id":"dedup-002","expected_relation":"distinct_stable_state","capture_ids":["&lt;capture-id&gt;","&lt;capture-id&gt;"],"changed_features":["&lt;stable-feature&gt;"],"notes":"stable feature changed"}</code></pre>
+
+      <h2>Create Operator Label File</h2>
+      <p>
+        The trace command expects labels with capture ids and truth values. Keep
+        this file private.
+      </p>
+
+      <pre><code>schema_version: 1
+kind: phase4-trace-labels
+labels:
+  - capture_id: &lt;capture-id&gt;
+    expected_highest_stage: &lt;stage-name&gt;
+    prune: false
+    goal: false
+    first_boss_coverage: true
+  - capture_id: &lt;capture-id&gt;
+    expected_highest_stage: &lt;stage-name&gt;
+    prune: false
+    goal: true
+    first_boss_coverage: false</code></pre>
+
+      <h2>Generate Score Plan</h2>
+      <p>
+        Pick one or more private capture ids for first-boss, goal-positive, and
+        goal-negative evidence. The command will write deterministic K=32
+        batches.
+      </p>
+
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-score-plan \
+  --captures &lt;private-bundle-dir&gt;/captures/index.jsonl \
+  --out &lt;private-bundle-dir&gt;/score-plan.json \
+  --first-boss &lt;capture-id&gt; \
+  --goal-positive &lt;capture-id&gt; \
+  --goal-negative &lt;capture-id&gt;</code></pre>
+
+      <h2>Emit Trajectory</h2>
+      <pre><code>mkdir -p &lt;private-bundle-dir&gt;/trajectory
+mkdir -p &lt;private-bundle-dir&gt;/validation
+
+cargo run --locked -p refwork-verify -- trace \
+  --captures &lt;private-bundle-dir&gt;/captures/index.jsonl \
+  --map &lt;private-bundle-dir&gt;/feature-map.yaml \
+  --scoring &lt;private-bundle-dir&gt;/scoring-program.yaml \
+  --labels &lt;private-labels.yaml&gt; \
+  --out &lt;private-bundle-dir&gt;/trajectory/first-boss.jsonl \
+  --report &lt;private-bundle-dir&gt;/validation/trace-report.json</code></pre>
+
+      <h2>Acceptance Checklist</h2>
+      <ul class="checklist">
+        <li><code>dedup-groups.jsonl</code> has same-canonical examples.</li>
+        <li><code>dedup-groups.jsonl</code> has distinct-stable examples.</li>
+        <li><code>score-plan.json</code> has K=32 batches and fixed client ids.</li>
+        <li><code>trajectory/first-boss.jsonl</code> exists.</li>
+        <li><code>validation/trace-report.json</code> exists and reports pass.</li>
+        <li>At least one first-boss, goal-positive, and goal-negative capture is labeled.</li>
+      </ul>
+    </main>
+  </body>
+</html>

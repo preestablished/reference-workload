@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Step 3 - Capture Export</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Step 3 - Capture Export</h1>
+        <p>Produce the real in-VM capture corpus.</p>
+        <nav class="nav" aria-label="Guide navigation">
+          <a href="02-map-layout.html">Previous: Map And Layout</a>
+          <a href="index.html">Overview</a>
+          <a href="04-label-score-trace.html">Next: Labels And Trace</a>
+        </nav>
+      </header>
+
+      <section class="warning">
+        <p>
+          This is the main missing producer step. Reference-workload currently
+          has validators and helper generators for the corpus contract. The real
+          capture exporter must come from the Phase 3 in-VM capture path or be
+          added as a private producer that emits the shape below.
+        </p>
+      </section>
+
+      <h2>Goal</h2>
+      <p>
+        Create <code>captures/index.jsonl</code> with at least 1,000 real,
+        frame-coherent in-VM captures from the selected ROM. Each capture must
+        pair WRAM-derived feature bytes and framebuffer metadata from the same
+        frame boundary.
+      </p>
+
+      <h2>Required Output Directory</h2>
+      <pre><code>&lt;private-bundle-dir&gt;/captures/index.jsonl
+&lt;private-bundle-dir&gt;/artifacts/feature-bytes/...
+&lt;private-bundle-dir&gt;/artifacts/framebuffer/...</code></pre>
+
+      <p>
+        The exact artifact layout is flexible if every row uses private opaque
+        refs and hashes. Do not inline raw bytes in <code>index.jsonl</code>.
+      </p>
+
+      <h2>Capture Row Contract</h2>
+      <pre><code>{
+  "schema_version": 1,
+  "capture_id": "&lt;private-capture-id&gt;",
+  "node_ref": "&lt;source-node-or-state-ref&gt;",
+  "capture_source": "&lt;tool-or-rpc-name&gt;",
+  "frame_index": 120,
+  "layout_hash": "blake3:&lt;hex&gt;",
+  "feature_bytes": {
+    "ref": "artifact:&lt;opaque-private-ref&gt;",
+    "len": 4096,
+    "blake3": "blake3:&lt;hex&gt;"
+  },
+  "decoded_order": ["room_id", "area_id", "player_x"],
+  "decoded&#95;values": [1, 0, 144],
+  "framebuffer": {
+    "ref": "artifact:&lt;opaque-private-ref&gt;",
+    "encoding": "fb_lz4",
+    "width": 256,
+    "height": 224,
+    "stride": 1024,
+    "pixel_format": "xrgb8888",
+    "uncompressed_len": 229376,
+    "blake3": "blake3:&lt;hex&gt;"
+  }
+}</code></pre>
+
+      <h2>Exporter Requirements</h2>
+      <ul class="checklist">
+        <li>Run the selected ROM through the approved in-VM capture path.</li>
+        <li>Export at least 1,000 captures.</li>
+        <li>Use the exact <code>layout.json.blake3</code> value in every row.</li>
+        <li>Pack feature bytes according to <code>layout.json.ranges</code>.</li>
+        <li>Set <code>feature_bytes.len</code> equal to <code>layout.json.total_len</code>.</li>
+        <li>Decode values in exactly the same order as <code>feature-map.yaml</code>.</li>
+        <li>Record framebuffer metadata for the primary corpus.</li>
+        <li>Write private artifact refs and hashes, not inline byte arrays.</li>
+      </ul>
+
+      <h2>Useful Local Validation While Exporting</h2>
+      <p>
+        After writing a draft <code>captures/index.jsonl</code>, run the bundle
+        checker as soon as the other required files exist. It will catch layout
+        length drift, missing framebuffer metadata, decoded-order drift, and
+        capture count problems.
+      </p>
+
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-bundle-check \
+  --bundle &lt;private-bundle-dir&gt; \
+  --report &lt;private-bundle-dir&gt;/validation/phase4-bundle-check.json</code></pre>
+
+      <h2>Stop Conditions</h2>
+      <ul>
+        <li>Fewer than 1,000 real captures are available.</li>
+        <li>Framebuffer metadata is missing from the primary corpus.</li>
+        <li>Captured WRAM and framebuffer are not from the same frame boundary.</li>
+        <li>The exporter decodes features in an order different from the feature map.</li>
+      </ul>
+    </main>
+  </body>
+</html>

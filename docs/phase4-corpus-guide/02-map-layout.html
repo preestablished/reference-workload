@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Step 2 - Feature Map, Scoring, And Layout</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Step 2 - Feature Map, Scoring, And Layout</h1>
+        <p>Prepare the private feature contract used by every capture row.</p>
+        <nav class="nav" aria-label="Guide navigation">
+          <a href="01-private-intake.html">Previous: Private Intake</a>
+          <a href="index.html">Overview</a>
+          <a href="03-capture-export.html">Next: Capture Export</a>
+        </nav>
+      </header>
+
+      <h2>Goal</h2>
+      <p>
+        This step creates the private files that define what features to extract
+        and how to score them. The checked-in demo map and scoring program are
+        placeholders and must not be treated as golden evidence.
+      </p>
+
+      <h2>Files To Place In The Bundle</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Purpose</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>feature-map.yaml</code></td>
+            <td>Real regions, offsets, feature semantics, stability, and discretization hints.</td>
+          </tr>
+          <tr>
+            <td><code>scoring-program.yaml</code></td>
+            <td>Staged first-boss milestones, goal predicate, and prune rules.</td>
+          </tr>
+          <tr>
+            <td><code>workload-image.yaml</code> or <code>workload-image-ref.txt</code></td>
+            <td>WorkloadImage provenance, validation stamp, framebuffer format, and pad layout.</td>
+          </tr>
+          <tr>
+            <td><code>layout.json</code></td>
+            <td>Compiled byte layout used to pack every <code>feature_bytes</code> record.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <section class="warning">
+        <p>
+          Keep real offsets and scoring labels private unless the operator has
+          explicitly approved publication. Put them in the private bundle, not
+          in <code>feature-maps/demo-game.yaml</code> or
+          <code>scoring/demo-game.yaml</code>.
+        </p>
+      </section>
+
+      <h2>Validate Feature Map And Scoring Program</h2>
+      <pre><code>cargo run --locked -p refwork-featuremap -- validate \
+  &lt;private-bundle-dir&gt;/feature-map.yaml \
+  --scoring &lt;private-bundle-dir&gt;/scoring-program.yaml</code></pre>
+
+      <h2>Generate Layout Evidence</h2>
+      <p>
+        The capture-spec hash should identify the exact capture/export contract
+        used for this corpus. It can be a BLAKE3 hash or an opaque private ref.
+      </p>
+
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-layout \
+  --map &lt;private-bundle-dir&gt;/feature-map.yaml \
+  --out &lt;private-bundle-dir&gt;/layout.json \
+  --capture-spec-hash &lt;hash-or-ref&gt;</code></pre>
+
+      <h2>Acceptance Checklist</h2>
+      <ul class="checklist">
+        <li>The map/scoring validation command exits successfully.</li>
+        <li><code>layout.json</code> exists in the private bundle.</li>
+        <li><code>layout.json.total_len</code> is greater than zero.</li>
+        <li>The layout hash will be copied into capture rows and the manifest.</li>
+        <li>The map has no placeholder offsets.</li>
+      </ul>
+    </main>
+  </body>
+</html>

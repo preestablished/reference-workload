@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Step 1 - Private Intake</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Step 1 - Private Intake</h1>
+        <p>Confirm the selected ROM and prepare the lab-private workspace.</p>
+        <nav class="nav" aria-label="Guide navigation">
+          <a href="index.html">Overview</a>
+          <a href="02-map-layout.html">Next: Map And Layout</a>
+        </nav>
+      </header>
+
+      <section class="success">
+        <p>
+          The current workspace already passed private intake after the ROM
+          directory was reduced to exactly one regular file. This page documents
+          how to repeat or verify that state.
+        </p>
+      </section>
+
+      <h2>Goal</h2>
+      <p>
+        The intake step selects exactly one operator-approved ROM and writes
+        exact ROM metadata only inside the private root. It also creates the
+        private directory skeleton used by later steps.
+      </p>
+
+      <h2>Verify The Single-ROM Guard</h2>
+      <pre><code>rom_dir="$HOME/ROMs/SNES"
+file_count=$(find "$rom_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+symlink_count=$(find "$rom_dir" -maxdepth 1 -type l | wc -l | tr -d ' ')
+dir_count=$(find "$rom_dir" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+printf 'file_count=%s symlink_count=%s dir_count=%s\n' \
+  "$file_count" "$symlink_count" "$dir_count"</code></pre>
+
+      <p>
+        Continue only when <code>file_count=1</code> and
+        <code>symlink_count=0</code>. Do not print the file name in shared logs.
+      </p>
+
+      <h2>Run Private Intake</h2>
+      <pre><code>run_id=$(date -u +%Y%m%dT%H%M%SZ)
+private_root="$HOME/.agents/private/reference-workload/phase4-scorer-golden-$run_id"
+
+cargo run --locked -p refwork-verify -- phase4-private-intake \
+  --rom-dir "$HOME/ROMs/SNES" \
+  --private-root "$private_root" \
+  --operator-approved \
+  --operator-metadata-policy "operator ROM metadata available only inside private bundle"</code></pre>
+
+      <h2>Expected Result</h2>
+      <ul class="checklist">
+        <li>Command exits successfully.</li>
+        <li><code>rom-metadata.json</code> exists in the private root.</li>
+        <li><code>PRIVATE-RUNBOOK.md</code> exists in the private root.</li>
+        <li><code>phase3-scorer-corpus/</code> exists but is still empty.</li>
+      </ul>
+
+      <h2>Do Not Proceed If</h2>
+      <ul>
+        <li>The ROM directory contains zero files, multiple files, or symlinks.</li>
+        <li>The private root is inside the source checkout.</li>
+        <li>Operator approval is missing or unclear.</li>
+      </ul>
+    </main>
+  </body>
+</html>

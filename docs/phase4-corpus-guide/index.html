@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phase 4 Scorer Corpus Guide</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Phase 4 Scorer Corpus Guide</h1>
+        <p>
+          A step-by-step guide for producing the private
+          <code>phase3-scorer-corpus</code> bundle and validating it for
+          handoff.
+        </p>
+        <nav class="nav" aria-label="Guide pages">
+          <a href="01-private-intake.html">1. Private Intake</a>
+          <a href="02-map-layout.html">2. Map And Layout</a>
+          <a href="03-capture-export.html">3. Capture Export</a>
+          <a href="04-label-score-trace.html">4. Labels And Trace</a>
+          <a href="05-validate-handoff.html">5. Validate And Handoff</a>
+        </nav>
+      </header>
+
+      <section class="warning">
+        <h2>Privacy Rule</h2>
+        <p>
+          Do not commit or paste ROM bytes, exact ROM filenames, exact private
+          paths, raw WRAM, framebuffer bytes, screenshots, decoded real feature
+          vectors, private capture ids, trajectory JSONL, operator labels, or
+          retrieval commands into source files, public notes, tickets, or chat.
+          Keep those details only in the lab-private root.
+        </p>
+      </section>
+
+      <h2>What You Are Building</h2>
+      <p>
+        The final private bundle is a directory named
+        <code>phase3-scorer-corpus</code>. It must contain enough evidence for
+        state-scorer to run its Phase 4 real-capture gate without asking
+        reference-workload for extra context.
+      </p>
+
+      <pre><code>phase3-scorer-corpus/
+  manifest.json
+  workload-image.yaml or workload-image-ref.txt
+  feature-map.yaml
+  scoring-program.yaml
+  layout.json
+  captures/index.jsonl
+  dedup-groups.jsonl
+  score-plan.json
+  trajectory/first-boss.jsonl
+  validation/</code></pre>
+
+      <h2>Current State</h2>
+      <ul>
+        <li>The selected ROM has passed the single-ROM private intake guard.</li>
+        <li>The private skeleton exists.</li>
+        <li>The corpus files still need to be produced and validated.</li>
+        <li>
+          Reference-workload has validators and helper generators, but the real
+          Phase 3 in-VM capture export is the missing producer step.
+        </li>
+      </ul>
+
+      <h2>Workflow Summary</h2>
+      <ol>
+        <li>Confirm private intake and private root setup.</li>
+        <li>Create or place private feature map, scoring program, and image evidence.</li>
+        <li>Generate <code>layout.json</code>.</li>
+        <li>Run a real in-VM capture/export job to create <code>captures/index.jsonl</code>.</li>
+        <li>Create dedup labels, operator labels, score plan, and trajectory report.</li>
+        <li>Assemble manifest and validation reports.</li>
+        <li>Run bundle validation and redaction scan before public handoff.</li>
+      </ol>
+
+      <section class="note">
+        <h2>Placeholders</h2>
+        <p>
+          Commands in this guide use placeholders such as
+          <code>&lt;private-root&gt;</code> and <code>&lt;capture-id&gt;</code>.
+          Replace them only in your terminal or private runbook. Do not replace
+          them in public docs.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
