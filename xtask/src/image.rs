@@ -297,8 +297,17 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
 pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageError> {
     ensure_clean_git_checkout(workspace_root, "reference-workload")?;
     let source_rev = git_rev(workspace_root)?;
-    let control_plane = control_plane_checkout(workspace_root)?;
+    let control_plane = sibling_checkout(workspace_root, "control-plane")?;
     ensure_clean_git_checkout(&control_plane, "control-plane")?;
+    // dh-proto path dep (worker gRPC contract). Only the crate and its proto
+    // input gate the build, so the cleanliness check is scoped to them — the
+    // hypervisor checkout routinely carries unrelated in-flight work.
+    let hypervisor = sibling_checkout(workspace_root, "determinism-hypervisor")?;
+    ensure_clean_git_paths(
+        &hypervisor,
+        "determinism-hypervisor",
+        &["crates/dh-proto", "proto"],
+    )?;
 
     let double_root = workspace_root.join("target").join(DOUBLE_BUILD_ROOT);
     if double_root.exists() {
@@ -309,6 +318,7 @@ pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageErr
     let first_dir = build_from_clean_root(
         workspace_root,
         &control_plane,
+        &hypervisor,
         &double_root,
         "root-a",
         &source_rev,
@@ -316,6 +326,7 @@ pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageErr
     let second_dir = build_from_clean_root(
         workspace_root,
         &control_plane,
+        &hypervisor,
         &double_root,
         "root-b",
         &source_rev,
@@ -391,6 +402,7 @@ pub fn register_image(
 fn build_from_clean_root(
     source_workspace: &Path,
     control_plane: &Path,
+    hypervisor: &Path,
     double_root: &Path,
     name: &str,
     source_rev: &str,
@@ -400,6 +412,7 @@ fn build_from_clean_root(
     create_dir_all(&root)?;
     materialize_tracked_source(source_workspace, &workspace)?;
     symlink_path(control_plane, &root.join("control-plane"))?;
+    symlink_path(hypervisor, &root.join("determinism-hypervisor"))?;
     let agent = write_placeholder_agent(&workspace)?;
     build_image_with_git_rev(&workspace, &agent, Some(source_rev))
 }
@@ -506,20 +519,55 @@ fn compare_double_build_artifacts(
     }
 }
 
-fn control_plane_checkout(workspace_root: &Path) -> Result<PathBuf, ImageError> {
+fn sibling_checkout(workspace_root: &Path, name: &str) -> Result<PathBuf, ImageError> {
     let Some(parent) = workspace_root.parent() else {
         return Err(ImageError::MissingInput(format!(
             "workspace has no parent: {}",
             workspace_root.display()
         )));
     };
-    let control_plane = parent.join("control-plane");
-    if control_plane.join("Cargo.toml").is_file() {
-        Ok(control_plane)
+    let sibling = parent.join(name);
+    if sibling.join("Cargo.toml").is_file() {
+        Ok(sibling)
     } else {
         Err(ImageError::MissingInput(format!(
-            "missing sibling control-plane checkout at {}; clean image double-build requires ../control-plane or an approved recorded proto source",
-            control_plane.display()
+            "missing sibling {name} checkout at {}; clean image double-build requires ../{name} or an approved recorded proto source",
+            sibling.display()
+        )))
+    }
+}
+
+/// Scoped variant of [`ensure_clean_git_checkout`]: only the named pathspecs
+/// must be clean.
+fn ensure_clean_git_paths(path: &Path, label: &str, pathspecs: &[&str]) -> Result<(), ImageError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .arg("status")
+        .arg("--short")
+        .arg("--");
+    for spec in pathspecs {
+        command.arg(spec);
+    }
+    let output = command.output().map_err(|source| ImageError::Io {
+        path: PathBuf::from("git"),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: format!("git -C {} status --short -- ...", path.display()),
+            status: output.status.to_string(),
+        });
+    }
+    if output.stdout.is_empty() {
+        Ok(())
+    } else {
+        Err(ImageError::InvalidInput(format!(
+            "{label} checkout is dirty in {}:
+{}",
+            pathspecs.join(", "),
+            String::from_utf8_lossy(&output.stdout)
         )))
     }
 }
