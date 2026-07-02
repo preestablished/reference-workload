@@ -568,3 +568,41 @@ Scope findings (why "bump the guest-sdk rev and rebuild" is not sufficient):
 4. Runner label for `vm-gates.yaml`.
 5. Lab-run fields: run owner, operator ROM BLAKE3, first-room padlog
    BLAKE3.
+
+### 2026-07-02 (later) — Harness ⇄ guest-sdk Region Publication Joined
+
+Recorded by Claude (coding agent) with the operator, branch
+`phase3/m4-first-room-unblock` at `bd40db9`.
+
+The first of the step-03 scope findings is closed: `refwork-harness` now
+links `detguest-sdk` (sibling path dep) and registers
+`wram`/`framebuffer`/`meta` through the real `register_region` path after
+region preparation and before `Ready`
+(`ready_after = "regions-registered-and-start-sent"`). Handles are
+deliberately leaked (drop would DEAD the manifest entries; the mappings are
+process-lifetime). Standalone runs (no detchannel) degrade to
+`AgentUnavailable` and continue unchanged; under the agent a hard failure
+is a `RegionRegFailed` fault before `Ready`. Workspace suite: 451 tests,
+0 failures.
+
+Reproducibility: the guest-sdk dep initially broke `image double-build`
+(cargo folds out-of-workspace dep paths into symbol metadata; the two
+clean roots differed). Fixed by building both roots in one fixed directory
+renamed per root. Clean-root double-build is green again and is the
+canonical artifact record at `bd40db9`:
+
+| Artifact | BLAKE3 (clean-root) |
+|---|---|
+| `workload-image.yaml` | `60c2aa35be37fc4f9a30b79fd4e6aee21249bd55ca40c8ba2e8028a64193a4db` |
+| `initramfs.cpio.zst` | `65551c3f602946e448c0387c4e9abcaa338f0b5eb9b57dc59e1bf6c3fdcb4983` |
+
+Known wrinkle (flagged to the operator): an in-tree `xtask image build`
+now differs from the clean-root output in the harness binary's embedded
+dep-path metadata (in-tree manifest
+`12cfef648a2611c5615fa3dbcf602a0af997ac235c3a4a8f905b2399818ad30e`).
+Handoff artifacts should come from the clean-root builder until the real
+(non-placeholder) image pipeline settles this.
+
+Remaining real-image prerequisites (unchanged, operator/cross-repo):
+guest-sdk direct-boot kernel + real agent binary into `image/*.lock`, then
+READY snapshot regeneration and the coordinated env cutover.
