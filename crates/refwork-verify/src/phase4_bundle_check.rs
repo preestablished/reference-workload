@@ -778,9 +778,9 @@ impl<'a> Checker<'a> {
                 fb_summary
                     .pixel_format
                     .get_or_insert_with(|| pixel_format.unwrap());
-                fb_summary.width.get_or_insert(width.unwrap());
-                fb_summary.height.get_or_insert(height.unwrap());
-                fb_summary.stride.get_or_insert(stride.unwrap());
+                fb_summary.width = fb_summary.width.or(width);
+                fb_summary.height = fb_summary.height.or(height);
+                fb_summary.stride = fb_summary.stride.or(stride);
             }
         }
 
@@ -949,7 +949,7 @@ impl<'a> Checker<'a> {
             self.reject_forbidden_dedup_hash_fields(&row, &format!("dedup-groups.jsonl:{line_no}"));
             let changed_features = self.optional_string_array(&row, &["changed_features"]);
             let changed_offsets = self.optional_array_len(&row, &["changed_offset_ranges"]);
-            if changed_features.as_ref().map_or(true, Vec::is_empty)
+            if changed_features.as_ref().is_none_or(Vec::is_empty)
                 && changed_offsets.unwrap_or(0) == 0
             {
                 self.error(format!(
@@ -1480,16 +1480,12 @@ impl<'a> Checker<'a> {
     }
 
     fn optional_array_len(&mut self, value: &Value, path: &[&str]) -> Option<usize> {
-        if value_at(value, path).is_none() {
-            return None;
-        }
+        value_at(value, path)?;
         self.array_len(value, path)
     }
 
     fn optional_string_array(&mut self, value: &Value, path: &[&str]) -> Option<Vec<String>> {
-        if value_at(value, path).is_none() {
-            return None;
-        }
+        value_at(value, path)?;
         self.string_array(value, path)
     }
 

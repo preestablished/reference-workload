@@ -411,6 +411,7 @@ impl<'a> TraceEmitter<'a> {
         rows
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_label(
         &mut self,
         line_no: usize,
