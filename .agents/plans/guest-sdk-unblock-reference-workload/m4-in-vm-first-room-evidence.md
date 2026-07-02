@@ -327,3 +327,135 @@ The hard missing package-05 evidence is still the operator lab run:
 - READY proof with regions live;
 - first-room room-transition proof through host region capture;
 - framebuffer checkpoint hash proof.
+
+### 2026-07-02T15:48:00Z
+
+Inspector: Claude (coding agent), on `infra-control`. This pass re-runs the
+external-surface verification against the 2026-07-02 upstream state recorded
+in `../phase3-m4-first-room-unblock/01-upstream-state-2026-07-02.md` and
+refreshes the verdict. The 2026-06-22 section above is a historical record
+and is superseded by this section.
+
+Revisions inspected:
+
+| Repository | Revision | Notes |
+|---|---|---|
+| reference-workload | `2d45f001d85472aec30c173cfdc9dab11daac87c` | branch `phase3/m4-first-room-unblock` |
+| guest-sdk | `c03e90baa04b06640a9b6250366c23a1a428ef96` | `main`, one local unpushed commit (`c03e90b`) |
+| determinism-hypervisor | `4c44263913676b9d787fb22dcf542d3ae797d6da` | `main`, one local unpushed commit (`4c44263`); working tree dirty in `crates/dh-worker/src/m9_handoff.rs` + `Cargo.lock` — all verification below ran in a clean pinned worktree `~/git/preestablished/.dh-clean-4c44263` |
+| snapshot-store | `cac52afe66b0975601bc9ecbc67cd16b52cc181e` | `main` |
+| control-plane | `261141b3bbaa4371a7dd4147ac6626e0f4918e53` | `main` |
+| rom-operator-bridge | `047348085e07dbfb6ce8dd5edbedf937f4f13148` | `main` |
+
+#### guest-sdk GS-5 READY / Control Handoff
+
+Status: PRESENT.
+
+Host tier re-run (2026-07-02, guest-sdk `c03e90b`):
+
+```sh
+cargo test -p detguest-agent -p detguest-sdk -p detguest-host --locked
+```
+
+Result: 92 passed, 0 failed (42 + 20 + 1 + 29 across the four test targets).
+
+The previous PARTIAL verdict's missing piece — a durable real-stack VM
+acceptance — is the Ms4 acceptance itself, green on `infra-control`:
+
+- Artifact root: `~/git/preestablished/guest-sdk/target/m4-acceptance-20260702T135319Z/`
+- `evidence.json` BLAKE3: `12709423b68ca3b463c47ee8ad0a2c19691a271618332b04cc5e49c7161da036`
+- `evidence.json` records: `git_rev 604cd41d385d51523e9be61b81aa9753d0428a09`,
+  host `infra-control`, 100 children x 60 frames, restore fidelity, meta
+  frame-counter/input-history recomputation, determinism pairs, zero P0
+  ReverifyRegions alarms, fork-of-fork fidelity.
+- The acceptance boots a real workload through
+  `Hello -> LoadGame -> Ready -> Start` with Ready gated on expected regions.
+
+The 2026-06-22 blockers `guest-sdk-m4-ready-gate-expected-regions` and
+`guest-sdk-m4-unit-control-reference-handoff` no longer gate this surface;
+the M4 chain below is closed.
+
+#### guest-sdk GS-6 Region Readability
+
+Status: PRESENT.
+
+The standalone no-op `register_region` path is gone: `detguest-sdk::register_region`
+is the real path (mlock + per-page prefault, registration with the agent over
+`/run/detguest/agent.sock`, `AgentUnavailable` in standalone mode, handles
+unregister on drop). The agent is the sole manifest writer (SO_PEERCRED-bound
+pid, pagemap GVA->GPA extent walk) and `ReverifyRegions` detects drift with
+P0 alarms. The Ms4 acceptance evidence above covers host-side reads of
+`wram`/`framebuffer`/`meta` through the manifest across restore/fork.
+
+Closed guest-sdk beads verified via `bd list --all` in guest-sdk:
+
+- `guest-sdk-m4-platform-readability-vm` (closed)
+- `guest-sdk-m4-agent-ipc-protocol` (closed)
+- `guest-sdk-m4-agent-ipc-server` (closed)
+- `guest-sdk-m4-agent-manifest-writer` (closed)
+- `guest-sdk-m4-agent-pagemap-pid-extents` (closed)
+
+#### determinism-hypervisor DH-2 Scheduled Input
+
+Status: PRESENT (fixture-level+; operator first-room padlog proof remains a
+lab-run matter, assigned below).
+
+Re-verified at `4c44263` in the clean worktree `~/git/preestablished/.dh-clean-4c44263`:
+
+```sh
+cargo test -p dh-worker --lib --offline -- inject_mapper_accepts_at_frame_pad_set_with_frame_hint
+```
+
+Result: passed. Caveat: the committed `Cargo.lock` at `4c44263` is stale
+relative to the committed `Cargo.toml` tree (`--locked` fails); the run used
+`--offline` after a local lockfile regeneration in the scratch worktree
+(144 insertions, 21 deletions vs the committed lock).
+
+#### determinism-hypervisor DH-5 Capture / Region Read
+
+Status: PRESENT (fixture-level+).
+
+The 2026-06-22 citations are partially stale: `5698d7e` ("Derive framebuffer
+geometry from D7 layout_version contract") deleted the descriptor fixture,
+the descriptor-backed `GetFramebuffer` behavior, and the test
+`descriptor_framebuffer_fixture_feeds_capture_and_get_framebuffer`.
+`GetFramebuffer` and `CaptureSpec.framebuffer` now derive geometry from the
+manifest entry's `layout_version`: layout_version 1 = raw pixels, XRGB8888,
+256x224, stride 1024, exactly 229,376 bytes — the D7 contract this repo
+already implements (`FB_BYTES`). Wrong length or unknown version is
+`FailedPrecondition` naming the offender; an all-zero region is a valid
+black frame. The capture-path determinism fix in `5698d7e` is stronger than
+the audit required (captured FbInfo no longer frame-content-dependent).
+
+Re-verified at `4c44263` in the clean worktree:
+
+```sh
+cargo test -p dh-worker --lib --offline -- \
+  framebuffer_layout_contract_is_enforced \
+  run_capture_spec_reads_manifest_ranges_and_lz4_framebuffer \
+  introspection_rpcs_read_memory_framebuffer_and_stream_guest_events
+```
+
+Result: all passed (4 passed including DH-2's test above, 0 failed).
+Decision record: `determinism-hypervisor/docs/decisions/framebuffer-region-geometry.md`.
+
+#### Operator-Run Fields (MISSING By Assignment)
+
+The remaining package-05 fields are a human decision, explicitly assigned to
+the operator (Matt) rather than blocked on upstream:
+
+- run owner and runner;
+- operator ROM BLAKE3;
+- first-room padlog BLAKE3.
+
+These are scheduling matters once `refwork-verify vm-first-room` exists
+(plan step 04) and the package-04 image is rebuilt against the new guest-sdk
+(plan step 03).
+
+#### Refreshed Unblock Verdict
+
+`refwork-d7t.10` moves out of BLOCKED: GS-5 PRESENT, GS-6 PRESENT, DH-2 and
+DH-5 PRESENT (fixture-level+), operator fields MISSING-by-assignment. The
+readiness-evidence recording this bead tracks is complete; the remaining
+work is sequenced in `../phase3-m4-first-room-unblock/` (image rebuild,
+first-room verifier, M5 suite, CI closeout).
