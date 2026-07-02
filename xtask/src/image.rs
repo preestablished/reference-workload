@@ -416,15 +416,43 @@ fn build_from_clean_root(
     name: &str,
     source_rev: &str,
 ) -> Result<PathBuf, ImageError> {
-    let root = double_root.join(name);
-    let workspace = root.join("reference-workload");
-    create_dir_all(&root)?;
+    // Build in a FIXED directory and rename to the per-root name afterward:
+    // cargo canonicalizes manifest paths and folds the real lexical path of
+    // out-of-workspace path deps (../guest-sdk, …) into crate metadata
+    // hashes, so building under root-a and root-b directly yields different
+    // mangled symbols and breaks byte-for-byte reproducibility. (A symlink
+    // alias is not enough — canonicalization sees through it.)
+    let build_root = double_root.join("build");
+    if build_root.exists() {
+        remove_dir_all(&build_root)?;
+    }
+    let workspace = build_root.join("reference-workload");
+    create_dir_all(&build_root)?;
     materialize_tracked_source(source_workspace, &workspace)?;
     for (sibling_name, sibling_path) in siblings {
-        symlink_path(sibling_path, &root.join(sibling_name))?;
+        symlink_path(sibling_path, &build_root.join(sibling_name))?;
     }
     let agent = write_placeholder_agent(&workspace)?;
-    build_image_with_git_rev(&workspace, &agent, Some(source_rev))
+    let out_dir = build_image_with_git_rev(&workspace, &agent, Some(source_rev))?;
+    let rel = out_dir
+        .strip_prefix(&build_root)
+        .map_err(|_| {
+            ImageError::InvalidInput(format!(
+                "build output {} escaped the build root {}",
+                out_dir.display(),
+                build_root.display()
+            ))
+        })?
+        .to_path_buf();
+    let root = double_root.join(name);
+    if root.exists() {
+        remove_dir_all(&root)?;
+    }
+    std::fs::rename(&build_root, &root).map_err(|source| ImageError::Io {
+        path: root.clone(),
+        source,
+    })?;
+    Ok(root.join(rel))
 }
 
 fn materialize_tracked_source(source: &Path, dest: &Path) -> Result<(), ImageError> {
