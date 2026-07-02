@@ -1,16 +1,14 @@
 # In-VM verification lane (phase3-m4-first-room-unblock step 06).
 #
 # Manual-dispatch only for now: this repo's first self-hosted/KVM lane.
-# BEFORE wiring a schedule or PR trigger, two operator decisions are open:
+# Runner label [self-hosted, intel, kvm] confirmed by the operator
+# 2026-07-02 (matches guest-sdk's label set on the shared infra-control
+# runner). Remaining before a schedule or PR trigger:
 #
-#   1. Runner label. The shared infra-control runner serves guest-sdk as
-#      [self-hosted, intel, kvm] and determinism-hypervisor as
-#      [self-hosted, kvm-intel]. Confirm which label (or a new one) this
-#      repo should use, then replace the runs-on below.
-#   2. The real-worker legs need the step-03 outputs: a rebuilt
-#      package-04 image and a regenerated READY snapshot in a snapstore a
-#      locally-launched dh-workerd can serve (never /run/dh/grpc.sock —
-#      that socket belongs to the deployed worker).
+#   The real-worker legs need the step-03 outputs: a rebuilt package-04
+#   image and a regenerated READY snapshot in a snapstore a
+#   locally-launched dh-workerd can serve (never /run/dh/grpc.sock —
+#   that socket belongs to the deployed worker).
 #
 # Until then this lane runs the staged-fixture gates (mock worker over a
 # real UDS gRPC connection), which also run per-PR inside `cargo test
@@ -21,7 +19,6 @@ on:
   workflow_dispatch:
 jobs:
   staged-fixture-gates:
-    # TODO(operator): confirm the runner label — see header comment.
     runs-on: [self-hosted, intel, kvm]
     steps:
       - uses: actions/checkout@v4
