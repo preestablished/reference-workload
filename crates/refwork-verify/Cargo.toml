@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 refwork-emu     = { path = "../refwork-emu", features = ["introspect"] }
+refwork-dh-client = { path = "../refwork-dh-client" }
 refwork-script  = { path = "../refwork-script" }
 refwork-hash    = { path = "../refwork-hash" }
 refwork-featuremap = { path = "../refwork-featuremap" }
@@ -27,3 +28,5 @@ blake3          = "1"
 # xtask exposes build_synth_rom() via its lib target; no cycle because xtask
 # does not depend on refwork-verify.
 xtask = { path = "../../xtask" }
+# In-process mock HypervisorWorker for the vm-first-room staged-fixture test.
+refwork-dh-client = { path = "../refwork-dh-client", features = ["mock"] }

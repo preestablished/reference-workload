@@ -29,6 +29,8 @@ pub mod phase4_score_plan;
 pub mod phase4_trace;
 pub mod play;
 pub mod redaction_scan;
+pub mod vm_first_room;
+pub mod vm_suite;
 
 pub use expectations::{Assertion, Expectations, NeverClause};
 pub use phase4_bundle_check::{check_phase4_bundle, Phase4BundleReport};

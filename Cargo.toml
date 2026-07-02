@@ -9,3 +9,8 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 determinism-proto = { path = "../control-plane/crates/determinism-proto", default-features = false }
+# Hypervisor worker gRPC contract. Path dep on the sibling checkout (the
+# same pattern rom-operator-bridge uses) — wire fidelity over a vendored
+# proto copy that could drift. CI checks out determinism-hypervisor next to
+# this repo, like control-plane above.
+dh-proto = { path = "../determinism-hypervisor/crates/dh-proto" }

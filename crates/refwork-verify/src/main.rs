@@ -42,6 +42,20 @@
 //!   redaction-scan --input <public-note.md> [--report out.json]
 //!                  [--forbid <literal> ...] [--forbid-file <private-list>]
 //!
+//!   vm-first-room --worker <uds-path|http://host:port>
+//!                 --snapshot-ref <64-hex> --script <first-room.padlog>
+//!                 --map <feature-map.yaml> --expect <vm-expect.yaml>
+//!                 --report <out.json>
+//!                 [--image-manifest <workload-image.yaml>]
+//!                 [--frames N] [--port N]
+//!
+//!   vm-suite --worker <uds-path|http://host:port>
+//!            --snapshot-ref <64-hex> --script <run.padlog>
+//!            --report <out.json>
+//!            [--ram-region wram] [--ram-size 131072]
+//!            [--frames N] [--snapshot-at M] [--iterations K]
+//!            [--nondet-test   (TEST-ONLY)] [--port N]
+//!
 //! Pad policy (frames beyond script length): the last pad word in the script
 //! is held for all remaining frames.  This matches the xtask hash-chain
 //! policy and makes double-run reproducible.
@@ -66,6 +80,8 @@ use refwork_verify::play::{play, PlayOptions};
 use refwork_verify::redaction_scan::{
     load_forbidden_literals, scan_redactions, RedactionScanOptions,
 };
+use refwork_verify::vm_first_room::{vm_first_room, write_report, VmFirstRoomOptions};
+use refwork_verify::vm_suite::{vm_suite, write_suite_report, VmSuiteOptions};
 use std::path::PathBuf;
 use std::process;
 
@@ -87,6 +103,8 @@ fn main() {
         "phase4-private-intake" => cmd_phase4_private_intake(&args[1..]),
         "phase4-score-plan" => cmd_phase4_score_plan(&args[1..]),
         "redaction-scan" => cmd_redaction_scan(&args[1..]),
+        "vm-first-room" => cmd_vm_first_room(&args[1..]),
+        "vm-suite" => cmd_vm_suite(&args[1..]),
         "--help" | "-h" | "help" => {
             usage();
         }
@@ -156,6 +174,320 @@ fn usage() {
     println!("  redaction-scan --input <public-note.md>");
     println!("                 [--report <out.json>]");
     println!("                 [--forbid <literal> ...] [--forbid-file <private-list>]");
+    println!();
+    println!("  vm-first-room --worker <uds-path|http://host:port>");
+    println!("                --snapshot-ref <64-hex BLAKE3 of the READY snapshot>");
+    println!("                --script <first-room.padlog> --map <feature-map.yaml>");
+    println!("                --expect <vm-expect.yaml> --report <out.json>");
+    println!("                [--image-manifest <workload-image.yaml>]");
+    println!("                [--frames N] [--port N]");
+    println!("  Phase 3 exit gate 3: drives the first room in-VM through the worker");
+    println!("  gRPC API (RestoreSnapshot -> InjectInputs -> Run -> GetFramebuffer).");
+    println!("  The report carries hashes and decoded feature values only — never");
+    println!("  pixels, WRAM dumps, ROM bytes, or padlog semantics.");
+    println!();
+    println!("  vm-suite --worker <uds-path|http://host:port>");
+    println!("           --snapshot-ref <64-hex> --script <run.padlog>");
+    println!("           --report <out.json>");
+    println!("           [--ram-region wram] [--ram-size 131072]");
+    println!("           [--frames N] [--snapshot-at M]");
+    println!("           [--iterations K]   20 for the zero-flake stamp");
+    println!("           [--nondet-test]    TEST-ONLY: perturb run-2 pad stream");
+    println!("           [--port N]");
+    println!("  Phase 3 exit gate 1 (M5): in-VM double-run + mid-game snapshot/");
+    println!("  restore continuity, hashed host-side at every FrameMark. Not the");
+    println!("  in-process double-run — this one runs through the worker gRPC API.");
+}
+
+// ─── vm-suite ────────────────────────────────────────────────────────────────
+
+fn cmd_vm_suite(args: &[String]) {
+    let mut worker: Option<String> = None;
+    let mut snapshot_ref: Option<String> = None;
+    let mut script: Option<PathBuf> = None;
+    let mut ram_region = "wram".to_owned();
+    let mut ram_size: u32 = 131072;
+    let mut frames: Option<u32> = None;
+    let mut snapshot_at: Option<u32> = None;
+    let mut iterations: u32 = 1;
+    let mut report: Option<PathBuf> = None;
+    let mut nondet_test = false;
+    let mut port: u32 = 0;
+
+    let parse_u32 = |flag: &str, value: &str| -> u32 {
+        value.parse().unwrap_or_else(|_| {
+            eprintln!("vm-suite: {flag} requires an unsigned integer");
+            process::exit(1);
+        })
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--worker" => {
+                i += 1;
+                worker = Some(require_arg_str("vm-suite", "--worker", args, i).to_owned());
+            }
+            "--snapshot-ref" => {
+                i += 1;
+                snapshot_ref =
+                    Some(require_arg_str("vm-suite", "--snapshot-ref", args, i).to_owned());
+            }
+            "--script" => {
+                i += 1;
+                script = Some(require_arg("vm-suite", "--script", args, i));
+            }
+            "--ram-region" => {
+                i += 1;
+                ram_region = require_arg_str("vm-suite", "--ram-region", args, i).to_owned();
+            }
+            "--ram-size" => {
+                i += 1;
+                ram_size = parse_u32(
+                    "--ram-size",
+                    require_arg_str("vm-suite", "--ram-size", args, i),
+                );
+            }
+            "--frames" => {
+                i += 1;
+                frames = Some(parse_u32(
+                    "--frames",
+                    require_arg_str("vm-suite", "--frames", args, i),
+                ));
+            }
+            "--snapshot-at" => {
+                i += 1;
+                snapshot_at = Some(parse_u32(
+                    "--snapshot-at",
+                    require_arg_str("vm-suite", "--snapshot-at", args, i),
+                ));
+            }
+            "--iterations" => {
+                i += 1;
+                iterations = parse_u32(
+                    "--iterations",
+                    require_arg_str("vm-suite", "--iterations", args, i),
+                );
+            }
+            "--report" => {
+                i += 1;
+                report = Some(require_arg("vm-suite", "--report", args, i));
+            }
+            "--nondet-test" => {
+                // TEST-ONLY: perturb run-2 pad stream to prove the suite can fail.
+                nondet_test = true;
+            }
+            "--port" => {
+                i += 1;
+                port = parse_u32("--port", require_arg_str("vm-suite", "--port", args, i));
+            }
+            other => {
+                eprintln!("vm-suite: unknown option '{}'", other);
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    if nondet_test || std::env::var("REFWORK_NONDET_TEST").as_deref() == Ok("1") {
+        nondet_test = true;
+        eprintln!();
+        eprintln!("WARNING: --nondet-test / REFWORK_NONDET_TEST is active.");
+        eprintln!("         This is a TEST-ONLY mode that deliberately perturbs run 2.");
+        eprintln!("         The result MUST NOT be used for acceptance or CI stamps.");
+        eprintln!();
+    }
+
+    let opts = VmSuiteOptions {
+        worker: worker.unwrap_or_else(|| missing_required_str("vm-suite", "--worker")),
+        snapshot_ref: snapshot_ref
+            .unwrap_or_else(|| missing_required_str("vm-suite", "--snapshot-ref")),
+        script: script.unwrap_or_else(|| missing_required("vm-suite", "--script")),
+        ram_region,
+        ram_size,
+        frames,
+        snapshot_at,
+        iterations,
+        report: report.unwrap_or_else(|| missing_required("vm-suite", "--report")),
+        nondet_test,
+        port,
+    };
+
+    let report_data = match vm_suite(&opts) {
+        Ok(report_data) => report_data,
+        Err(e) => {
+            eprintln!("vm-suite: {e}");
+            process::exit(2);
+        }
+    };
+    let report_hash = match write_suite_report(&report_data, &opts.report) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("vm-suite: {e}");
+            process::exit(2);
+        }
+    };
+
+    if report_data.passed() {
+        println!(
+            "vm-suite: PASS — iterations={} frames={} zero-flake report_blake3={}",
+            report_data.iterations.len(),
+            report_data.frames,
+            report_hash
+        );
+    } else {
+        eprintln!(
+            "vm-suite: FAIL — report {} (blake3 {})",
+            opts.report.display(),
+            report_hash
+        );
+        for iteration in &report_data.iterations {
+            if !iteration.double_run.ok {
+                eprintln!(
+                    "  - iteration {}: double-run diverged at frame {:?}",
+                    iteration.iteration, iteration.double_run.first_divergent_frame
+                );
+            }
+            if !iteration.restore_continuity.ok {
+                eprintln!(
+                    "  - iteration {}: restore-continuity diverged at frame {:?}",
+                    iteration.iteration, iteration.restore_continuity.first_divergent_frame
+                );
+            }
+        }
+        for failure in &report_data.failures {
+            eprintln!(
+                "  - iteration {} [{}] {}: {}",
+                failure.iteration, failure.stage, failure.code, failure.message
+            );
+        }
+        process::exit(1);
+    }
+}
+
+// ─── vm-first-room ───────────────────────────────────────────────────────────
+
+fn cmd_vm_first_room(args: &[String]) {
+    let mut worker: Option<String> = None;
+    let mut snapshot_ref: Option<String> = None;
+    let mut script: Option<PathBuf> = None;
+    let mut map: Option<PathBuf> = None;
+    let mut expect: Option<PathBuf> = None;
+    let mut image_manifest: Option<PathBuf> = None;
+    let mut report: Option<PathBuf> = None;
+    let mut frames: Option<u32> = None;
+    let mut port: u32 = 0;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--worker" => {
+                i += 1;
+                worker = Some(require_arg_str("vm-first-room", "--worker", args, i).to_owned());
+            }
+            "--snapshot-ref" => {
+                i += 1;
+                snapshot_ref =
+                    Some(require_arg_str("vm-first-room", "--snapshot-ref", args, i).to_owned());
+            }
+            "--script" => {
+                i += 1;
+                script = Some(require_arg("vm-first-room", "--script", args, i));
+            }
+            "--map" => {
+                i += 1;
+                map = Some(require_arg("vm-first-room", "--map", args, i));
+            }
+            "--expect" => {
+                i += 1;
+                expect = Some(require_arg("vm-first-room", "--expect", args, i));
+            }
+            "--image-manifest" => {
+                i += 1;
+                image_manifest = Some(require_arg("vm-first-room", "--image-manifest", args, i));
+            }
+            "--report" => {
+                i += 1;
+                report = Some(require_arg("vm-first-room", "--report", args, i));
+            }
+            "--frames" => {
+                i += 1;
+                let n = require_arg_str("vm-first-room", "--frames", args, i);
+                frames = Some(n.parse().unwrap_or_else(|_| {
+                    eprintln!("vm-first-room: --frames requires a positive integer");
+                    process::exit(1);
+                }));
+            }
+            "--port" => {
+                i += 1;
+                let n = require_arg_str("vm-first-room", "--port", args, i);
+                port = n.parse().unwrap_or_else(|_| {
+                    eprintln!("vm-first-room: --port requires an integer 0..=3");
+                    process::exit(1);
+                });
+            }
+            other => {
+                eprintln!("vm-first-room: unknown option '{}'", other);
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let opts = VmFirstRoomOptions {
+        worker: worker.unwrap_or_else(|| missing_required_str("vm-first-room", "--worker")),
+        snapshot_ref: snapshot_ref
+            .unwrap_or_else(|| missing_required_str("vm-first-room", "--snapshot-ref")),
+        script: script.unwrap_or_else(|| missing_required("vm-first-room", "--script")),
+        map: map.unwrap_or_else(|| missing_required("vm-first-room", "--map")),
+        expect: expect.unwrap_or_else(|| missing_required("vm-first-room", "--expect")),
+        image_manifest,
+        report: report.unwrap_or_else(|| missing_required("vm-first-room", "--report")),
+        frames,
+        port,
+    };
+
+    let report_data = match vm_first_room(&opts) {
+        Ok(report_data) => report_data,
+        Err(e) => {
+            eprintln!("vm-first-room: {e}");
+            process::exit(2);
+        }
+    };
+    let report_hash = match write_report(&report_data, &opts.report) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("vm-first-room: {e}");
+            process::exit(2);
+        }
+    };
+
+    if report_data.passed() {
+        println!(
+            "vm-first-room: PASS — frames_run={} transition_by={} report_blake3={}",
+            report_data.frames_run,
+            report_data
+                .room_transition
+                .as_ref()
+                .map(|t| t.observed_by_frame.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            report_hash
+        );
+    } else {
+        eprintln!(
+            "vm-first-room: FAIL — {} failure(s), report {} (blake3 {})",
+            report_data.failures.len(),
+            opts.report.display(),
+            report_hash
+        );
+        for failure in &report_data.failures {
+            eprintln!(
+                "  - [{}] {}: {}",
+                failure.stage, failure.code, failure.message
+            );
+        }
+        process::exit(1);
+    }
 }
 
 // ─── trace ───────────────────────────────────────────────────────────────────

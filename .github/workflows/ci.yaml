@@ -20,6 +20,12 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/control-plane
           path: control-plane
+      # dh-proto (worker gRPC contract) is a path dep on the sibling
+      # determinism-hypervisor checkout, like determinism-proto above.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/determinism-hypervisor
+          path: determinism-hypervisor
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

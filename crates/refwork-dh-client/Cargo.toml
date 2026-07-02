@@ -1,0 +1,25 @@
+[package]
+name = "refwork-dh-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Blocking client for the determinism-hypervisor worker gRPC API"
+
+[dependencies]
+# Contract crate from the sibling determinism-hypervisor checkout. Its
+# tonic/prost pins (0.12 / 0.13) are inherited from that workspace and this
+# crate must match them so generated types interoperate.
+dh-proto = { workspace = true }
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = "0.1"
+lz4_flex = "0.11"
+tokio-stream = { version = "0.1", features = ["net"], optional = true }
+blake3 = { version = "1", optional = true }
+
+[features]
+# In-process mock HypervisorWorker serving a synthetic staged fixture, for
+# CI tests that must run without KVM, a real worker, or game content.
+mock = ["dep:tokio-stream", "dep:blake3"]
