@@ -606,3 +606,41 @@ Handoff artifacts should come from the clean-root builder until the real
 Remaining real-image prerequisites (unchanged, operator/cross-repo):
 guest-sdk direct-boot kernel + real agent binary into `image/*.lock`, then
 READY snapshot regeneration and the coordinated env cutover.
+
+### 2026-07-02T19:59:07Z — Real Kernel + Agent In The Image (Artifact Split)
+
+Recorded by Claude (coding agent) with the operator, branch
+`phase3/kernel-agent-artifact-split` at `2a8c68a`. Decision record:
+`.agents/decisions/2026-07-02-kernel-agent-artifact-split.md`.
+
+The package-04 image is no longer placeholder-based:
+
+- **Kernel**: hash-pinned artifact handoff from guest-sdk's deterministic
+  pipeline (`image/kernel.lock` v2 pins Linux 6.12.93, provenance
+  `build_key`, bzImage BLAKE3
+  `595466463a37efac6822ffccf3e61d0a2230e7d223a94c0bce5eb78b2f43bee9`;
+  build refuses on mismatch).
+- **Agent**: real `detguest-agent` built from the sibling guest-sdk
+  checkout at the rev pinned in `image/guest-sdk.lock` v2
+  (`c03e90baa04b06640a9b6250366c23a1a428ef96`); build refuses on rev
+  mismatch.
+- **boot.toml**: rewritten to the agent's real schema (`boot_toml_version
+  1`, `[[unit]]` + `[unit.control]` refwork-ctl, `[[expected_region]]`);
+  the build validator enforces it.
+- Together with the harness `register_region` join recorded above, `xtask
+  image build` now produces the first genuinely bootable candidate image.
+
+Clean-root double-build reproducibility with real artifacts, at `2a8c68a`:
+
+| Artifact | BLAKE3 (clean-root) |
+|---|---|
+| `bzImage` (1,209,344 bytes) | `595466463a37efac6822ffccf3e61d0a2230e7d223a94c0bce5eb78b2f43bee9` |
+| `initramfs.cpio.zst` (482,803 bytes) | `aebc7d8767ed05ed3f81afa4d08655e13c5abb0fba7d668ce47ea7b88553183a` |
+| `workload-image.yaml` | `53a94695f398b84ec4bd52931fbb5f0db25754f680d0210350f8b4bce9e6bae8` |
+
+Workspace suite: 452 tests, 0 failures. `image validate` and `image
+register` green.
+
+Next (coordinated): boot the image under a locally-launched worker,
+regenerate the READY snapshot via the M9 handoff, then the
+`BRIDGE_REAL_SNAPSHOT_REF` cutover with the bridge side.
