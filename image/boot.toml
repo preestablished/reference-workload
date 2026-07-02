@@ -1,35 +1,37 @@
-schema_version = 1
-schema_owner = "guest-sdk"
+# Package-04 boot manifest, consumed by detguest-agent in the guest
+# (schema owner: guest-sdk, its API.md §7.1 — modeled on guest-sdk's
+# boot.toml.m9-refwork-contract). Staged into the initramfs as
+# /etc/detguest/boot.toml. The agent drives the refwork-ctl control leg
+# (Hello -> LoadGame -> ... -> Start) before Ready and withholds Ready
+# until the expected regions below are live in the detchannel manifest
+# (ready_after = regions-registered-and-start-sent).
+#
+# Region sizes/formats are NOT stated here — the agent gates on
+# name + layout_version only; the host-side size/format contract lives in
+# expected-regions.toml and the dist manifest.
+boot_toml_version = 1
 
 [autostart]
-name = "refwork-harness"
-path = "/usr/bin/refwork-harness"
-argv = ["/usr/bin/refwork-harness", "--fd3"]
-control_fd = 3
-load_game_device = "/dev/vdb"
+unit = 0
 
-[ready]
-after = "regions-registered-and-start-sent"
-expected_regions = ["wram", "framebuffer", "meta"]
+[[unit]]
+id = 0
+exec = "/usr/bin/refwork-harness"
+log_mask = 0x1F
 
-[[regions]]
+[unit.control]
+protocol = "refwork-ctl"
+proto_version = 1
+game_dev = "/dev/vdb"
+
+[[expected_region]]
 name = "wram"
-size = 131072
 layout_version = 1
-required = true
-writable = false
 
-[[regions]]
+[[expected_region]]
 name = "framebuffer"
-size = 229376
-format = "xrgb8888-256x224-stride1024"
 layout_version = 1
-required = true
-writable = false
 
-[[regions]]
+[[expected_region]]
 name = "meta"
-size = 4096
 layout_version = 1
-required = true
-writable = false

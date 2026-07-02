@@ -12,8 +12,11 @@ This directory contains the static inputs for the package-04 image handoff.
 - `harness.toml` is reference-workload-owned harness configuration. It records
   the fd-3 protocol version, game-image device path, and optional region policy.
 - `kernel.lock`, `builder.lock`, and `guest-sdk.lock` are package-04 input pins.
-  Their placeholder values are resolved by the image build package before any
-  distributable artifact is produced.
+  Kernel and guest-sdk are real pins under the artifact split
+  (`.agents/decisions/2026-07-02-kernel-agent-artifact-split.md`): the kernel
+  is a hash-pinned artifact consumed from the sibling guest-sdk checkout, and
+  the agent is built from the sibling at the pinned rev. `builder.lock` is
+  still a resolved-at-build placeholder for the container toolchain.
 
 No game ROM, SRAM, framebuffer golden, or game-derived bytes belong in this
 directory. The operator game image is attached separately by the hypervisor as

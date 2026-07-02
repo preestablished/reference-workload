@@ -1,13 +1,19 @@
-schema_version = 1
+schema_version = 2
 kind = "refwork-guest-sdk-lock"
 
+# Rev-pin, build-from-sibling (decision: .agents/decisions/
+# 2026-07-02-kernel-agent-artifact-split.md). Unlike the kernel (heavy,
+# artifact-pinned), the agent is a seconds-cheap cargo target: xtask image
+# build verifies the sibling ../guest-sdk checkout is at exactly this rev,
+# builds detguest-agent for the musl target, and stages it. Bump by
+# updating rev after guest-sdk lands what the image needs.
+
 [guest_sdk]
-status = "pinned-placeholder"
+status = "pinned-rev"
 repo = "guest-sdk"
-rev = "placeholder:refwork-guest-sdk-placeholder-v1"
+rev = "c03e90baa04b06640a9b6250366c23a1a428ef96"
 agent = "detguest-agent"
-placeholder_payload = "refwork-guest-sdk-placeholder-v1\n"
-blake3 = "8d694f0aad53a40c3a73548e168f18fdb9ca73bfade6e6b79ad1059d0a852f84"
+agent_build = "cargo build --locked --release --target x86_64-unknown-linux-musl -p detguest-agent"
 
 [boot_contract]
 boot_toml_schema_owner = "guest-sdk"

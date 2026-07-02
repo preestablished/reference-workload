@@ -41,12 +41,24 @@ fn required_image_inputs_exist() {
 }
 
 #[test]
-fn boot_toml_names_autostart_and_required_regions() {
+fn boot_toml_matches_the_agent_schema() {
+    // guest-sdk owns this schema (its API.md §7.1); the agent gates READY on
+    // [[expected_region]] name + layout_version — sizes/formats live in
+    // expected-regions.toml, not here.
     let boot = read_workspace_file("image/boot.toml");
 
-    assert!(boot.contains("refwork-harness"));
-    assert!(boot.contains("expected_regions = [\"wram\", \"framebuffer\", \"meta\"]"));
-    assert_eq!(regions_from_toml(&boot), required_region_records());
+    assert!(boot.contains("boot_toml_version = 1"));
+    assert!(boot.contains("exec = \"/usr/bin/refwork-harness\""));
+    assert!(boot.contains("protocol = \"refwork-ctl\""));
+    assert!(boot.contains("game_dev = \"/dev/vdb\""));
+    for name in ["wram", "framebuffer", "meta"] {
+        assert!(
+            boot.contains(&format!("name = \"{name}\"")),
+            "boot.toml lacks expected_region {name}"
+        );
+    }
+    assert_eq!(boot.matches("[[expected_region]]").count(), 3);
+    assert_eq!(boot.matches("layout_version = 1").count(), 3);
 }
 
 #[test]
@@ -66,17 +78,39 @@ fn docs_assign_boot_schema_to_guest_sdk() {
 
 #[test]
 fn placeholder_lock_hashes_match_payloads() {
-    for path in [
-        "image/kernel.lock",
-        "image/builder.lock",
-        "image/guest-sdk.lock",
-    ] {
-        let lock = read_workspace_file(path);
-        let payload = quoted_value(&lock, "placeholder_payload");
-        let expected = quoted_value(&lock, "blake3");
-        let actual = blake3::hash(payload.as_bytes()).to_hex().to_string();
-        assert_eq!(actual, expected, "{path} placeholder hash mismatch");
-    }
+    // Only the builder toolchain pin is still a placeholder; kernel and
+    // guest-sdk are real pins (see the artifact-split test below).
+    let lock = read_workspace_file("image/builder.lock");
+    let payload = quoted_value(&lock, "placeholder_payload");
+    let expected = quoted_value(&lock, "blake3");
+    let actual = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    assert_eq!(actual, expected, "builder.lock placeholder hash mismatch");
+}
+
+/// The kernel/agent artifact split
+/// (.agents/decisions/2026-07-02-kernel-agent-artifact-split.md): kernel =
+/// hash-pinned artifact from guest-sdk's pipeline; agent = built from the
+/// sibling at a pinned rev. The locks must stay well-formed pins, never
+/// silently regress to placeholders.
+#[test]
+fn kernel_and_guest_sdk_locks_are_real_pins() {
+    let kernel = read_workspace_file("image/kernel.lock");
+    assert!(kernel.contains("status = \"pinned-artifact\""));
+    assert!(!kernel.contains("placeholder_payload"));
+    let blake3_pin = quoted_value(&kernel, "blake3");
+    assert_eq!(blake3_pin.len(), 64, "kernel blake3 must be 64 hex chars");
+    assert!(blake3_pin.bytes().all(|b| b.is_ascii_hexdigit()));
+    let build_key = quoted_value(&kernel, "build_key");
+    assert_eq!(build_key.len(), 64, "build_key must be 64 hex chars");
+    assert!(!quoted_value(&kernel, "kernel_version").is_empty());
+
+    let guest_sdk = read_workspace_file("image/guest-sdk.lock");
+    assert!(guest_sdk.contains("status = \"pinned-rev\""));
+    assert!(!guest_sdk.contains("placeholder_payload"));
+    let rev = quoted_value(&guest_sdk, "rev");
+    assert_eq!(rev.len(), 40, "guest-sdk rev must be a full 40-hex sha");
+    assert!(rev.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(quoted_value(&guest_sdk, "agent"), "detguest-agent");
 }
 
 #[test]
@@ -237,20 +271,18 @@ fn assert_no_rom_like_files(dir: &Path) {
 fn framebuffer_region_matches_hypervisor_layout_contract() {
     const D7_FB_BYTES: u64 = 229_376; // 1024 stride * 224 rows
 
-    for source in ["image/expected-regions.toml", "image/boot.toml"] {
-        let records = regions_from_toml(&read_workspace_file(source));
-        let fb = records
-            .iter()
-            .find(|r| r.name == "framebuffer")
-            .unwrap_or_else(|| panic!("{source} lacks a framebuffer region"));
-        assert_eq!(fb.size, D7_FB_BYTES, "{source} framebuffer size");
-        assert_eq!(fb.layout_version, 1, "{source} framebuffer layout_version");
-        assert_eq!(
-            fb.format.as_deref(),
-            Some("xrgb8888-256x224-stride1024"),
-            "{source} framebuffer format"
-        );
-    }
+    let records = regions_from_toml(&read_workspace_file("image/expected-regions.toml"));
+    let fb = records
+        .iter()
+        .find(|r| r.name == "framebuffer")
+        .expect("expected-regions.toml lacks a framebuffer region");
+    assert_eq!(fb.size, D7_FB_BYTES, "framebuffer size");
+    assert_eq!(fb.layout_version, 1, "framebuffer layout_version");
+    assert_eq!(
+        fb.format.as_deref(),
+        Some("xrgb8888-256x224-stride1024"),
+        "framebuffer format"
+    );
 
     // The dist manifest the operator consumes must carry the same size.
     let manifest = read_workspace_file("dist/workload-image-0.1.0/workload-image.yaml");

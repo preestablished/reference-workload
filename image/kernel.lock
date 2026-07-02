@@ -1,16 +1,27 @@
-schema_version = 1
+schema_version = 2
 kind = "refwork-kernel-lock"
 
+# Artifact-handoff pin (decision: .agents/decisions/
+# 2026-07-02-kernel-agent-artifact-split.md). The kernel is NOT built by
+# this repo: guest-sdk owns the deterministic kernel pipeline
+# (guest-sdk image/KERNEL.md, ./image/build.sh kernel — pinned LTS tarball,
+# determinism config, provenance build key). xtask image build consumes
+# ../guest-sdk/image/build/bzImage and refuses on a BLAKE3 mismatch with
+# this lock. Bump deliberately: rebuild in guest-sdk, then update
+# kernel_version/build_key/blake3 here together.
+
 [kernel]
-status = "pinned-placeholder"
+status = "pinned-artifact"
 artifact = "bzImage"
-source = "guest-sdk-dh1-linux-direct-boot-placeholder"
-version = "dh1-direct-boot-placeholder-v1"
-placeholder_payload = "refwork-dh1-kernel-placeholder-v1\n"
-blake3 = "9ae72dbae3e7a6e0b89fd3d3f0420b991c6187429420345777c2173ae9600ab7"
+source = "../guest-sdk/image/build/bzImage (built by guest-sdk image/build.sh kernel)"
+kernel_version = "6.12.93"
+build_key = "16d7cbc8ab16f4a83510bfb1f969fc1626183e2504aa95c79378b90e4ac54783"
+blake3 = "595466463a37efac6822ffccf3e61d0a2230e7d223a94c0bce5eb78b2f43bee9"
 
 [policy]
 direct_boot = true
 modules = false
 network = false
 deterministic_build_required = true
+deterministic_build_discharged_by = "guest-sdk image/build/kernel.provenance (build_key above)"
+cmdline_owner = "determinism-hypervisor ARCHITECTURE.md §2.3 (worker forces canonical baseline; BzImageBoot cmdline is append-only extras)"

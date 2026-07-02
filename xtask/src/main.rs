@@ -57,8 +57,11 @@ fn usage() {
     println!("      Print the chained synthetic-ROM frame hash (default 600 frames).");
     println!("      Identical across architectures = cross-arch determinism holds.");
     println!();
-    println!("  image build --agent-bin PATH");
+    println!("  image build [--agent-bin PATH]");
     println!("      Build dist/workload-image-<version>/ image handoff artifacts.");
+    println!("      Default: kernel = hash-pinned guest-sdk artifact; agent built");
+    println!("      from the sibling guest-sdk checkout at the lock-pinned rev.");
+    println!("      --agent-bin overrides the agent (test/escape hatch).");
     println!();
     println!("  image validate PATH");
     println!("      Validate a workload-image.yaml and its adjacent artifacts.");
@@ -204,13 +207,8 @@ fn cmd_image_build(args: &[String]) {
         i += 1;
     }
 
-    let Some(agent_bin) = agent_bin else {
-        eprintln!("image build: --agent-bin is required");
-        std::process::exit(2);
-    };
-
     let workspace_root = find_workspace_root();
-    match xtask::image::build_image(&workspace_root, &agent_bin) {
+    match xtask::image::build_image(&workspace_root, agent_bin.as_deref()) {
         Ok(out_dir) => println!("image build: wrote {}", out_dir.display()),
         Err(err) => {
             eprintln!("image build: {err}");

@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use serde_yaml::{Mapping, Value};
 
 const WORKLOAD_NAME: &str = "refwork-demo";
@@ -140,21 +138,31 @@ impl fmt::Display for ImageError {
 
 impl std::error::Error for ImageError {}
 
-pub fn build_image(workspace_root: &Path, agent_bin: &Path) -> Result<PathBuf, ImageError> {
+/// `agent_bin: None` builds detguest-agent from the sibling guest-sdk
+/// checkout at the rev pinned in `image/guest-sdk.lock` (the normal path);
+/// `Some(path)` is the test/escape hatch and skips the rev check.
+pub fn build_image(workspace_root: &Path, agent_bin: Option<&Path>) -> Result<PathBuf, ImageError> {
     build_image_with_git_rev(workspace_root, agent_bin, None)
 }
 
 fn build_image_with_git_rev(
     workspace_root: &Path,
-    agent_bin: &Path,
+    agent_bin: Option<&Path>,
     source_rev: Option<&str>,
 ) -> Result<PathBuf, ImageError> {
-    if !agent_bin.is_file() {
-        return Err(ImageError::MissingInput(format!(
-            "agent binary does not exist: {}",
-            agent_bin.display()
-        )));
-    }
+    let agent_bin = match agent_bin {
+        Some(path) => {
+            if !path.is_file() {
+                return Err(ImageError::MissingInput(format!(
+                    "agent binary does not exist: {}",
+                    path.display()
+                )));
+            }
+            path.to_path_buf()
+        }
+        None => build_agent_from_pinned_sibling(workspace_root)?,
+    };
+    let agent_bin = agent_bin.as_path();
 
     let image_dir = workspace_root.join("image");
     for rel in [
@@ -187,9 +195,8 @@ fn build_image_with_git_rev(
     let boot = read_to_string(&image_dir.join("boot.toml"))?;
     let harness = read_to_string(&image_dir.join("harness.toml"))?;
     let expected_regions = read_to_string(&image_dir.join("expected-regions.toml"))?;
-    let kernel_lock = read_to_string(&image_dir.join("kernel.lock"))?;
     let guest_sdk_lock = read_to_string(&image_dir.join("guest-sdk.lock"))?;
-    let kernel_payload = quoted_value(&kernel_lock, "placeholder_payload")?;
+    let kernel_bytes = resolve_pinned_kernel(workspace_root)?;
     let guest_sdk_rev = quoted_value(&guest_sdk_lock, "rev")?;
 
     write(out_dir.join("boot.toml"), boot.as_bytes())?;
@@ -198,7 +205,7 @@ fn build_image_with_git_rev(
         out_dir.join("expected-regions.toml"),
         expected_regions.as_bytes(),
     )?;
-    write(out_dir.join("bzImage"), kernel_payload.as_bytes())?;
+    write(out_dir.join("bzImage"), &kernel_bytes)?;
 
     let harness_bin = workspace_root
         .join("target")
@@ -308,12 +315,14 @@ pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageErr
         "determinism-hypervisor",
         &["crates/dh-proto", "proto"],
     )?;
-    // detguest-sdk path dep (harness region publication). Same scoped rule.
+    // guest-sdk feeds the build twice: detguest-sdk as a harness path dep
+    // and detguest-agent built from the pinned rev — gate all crate sources
+    // plus the workspace manifests.
     let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
     ensure_clean_git_paths(
         &guest_sdk,
         "guest-sdk",
-        &["crates/detguest-sdk", "crates/detguest-wire"],
+        &["crates", "Cargo.toml", "Cargo.lock"],
     )?;
 
     let double_root = workspace_root.join("target").join(DOUBLE_BUILD_ROOT);
@@ -432,8 +441,7 @@ fn build_from_clean_root(
     for (sibling_name, sibling_path) in siblings {
         symlink_path(sibling_path, &build_root.join(sibling_name))?;
     }
-    let agent = write_placeholder_agent(&workspace)?;
-    let out_dir = build_image_with_git_rev(&workspace, &agent, Some(source_rev))?;
+    let out_dir = build_image_with_git_rev(&workspace, None, Some(source_rev))?;
     let rel = out_dir
         .strip_prefix(&build_root)
         .map_err(|_| {
@@ -511,15 +519,91 @@ fn copy_source_entry(src: &Path, dst: &Path) -> Result<(), ImageError> {
     }
 }
 
-fn write_placeholder_agent(workspace_root: &Path) -> Result<PathBuf, ImageError> {
+/// Artifact-handoff leg of the kernel/agent split
+/// (.agents/decisions/2026-07-02-kernel-agent-artifact-split.md): consume
+/// guest-sdk's deterministically-built bzImage, refusing on a BLAKE3
+/// mismatch with `image/kernel.lock`.
+fn resolve_pinned_kernel(workspace_root: &Path) -> Result<Vec<u8>, ImageError> {
+    let kernel_lock = read_to_string(&workspace_root.join("image").join("kernel.lock"))?;
+    let pinned = quoted_value(&kernel_lock, "blake3")?;
+    let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
+    let bzimage = guest_sdk.join("image").join("build").join("bzImage");
+    if !bzimage.is_file() {
+        return Err(ImageError::MissingInput(format!(
+            "pinned kernel artifact missing: {} — run `./image/build.sh kernel` in guest-sdk              (its build key caches the result; see guest-sdk image/KERNEL.md)",
+            bzimage.display()
+        )));
+    }
+    let bytes = read(&bzimage)?;
+    let actual = blake3::hash(&bytes).to_hex().to_string();
+    if actual != pinned {
+        return Err(ImageError::InvalidInput(format!(
+            "kernel artifact {} has BLAKE3 {actual} but image/kernel.lock pins {pinned};              either rebuild the pinned kernel in guest-sdk or deliberately bump the lock              (kernel_version/build_key/blake3 together)",
+            bzimage.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Build-from-sibling leg of the kernel/agent split: verify the guest-sdk
+/// checkout is at exactly the rev pinned in `image/guest-sdk.lock`, then
+/// build detguest-agent for the musl target and return its path.
+fn build_agent_from_pinned_sibling(workspace_root: &Path) -> Result<PathBuf, ImageError> {
     let guest_sdk_lock = read_to_string(&workspace_root.join("image").join("guest-sdk.lock"))?;
-    let payload = quoted_value(&guest_sdk_lock, "placeholder_payload")?;
-    let agent = workspace_root
+    let pinned_rev = quoted_value(&guest_sdk_lock, "rev")?;
+    let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
+
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&guest_sdk)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("git"),
+            source,
+        })?;
+    if !head.status.success() {
+        return Err(ImageError::CommandFailed {
+            program: format!("git -C {} rev-parse HEAD", guest_sdk.display()),
+            status: head.status.to_string(),
+        });
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    if head != pinned_rev {
+        return Err(ImageError::InvalidInput(format!(
+            "guest-sdk checkout is at {head} but image/guest-sdk.lock pins {pinned_rev};              check out the pinned rev or deliberately bump the lock"
+        )));
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "-p",
+            "detguest-agent",
+        ])
+        .current_dir(&guest_sdk)
+        .status()
+        .map_err(|source| ImageError::Io {
+            path: PathBuf::from("cargo"),
+            source,
+        })?;
+    if !status.success() {
+        return Err(ImageError::CommandFailed {
+            program:
+                "cargo build --target x86_64-unknown-linux-musl -p detguest-agent (in guest-sdk)"
+                    .into(),
+            status: status.to_string(),
+        });
+    }
+    Ok(guest_sdk
         .join("target")
-        .join("detguest-agent-placeholder");
-    write(&agent, payload.as_bytes())?;
-    set_executable(&agent)?;
-    Ok(agent)
+        .join("x86_64-unknown-linux-musl")
+        .join("release")
+        .join("detguest-agent"))
 }
 
 fn compare_double_build_artifacts(
@@ -658,26 +742,6 @@ fn symlink_path(_src: &Path, dst: &Path) -> Result<(), ImageError> {
         "cannot create clean-root sibling symlink on this platform: {}",
         dst.display()
     )))
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), ImageError> {
-    let mut permissions = std::fs::metadata(path)
-        .map_err(|source| ImageError::Io {
-            path: path.to_owned(),
-            source,
-        })?
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).map_err(|source| ImageError::Io {
-        path: path.to_owned(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), ImageError> {
-    Ok(())
 }
 
 fn build_static_harness(workspace_root: &Path) -> Result<(), ImageError> {
@@ -1012,11 +1076,13 @@ fn write_dist_readme(path: &Path) -> Result<(), ImageError> {
     let content = format!(
         r#"# Workload Image {VERSION}
 
-Generated by `cargo run --locked -p xtask -- image build --agent-bin <path>`.
+Generated by `cargo run --locked -p xtask -- image build`.
 
-This directory is an image handoff bundle for `refwork-demo`. It contains a
-documented `bzImage` placeholder from `image/kernel.lock`, a deterministic
-`newc` initramfs compressed as `initramfs.cpio.zst`, `workload-image.yaml`,
+This directory is an image handoff bundle for `refwork-demo`. It contains the
+guest-sdk-built `bzImage` (hash-pinned by `image/kernel.lock`), a
+deterministic `newc` initramfs compressed as `initramfs.cpio.zst` carrying
+the detguest-agent (built from the guest-sdk rev pinned by
+`image/guest-sdk.lock`) and the refwork harness, `workload-image.yaml`,
 `boot.toml`, `harness.toml`, and guest-sdk expected-region handoff data.
 
 No game ROM, SRAM, framebuffer golden, or game-derived bytes are included. The
@@ -1524,39 +1590,57 @@ fn validate_expected_regions_toml(content: &str, errors: &mut Vec<String>) {
 }
 
 fn validate_boot_toml(content: &str, errors: &mut Vec<String>) {
-    if field_u64(content, "schema_version") != Some(1) {
-        errors.push("boot.toml schema_version must be 1".into());
-    }
-    if field_string(content, "schema_owner").as_deref() != Some("guest-sdk") {
-        errors.push("boot.toml schema_owner must be guest-sdk".into());
+    // The agent's real schema (guest-sdk API.md §7.1): boot_toml_version,
+    // [autostart].unit, [[unit]] with exec + [unit.control] refwork-ctl,
+    // and the READY gate as [[expected_region]] name + layout_version pairs.
+    if field_u64(content, "boot_toml_version") != Some(1) {
+        errors.push("boot.toml boot_toml_version must be 1".into());
     }
     let Some(autostart) = table_block(content, "[autostart]") else {
         errors.push("boot.toml missing [autostart]".into());
         return;
     };
-    if field_string(autostart, "name").as_deref() != Some("refwork-harness") {
-        errors.push("boot.toml autostart.name must be refwork-harness".into());
+    if field_u64(autostart, "unit") != Some(0) {
+        errors.push("boot.toml autostart.unit must be 0".into());
     }
-    if field_string(autostart, "path").as_deref() != Some("/usr/bin/refwork-harness") {
-        errors.push("boot.toml autostart.path must be /usr/bin/refwork-harness".into());
-    }
-    if field_u64(autostart, "control_fd") != Some(3) {
-        errors.push("boot.toml autostart.control_fd must be 3".into());
-    }
-    if field_string(autostart, "load_game_device").as_deref() != Some("/dev/vdb") {
-        errors.push("boot.toml autostart.load_game_device must be /dev/vdb".into());
-    }
-    let Some(ready) = table_block(content, "[ready]") else {
-        errors.push("boot.toml missing [ready]".into());
+    let Some(unit) = table_block(content, "[[unit]]") else {
+        errors.push("boot.toml missing [[unit]]".into());
         return;
     };
-    if field_string(ready, "after").as_deref() != Some("regions-registered-and-start-sent") {
-        errors.push("boot.toml ready.after must be regions-registered-and-start-sent".into());
+    if field_u64(unit, "id") != Some(0) {
+        errors.push("boot.toml unit.id must be 0".into());
     }
-    if !ready.contains("expected_regions = [\"wram\", \"framebuffer\", \"meta\"]") {
-        errors.push("boot.toml ready.expected_regions must list wram/framebuffer/meta".into());
+    if field_string(unit, "exec").as_deref() != Some("/usr/bin/refwork-harness") {
+        errors.push("boot.toml unit.exec must be /usr/bin/refwork-harness".into());
     }
-    validate_expected_regions_toml(content, errors);
+    let Some(control) = table_block(content, "[unit.control]") else {
+        errors.push("boot.toml missing [unit.control]".into());
+        return;
+    };
+    if field_string(control, "protocol").as_deref() != Some("refwork-ctl") {
+        errors.push("boot.toml unit.control.protocol must be refwork-ctl".into());
+    }
+    if field_u64(control, "proto_version") != Some(1) {
+        errors.push("boot.toml unit.control.proto_version must be 1".into());
+    }
+    if field_string(control, "game_dev").as_deref() != Some("/dev/vdb") {
+        errors.push("boot.toml unit.control.game_dev must be /dev/vdb".into());
+    }
+    for spec in REQUIRED_REGIONS {
+        let Some(block) = region_array_block(content, "expected_region", spec.name) else {
+            errors.push(format!(
+                "boot.toml missing [[expected_region]] {}",
+                spec.name
+            ));
+            continue;
+        };
+        if field_u64(block, "layout_version") != Some(spec.layout_version) {
+            errors.push(format!(
+                "boot.toml expected_region {} layout_version must be {}",
+                spec.name, spec.layout_version
+            ));
+        }
+    }
 }
 
 fn validate_harness_toml(content: &str, errors: &mut Vec<String>) {
@@ -1785,8 +1869,14 @@ fn is_blake3_hex(value: &str) -> bool {
 }
 
 fn region_block<'a>(content: &'a str, name: &str) -> Option<&'a str> {
+    region_array_block(content, "regions", name)
+}
+
+/// Find the `[[array]]` entry whose `name` field matches.
+fn region_array_block<'a>(content: &'a str, array: &str, name: &str) -> Option<&'a str> {
+    let header = format!("[[{array}]]");
     content
-        .split("[[regions]]")
+        .split(header.as_str())
         .skip(1)
         .find(|block| field_string(block, "name").as_deref() == Some(name))
 }
@@ -2306,7 +2396,7 @@ suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
         let tmp = valid_dist();
         let boot = std::fs::read_to_string(tmp.path.join("boot.toml"))
             .unwrap()
-            .replace("control_fd = 3", "control_fd = 4");
+            .replace("protocol = \"refwork-ctl\"", "protocol = \"bogus-ctl\"");
         std::fs::write(tmp.path.join("boot.toml"), boot).unwrap();
         let harness = std::fs::read_to_string(tmp.path.join("harness.toml"))
             .unwrap()
@@ -2317,7 +2407,7 @@ suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 
         assert!(errors
             .iter()
-            .any(|err| err.contains("boot.toml autostart.control_fd")));
+            .any(|err| err.contains("boot.toml unit.control.protocol")));
         assert!(errors
             .iter()
             .any(|err| err.contains("harness.toml harness.protocol_version")));
