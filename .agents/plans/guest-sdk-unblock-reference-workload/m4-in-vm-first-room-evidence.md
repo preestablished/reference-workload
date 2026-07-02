@@ -459,3 +459,112 @@ DH-5 PRESENT (fixture-level+), operator fields MISSING-by-assignment. The
 readiness-evidence recording this bead tracks is complete; the remaining
 work is sequenced in `../phase3-m4-first-room-unblock/` (image rebuild,
 first-room verifier, M5 suite, CI closeout).
+
+### 2026-07-02T16:31:03Z — Engineering Status After Plan Steps 03–05
+
+Recorded by Claude (coding agent) on `infra-control`, branch
+`phase3/m4-first-room-unblock`. This section records what the
+phase3-m4-first-room-unblock plan's engineering steps produced today; the
+"Required Replacement Evidence" fields that need the operator lab run
+remain open and assigned to Matt.
+
+#### Step 04 — `refwork-verify vm-first-room` (`refwork-d7t.11`): IMPLEMENTED
+
+- New crate `crates/refwork-dh-client`: blocking gRPC client for
+  `determinism.hypervisor.v1.HypervisorWorker` (UDS + TCP). Proto contract
+  via `dh-proto` path dep on the sibling determinism-hypervisor checkout —
+  the rom-operator-bridge pattern; no vendored proto to drift.
+- `refwork-verify vm-first-room` drives
+  `RestoreSnapshot -> InjectInputs -> Run(CaptureSpec) -> ReadGuestMemory ->
+  GetFramebuffer -> DestroyVm` per the audit's DH-2 rule (hypervisor-owned
+  scheduled input only). JSON report + BLAKE3 sidecar with revisions,
+  manifest/padlog/map/expect hashes, READY proof, room-transition proof,
+  framebuffer checkpoint hashes; failure modes are distinct per-stage
+  entries carrying the worker's gRPC code and message verbatim.
+- CI: six staged-fixture tests green against an in-process mock worker over
+  a real UDS gRPC connection (contract-faithful: leases, absolute-frame
+  PadSet scheduling with pv-pad hold across snapshot/restore,
+  layout_version enforcement, D7 framebuffer geometry, offender-naming
+  errors). Workspace suite green: 419 tests, 0 failures.
+- Exit criteria NOT yet closed: the dry run against the deployed worker
+  requires the step-03 READY snapshot (below); `refwork-d7t.11` stays open
+  for it.
+
+#### Step 05 — `refwork-verify vm-suite` (`refwork-d7t.13`/`.14`): IMPLEMENTED
+
+- In-VM double-run + restore-continuity legs through the worker API,
+  hashed host-side only (CaptureSpec `feature_bytes` + decompressed
+  `fb_lz4` at every FrameMark). `--iterations K` for the 20x stamp;
+  per-iteration trajectory BLAKE3.
+- Negative test (`refwork-d7t.14` pattern): `--nondet-test` perturbs one
+  pad word of run 2; the staged-fixture test asserts the suite FAILS with
+  the divergence localized to the perturbed frame.
+- The 20x zero-flake stamp and the M5 claim itself await the lab leg
+  (real image + snapshot); the mock is not a determinism substrate.
+
+#### Step 03 — Image Rebuild + READY Snapshot: PARTIAL, SCOPE FINDINGS
+
+Done today (reference-workload `369770a`):
+
+- Checked-in `dist` manifest failed HEAD's validator (missing
+  `pad_layout.layout_id` — the artifact predated the phase-4 validator).
+  Rebuilt via `xtask image build`; `image validate` and `image register`
+  green.
+- `xtask image double-build` reproducibility PROVEN from two clean roots
+  (now also cloning the determinism-hypervisor sibling for the dh-proto
+  dep):
+
+  | Artifact | BLAKE3 |
+  |---|---|
+  | `workload-image.yaml` | `4cd393a4f48775690047352ea0a47869093f438cae4f6e122877c1888be96d4a` |
+  | `initramfs.cpio.zst` | `6117f705c04805b4c1c8304fa811265cf1bdf4a3e074b7863a0a054e5bd43267` |
+  | `bzImage` (placeholder) | `9ae72dbae3e7a6e0b89fd3d3f0420b991c6187429420345777c2173ae9600ab7` |
+
+- New image test pins the D7 framebuffer contract (229,376 bytes,
+  layout_version 1, xrgb8888-256x224-stride1024) across `boot.toml`,
+  `expected-regions.toml`, and the dist manifest.
+- Harness handle audit: regions are mmap'd `MAP_LOCKED|MAP_POPULATE` and
+  intentionally kept alive for process lifetime once activated — the
+  lifetime rule holds.
+
+Scope findings (why "bump the guest-sdk rev and rebuild" is not sufficient):
+
+- `image/kernel.lock` and `image/guest-sdk.lock` are both
+  `status = "pinned-placeholder"`: the bzImage and detguest-agent in the
+  image are placeholder payloads, not bootable artifacts. A real in-VM
+  image needs guest-sdk's direct-boot kernel and a real agent build.
+- `refwork-harness` has no guest-sdk dependency: the real
+  `detguest-sdk::register_region` integration (harness registering its
+  regions with the agent and holding handles for process lifetime) does
+  not exist in this repo yet. That is the actual join-point work.
+- Consequently the READY-snapshot regeneration (hypervisor M9 handoff) and
+  the `BRIDGE_REAL_SNAPSHOT_REF` env cutover are OPERATOR-GATED: the
+  cutover triggers the bridge side's restart procedure
+  (`rom-operator-bridge-72o` lease invalidation) the moment the env file
+  changes, and must be coordinated, unconditionally. Nothing was deployed
+  or cut over today.
+
+#### Step 06 — CI: PARTIAL
+
+- The staged-fixture gates run per-PR inside `cargo test --workspace`
+  (hosted runners; ci.yaml/nightly.yaml now also check out
+  determinism-hypervisor for the dh-proto dep).
+- `vm-gates.yaml` added as manual-dispatch only; the runner label needs an
+  operator decision (guest-sdk uses `[self-hosted, intel, kvm]`,
+  determinism-hypervisor `[self-hosted, kvm-intel]`), and the real-worker
+  legs need step-03 outputs.
+- Phase 3 exit-gate 4 (snapshot-store M7 GC property tests) remains
+  unowned to this repo's knowledge — flagged to the operator.
+
+#### Open Items For The Operator (Matt)
+
+1. Branch base: this work sits on `phase3/m4-first-room-unblock`, branched
+   off `codex/phase4-corpus-guide` (not `main`) because the phase-4 branch
+   rewrites the same files; decide the merge path.
+2. Real-image prerequisites: guest-sdk direct-boot kernel + real agent into
+   the image pipeline, and harness `register_region` integration.
+3. READY snapshot regeneration + `BRIDGE_REAL_SNAPSHOT_REF` cutover
+   (coordinate with the bridge side before touching the env file).
+4. Runner label for `vm-gates.yaml`.
+5. Lab-run fields: run owner, operator ROM BLAKE3, first-room padlog
+   BLAKE3.

@@ -1,0 +1,45 @@
+# In-VM verification lane (phase3-m4-first-room-unblock step 06).
+#
+# Manual-dispatch only for now: this repo's first self-hosted/KVM lane.
+# BEFORE wiring a schedule or PR trigger, two operator decisions are open:
+#
+#   1. Runner label. The shared infra-control runner serves guest-sdk as
+#      [self-hosted, intel, kvm] and determinism-hypervisor as
+#      [self-hosted, kvm-intel]. Confirm which label (or a new one) this
+#      repo should use, then replace the runs-on below.
+#   2. The real-worker legs need the step-03 outputs: a rebuilt
+#      package-04 image and a regenerated READY snapshot in a snapstore a
+#      locally-launched dh-workerd can serve (never /run/dh/grpc.sock —
+#      that socket belongs to the deployed worker).
+#
+# Until then this lane runs the staged-fixture gates (mock worker over a
+# real UDS gRPC connection), which also run per-PR inside `cargo test
+# --workspace` on the hosted runners — dispatching it here proves the
+# self-hosted environment end to end before the real legs land.
+name: vm-gates
+on:
+  workflow_dispatch:
+jobs:
+  staged-fixture-gates:
+    # TODO(operator): confirm the runner label — see header comment.
+    runs-on: [self-hosted, intel, kvm]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/control-plane
+          path: control-plane
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/determinism-hypervisor
+          path: determinism-hypervisor
+      - uses: dtolnay/rust-toolchain@stable
+      - run: test -w /dev/kvm || { echo "runner lacks /dev/kvm access"; exit 1; }
+      - run: cargo test --locked -p refwork-verify --test vm_first_room --test vm_suite
+        working-directory: repo
+      # Real-worker legs (env-gated, guest-sdk DETGUEST_VM_TESTS style):
+      # enabled once the step-03 READY snapshot and a scratch worker
+      # launch recipe exist. REFWORK_VM_TESTS=1 will gate them so laptop
+      # `cargo test` stays fast.
