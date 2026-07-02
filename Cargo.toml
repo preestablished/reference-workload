@@ -14,3 +14,7 @@ determinism-proto = { path = "../control-plane/crates/determinism-proto", defaul
 # proto copy that could drift. CI checks out determinism-hypervisor next to
 # this repo, like control-plane above.
 dh-proto = { path = "../determinism-hypervisor/crates/dh-proto" }
+# In-guest region publication (GS-5/GS-6 join point): the harness registers
+# wram/framebuffer/meta with the agent through the real
+# detguest-sdk::register_region path. Sibling checkout, like the two above.
+detguest-sdk = { path = "../guest-sdk/crates/detguest-sdk" }

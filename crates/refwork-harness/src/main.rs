@@ -25,6 +25,9 @@ fn main() {
 }
 
 fn run_fd3() {
+    // Under the agent this binds the detchannel; standalone it is a no-op
+    // and later region publication reports standalone mode.
+    refwork_harness::agent::init_sdk();
     let transport = match SeqpacketFd::from_inherited_control_fd() {
         Ok(transport) => transport,
         Err(err) => {

@@ -26,6 +26,12 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/determinism-hypervisor
           path: determinism-hypervisor
+      # detguest-sdk (in-guest region publication) is a path dep on the
+      # sibling guest-sdk checkout — the GS-5/GS-6 join point.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/guest-sdk
+          path: guest-sdk
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

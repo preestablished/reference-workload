@@ -35,6 +35,10 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/determinism-hypervisor
           path: determinism-hypervisor
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/guest-sdk
+          path: guest-sdk
       - uses: dtolnay/rust-toolchain@stable
       - run: test -w /dev/kvm || { echo "runner lacks /dev/kvm access"; exit 1; }
       - run: cargo test --locked -p refwork-verify --test vm_first_room --test vm_suite

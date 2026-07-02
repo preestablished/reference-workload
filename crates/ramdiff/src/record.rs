@@ -282,7 +282,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
         // Blit to window.
         core.blit_completed_frame(&mut fb_xrgb);
-        xrgb_to_u32(&fb_xrgb, &mut fb_u32, FB_WIDTH, FB_HEIGHT);
+        xrgb_to_u32(&fb_xrgb[..], &mut fb_u32, FB_WIDTH, FB_HEIGHT);
         window
             .update_with_buffer(&fb_u32, FB_WIDTH, FB_HEIGHT)
             .map_err(|e| format!("window update: {}", e))?;

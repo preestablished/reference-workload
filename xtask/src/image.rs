@@ -308,6 +308,13 @@ pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageErr
         "determinism-hypervisor",
         &["crates/dh-proto", "proto"],
     )?;
+    // detguest-sdk path dep (harness region publication). Same scoped rule.
+    let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
+    ensure_clean_git_paths(
+        &guest_sdk,
+        "guest-sdk",
+        &["crates/detguest-sdk", "crates/detguest-wire"],
+    )?;
 
     let double_root = workspace_root.join("target").join(DOUBLE_BUILD_ROOT);
     if double_root.exists() {
@@ -315,18 +322,21 @@ pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageErr
     }
     create_dir_all(&double_root)?;
 
+    let siblings = [
+        ("control-plane", control_plane.as_path()),
+        ("determinism-hypervisor", hypervisor.as_path()),
+        ("guest-sdk", guest_sdk.as_path()),
+    ];
     let first_dir = build_from_clean_root(
         workspace_root,
-        &control_plane,
-        &hypervisor,
+        &siblings,
         &double_root,
         "root-a",
         &source_rev,
     )?;
     let second_dir = build_from_clean_root(
         workspace_root,
-        &control_plane,
-        &hypervisor,
+        &siblings,
         &double_root,
         "root-b",
         &source_rev,
@@ -401,8 +411,7 @@ pub fn register_image(
 
 fn build_from_clean_root(
     source_workspace: &Path,
-    control_plane: &Path,
-    hypervisor: &Path,
+    siblings: &[(&str, &Path)],
     double_root: &Path,
     name: &str,
     source_rev: &str,
@@ -411,8 +420,9 @@ fn build_from_clean_root(
     let workspace = root.join("reference-workload");
     create_dir_all(&root)?;
     materialize_tracked_source(source_workspace, &workspace)?;
-    symlink_path(control_plane, &root.join("control-plane"))?;
-    symlink_path(hypervisor, &root.join("determinism-hypervisor"))?;
+    for (sibling_name, sibling_path) in siblings {
+        symlink_path(sibling_path, &root.join(sibling_name))?;
+    }
     let agent = write_placeholder_agent(&workspace)?;
     build_image_with_git_rev(&workspace, &agent, Some(source_rev))
 }

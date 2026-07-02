@@ -49,6 +49,9 @@ pub enum SetupError {
         expected: &'static str,
         actual: CtlMsg,
     },
+    AgentRegistration {
+        detail: String,
+    },
 }
 
 impl fmt::Display for SetupError {
@@ -58,6 +61,9 @@ impl fmt::Display for SetupError {
             SetupError::BadProto { detail } => write!(f, "bad protocol: {detail}"),
             SetupError::BadGame(err) => write!(f, "bad game: {err}"),
             SetupError::Region(err) => write!(f, "region preparation failed: {err}"),
+            SetupError::AgentRegistration { detail } => {
+                write!(f, "agent region registration failed: {detail}")
+            }
             SetupError::UnsupportedSram { len } => {
                 write!(
                     f,
@@ -80,6 +86,7 @@ impl std::error::Error for SetupError {
             SetupError::Region(err) => Some(err),
             SetupError::UnsupportedSram { .. } => None,
             SetupError::ProtocolOrder { .. } => None,
+            SetupError::AgentRegistration { .. } => None,
         }
     }
 }
@@ -103,6 +110,7 @@ where
     let dev_path = expect_load_game(channel)?;
     let game = load_game_or_fault(channel, loader, &dev_path)?;
     let mut regions = prepare_regions_or_fault(channel, &game, &config)?;
+    publish_regions_or_fault(channel, &mut regions)?;
 
     send_game_loaded(channel, &game)?;
     send_regions(channel, &regions)?;
@@ -238,6 +246,28 @@ where
             let detail = err.to_string();
             send_fault(channel, FaultCode::RegionRegFailed, &detail)?;
             Err(SetupError::Region(err))
+        }
+    }
+}
+
+/// GS-5/GS-6 join point: register the regions with the agent through the
+/// real detguest-sdk path BEFORE `Ready` is reported. Standalone runs (no
+/// agent) continue unchanged; a hard registration failure under the agent
+/// is a `RegionRegFailed` fault.
+fn publish_regions_or_fault<T>(
+    channel: &mut ControlChannel<T>,
+    regions: &mut HarnessRegions,
+) -> Result<(), SetupError>
+where
+    T: DatagramTransport,
+{
+    match crate::agent::publish_regions(regions) {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let detail = err.to_string();
+            mark_meta_fault(regions, FaultCode::RegionRegFailed);
+            send_fault(channel, FaultCode::RegionRegFailed, &detail)?;
+            Err(SetupError::AgentRegistration { detail })
         }
     }
 }

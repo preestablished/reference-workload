@@ -2,6 +2,7 @@
 
 use refwork_protocol::{CtlMsg, PROTO_VERSION};
 
+pub mod agent;
 pub mod ctl;
 pub(crate) mod fault_detail;
 pub mod frame;
