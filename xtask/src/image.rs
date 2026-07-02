@@ -694,17 +694,20 @@ fn harness_rustflags(workspace_root: &Path) -> String {
         ),
     ];
     if let Some(parent) = workspace_root.parent() {
-        let control_plane = parent.join("control-plane");
-        flags.push(format!(
-            "--remap-path-prefix={}=/control-plane",
-            control_plane.display()
-        ));
-        if let Ok(canonical) = control_plane.canonicalize() {
-            if canonical != control_plane {
-                flags.push(format!(
-                    "--remap-path-prefix={}=/control-plane",
-                    canonical.display()
-                ));
+        // Every sibling path dep must be remapped (literal and canonical
+        // forms — double-build reaches siblings through per-root symlinks),
+        // or the embedded paths differ between clean-root builds and break
+        // double-build reproducibility.
+        for sibling in ["control-plane", "determinism-hypervisor", "guest-sdk"] {
+            let path = parent.join(sibling);
+            flags.push(format!("--remap-path-prefix={}=/{sibling}", path.display()));
+            if let Ok(canonical) = path.canonicalize() {
+                if canonical != path {
+                    flags.push(format!(
+                        "--remap-path-prefix={}=/{sibling}",
+                        canonical.display()
+                    ));
+                }
             }
         }
     }
