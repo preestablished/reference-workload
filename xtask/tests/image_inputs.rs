@@ -226,3 +226,36 @@ fn assert_no_rom_like_files(dir: &Path) {
         );
     }
 }
+
+/// The hypervisor enforces D7 framebuffer geometry from `layout_version 1`
+/// since determinism-hypervisor `5698d7e`: exactly 229,376 bytes, XRGB8888,
+/// 256x224, stride 1024 — wrong length is a `FailedPrecondition` at
+/// `GetFramebuffer`/`CaptureSpec` time. Pin the image contract to it
+/// explicitly (phase3-m4-first-room-unblock step 03) rather than trusting
+/// `FB_BYTES` transitively.
+#[test]
+fn framebuffer_region_matches_hypervisor_layout_contract() {
+    const D7_FB_BYTES: u64 = 229_376; // 1024 stride * 224 rows
+
+    for source in ["image/expected-regions.toml", "image/boot.toml"] {
+        let records = regions_from_toml(&read_workspace_file(source));
+        let fb = records
+            .iter()
+            .find(|r| r.name == "framebuffer")
+            .unwrap_or_else(|| panic!("{source} lacks a framebuffer region"));
+        assert_eq!(fb.size, D7_FB_BYTES, "{source} framebuffer size");
+        assert_eq!(fb.layout_version, 1, "{source} framebuffer layout_version");
+        assert_eq!(
+            fb.format.as_deref(),
+            Some("xrgb8888-256x224-stride1024"),
+            "{source} framebuffer format"
+        );
+    }
+
+    // The dist manifest the operator consumes must carry the same size.
+    let manifest = read_workspace_file("dist/workload-image-0.1.0/workload-image.yaml");
+    assert!(
+        manifest.contains("name: framebuffer, size: 229376, format: xrgb8888-256x224-stride1024"),
+        "dist manifest framebuffer line drifted from the D7 contract"
+    );
+}
