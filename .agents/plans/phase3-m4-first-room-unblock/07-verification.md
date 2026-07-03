@@ -74,3 +74,35 @@ edits; coordinate) → `BRIDGE_REAL_SNAPSHOT_REF` cutover with the bridge
 side → bridge runs `RestoreSnapshot → GetFramebuffer → browser preview`
 (our standing offer, unchanged) → operator lab-run fields for the
 first-room gate (ROM BLAKE3, padlog BLAKE3, run owner).
+
+## Addendum 2026-07-03 — Follow-Ups Executed
+
+The `phase3-followups-closeout` plan (rom-operator-bridge repo) resolved
+this note's actionable blocker and known gaps:
+
+- **Pushes landed:** guest-sdk `c03e90b`, determinism-hypervisor
+  `4c44263`, reference-workload `0a9726c` all reached `origin/main` —
+  the `image/guest-sdk.lock` rev check is now satisfiable from a fresh
+  clone.
+- **Gaps closed** (each new test shown to fail with its guard
+  reverted): Gap A `fe91261` (hard-fault-before-Ready seam + tests),
+  Gap B `209b241` (both lock mismatch-refusal branches, parameterized
+  cores), Gap C `ef59c73` (restore-continuity negative via mock
+  post-restore divergence). Gap D (capture-alarm stage naming) was
+  deliberately not implemented — it needs an error-taxonomy decision
+  (structured error field vs fragile string matching); disposition
+  recorded in bead `refwork-otv`.
+- **Live-worker smoke** `d61e300` (bead `refwork-asn`): the previously
+  untested live gRPC path now has transport/codec/error-mapping
+  coverage against a real scratch `dh-workerd` (`--no-snapstore`),
+  green locally (bogus-ref class observed: FailedPrecondition), wired
+  into `vm-gates.yaml` with CI building the worker from the sibling
+  checkout. The full vm-first-room/vm-suite real-worker legs still wait
+  on the coordinated step-03 boot/READY sequence and will reuse this
+  gate and launch recipe.
+- The stale runner-label wording in the M4 evidence note got its
+  addendum (`bae3bed`).
+
+Remaining, unchanged: the operator-coordinated boot → READY snapshot →
+`BRIDGE_REAL_SNAPSHOT_REF` cutover → bridge browser verification, and
+the operator lab-run fields.
