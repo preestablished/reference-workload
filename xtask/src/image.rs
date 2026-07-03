@@ -534,7 +534,13 @@ fn resolve_pinned_kernel(workspace_root: &Path) -> Result<Vec<u8>, ImageError> {
             bzimage.display()
         )));
     }
-    let bytes = read(&bzimage)?;
+    verify_pinned_kernel_artifact(&bzimage, &pinned)
+}
+
+/// Refusal core of the kernel pin, parameterized for tests: read the
+/// artifact and refuse on a BLAKE3 mismatch with the lock.
+pub fn verify_pinned_kernel_artifact(bzimage: &Path, pinned: &str) -> Result<Vec<u8>, ImageError> {
+    let bytes = read(bzimage)?;
     let actual = blake3::hash(&bytes).to_hex().to_string();
     if actual != pinned {
         return Err(ImageError::InvalidInput(format!(
@@ -545,17 +551,12 @@ fn resolve_pinned_kernel(workspace_root: &Path) -> Result<Vec<u8>, ImageError> {
     Ok(bytes)
 }
 
-/// Build-from-sibling leg of the kernel/agent split: verify the guest-sdk
-/// checkout is at exactly the rev pinned in `image/guest-sdk.lock`, then
-/// build detguest-agent for the musl target and return its path.
-fn build_agent_from_pinned_sibling(workspace_root: &Path) -> Result<PathBuf, ImageError> {
-    let guest_sdk_lock = read_to_string(&workspace_root.join("image").join("guest-sdk.lock"))?;
-    let pinned_rev = quoted_value(&guest_sdk_lock, "rev")?;
-    let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
-
+/// Refusal core of the guest-sdk rev pin, parameterized for tests: refuse
+/// unless the checkout's HEAD is exactly the pinned rev, naming both revs.
+pub fn verify_pinned_rev(guest_sdk: &Path, pinned_rev: &str) -> Result<(), ImageError> {
     let head = Command::new("git")
         .arg("-C")
-        .arg(&guest_sdk)
+        .arg(guest_sdk)
         .args(["rev-parse", "HEAD"])
         .output()
         .map_err(|source| ImageError::Io {
@@ -574,6 +575,17 @@ fn build_agent_from_pinned_sibling(workspace_root: &Path) -> Result<PathBuf, Ima
             "guest-sdk checkout is at {head} but image/guest-sdk.lock pins {pinned_rev};              check out the pinned rev or deliberately bump the lock"
         )));
     }
+    Ok(())
+}
+
+/// Build-from-sibling leg of the kernel/agent split: verify the guest-sdk
+/// checkout is at exactly the rev pinned in `image/guest-sdk.lock`, then
+/// build detguest-agent for the musl target and return its path.
+fn build_agent_from_pinned_sibling(workspace_root: &Path) -> Result<PathBuf, ImageError> {
+    let guest_sdk_lock = read_to_string(&workspace_root.join("image").join("guest-sdk.lock"))?;
+    let pinned_rev = quoted_value(&guest_sdk_lock, "rev")?;
+    let guest_sdk = sibling_checkout(workspace_root, "guest-sdk")?;
+    verify_pinned_rev(&guest_sdk, &pinned_rev)?;
 
     let status = Command::new("cargo")
         .args([
@@ -2017,6 +2029,67 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// Gap B negative test: a kernel artifact whose bytes do not match the
+    /// lock's BLAKE3 must be refused, naming both hashes and the bump
+    /// guidance. (Fails if the mismatch branch is removed.)
+    #[test]
+    fn kernel_pin_refuses_wrong_content() {
+        let tmp = TempDir::new();
+        let bzimage = tmp.path.join("bzImage");
+        std::fs::write(&bzimage, b"not the pinned kernel").unwrap();
+        let pinned = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let err = verify_pinned_kernel_artifact(&bzimage, pinned)
+            .expect_err("wrong-content kernel must be refused");
+        let msg = err.to_string();
+        let actual = blake3::hash(b"not the pinned kernel").to_hex().to_string();
+        assert!(msg.contains(pinned), "must name the pinned hash: {msg}");
+        assert!(msg.contains(&actual), "must name the actual hash: {msg}");
+        assert!(
+            msg.contains("rebuild the pinned kernel in guest-sdk")
+                && msg.contains("deliberately bump the lock"),
+            "must carry the bump guidance: {msg}"
+        );
+    }
+
+    /// Gap B negative test: a checkout at a different rev than the lock's
+    /// pin must be refused, naming both revs. Uses a scratch git repo —
+    /// never the real sibling checkouts.
+    #[test]
+    fn rev_pin_refuses_wrong_checkout() {
+        let tmp = TempDir::new();
+        let repo = tmp.path.join("scratch-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "scratch"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let pinned = "1111111111111111111111111111111111111111";
+
+        verify_pinned_rev(&repo, &head).expect("matching rev must pass");
+        let err = verify_pinned_rev(&repo, pinned).expect_err("wrong rev must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains(&head), "must name the checkout rev: {msg}");
+        assert!(msg.contains(pinned), "must name the pinned rev: {msg}");
+        assert!(
+            msg.contains("deliberately bump the lock"),
+            "must carry the bump guidance: {msg}"
+        );
     }
 
     fn valid_dist() -> TempDir {
