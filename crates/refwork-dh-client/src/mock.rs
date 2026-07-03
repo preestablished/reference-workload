@@ -51,6 +51,11 @@ pub struct MockFixture {
     pub room_target: u8,
     /// The room transitions after this many frames with a non-zero pad.
     pub transition_after_pads: u32,
+    /// Negative-test mode: perturb guest state when restoring a saved
+    /// mid-run snapshot (never the READY root), so the restore-continuity
+    /// leg diverges from the uninterrupted baseline while double-run stays
+    /// clean. Tests only; a suite that cannot fail proves nothing.
+    pub corrupt_mid_run_restores: bool,
 }
 
 impl Default for MockFixture {
@@ -63,6 +68,7 @@ impl Default for MockFixture {
             room_initial: 0,
             room_target: 1,
             transition_after_pads: 8,
+            corrupt_mid_run_restores: false,
         }
     }
 }
@@ -263,7 +269,11 @@ impl HypervisorWorker for MockWorker {
         let guest = if hash == self.fixture.ready_snapshot_ref {
             GuestState::ready(&self.fixture)
         } else if let Some(saved) = state.snapshots.get(&hash) {
-            saved.clone()
+            let mut restored = saved.clone();
+            if self.fixture.corrupt_mid_run_restores {
+                restored.nonzero_pads_applied = restored.nonzero_pads_applied.wrapping_add(1);
+            }
+            restored
         } else {
             return Err(Status::not_found(format!(
                 "unknown snapshot ref {}",

@@ -112,6 +112,40 @@ fn negative_test_perturbed_input_must_fail_double_run() {
     assert!(iteration.restore_continuity.ok);
 }
 
+/// Gap C negative test: a continuation that diverges from the
+/// uninterrupted baseline after restore must fail the restore-continuity
+/// leg, naming the first divergent frame — while double-run (which never
+/// restores a mid-run snapshot) stays clean. (Shown to fail when the
+/// continuity comparison is disabled — guard-reversion checked.)
+#[test]
+fn negative_test_post_restore_divergence_must_fail_continuity() {
+    let dir = TempDir::new("continuity-negative");
+    let uds = dir.path.join("worker.sock");
+    let fixture = MockFixture {
+        corrupt_mid_run_restores: true,
+        ..MockFixture::default()
+    };
+    let _mock = spawn_uds(fixture, &uds).unwrap();
+
+    let mut opts = options(&dir, &uds);
+    opts.iterations = 1;
+    let report = vm_suite(&opts).unwrap();
+
+    assert!(!report.passed(), "a suite that cannot fail proves nothing");
+    let iteration = &report.iterations[0];
+    assert!(iteration.double_run.ok, "double-run never restores mid-run");
+    assert!(!iteration.restore_continuity.ok);
+    // The perturbation (+1 nonzero_pads_applied at restore) shifts the
+    // continuation's room transition one pad earlier than the baseline's
+    // (8th pad: baseline frame 14, corrupted continuation frame 13), so
+    // the first differing frame hash is the baseline's transition frame.
+    assert_eq!(
+        iteration.restore_continuity.first_divergent_frame,
+        Some(14),
+        "must name the first divergent frame"
+    );
+}
+
 #[test]
 fn unknown_ready_ref_is_a_restore_failure() {
     let dir = TempDir::new("badref");
