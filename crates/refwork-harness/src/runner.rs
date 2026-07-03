@@ -5,6 +5,7 @@ use std::fmt;
 use refwork_emu::EMU_VERSION;
 use refwork_protocol::{CtlMsg, FaultCode, PROTO_VERSION};
 
+use crate::agent::{AgentPublication, AgentPublishError};
 use crate::ctl::{ControlChannel, ControlError, DatagramTransport};
 use crate::fault_detail::bounded_fault_detail;
 use crate::game::{GameLoadError, GameLoader, LoadedGame};
@@ -16,6 +17,10 @@ pub struct SetupConfig {
     pub emu_version: &'static str,
     pub vram: bool,
     pub sram_len: Option<usize>,
+    /// Region-publication seam (crate-private): production is
+    /// `agent::publish_regions`; tests inject failures to prove the
+    /// fault-before-Ready contract.
+    pub(crate) publish: fn(&HarnessRegions) -> Result<AgentPublication, AgentPublishError>,
 }
 
 impl Default for SetupConfig {
@@ -25,6 +30,7 @@ impl Default for SetupConfig {
             emu_version: EMU_VERSION,
             vram: false,
             sram_len: None,
+            publish: crate::agent::publish_regions,
         }
     }
 }
@@ -110,7 +116,7 @@ where
     let dev_path = expect_load_game(channel)?;
     let game = load_game_or_fault(channel, loader, &dev_path)?;
     let mut regions = prepare_regions_or_fault(channel, &game, &config)?;
-    publish_regions_or_fault(channel, &mut regions)?;
+    publish_regions_or_fault(channel, &mut regions, &config)?;
 
     send_game_loaded(channel, &game)?;
     send_regions(channel, &regions)?;
@@ -257,11 +263,12 @@ where
 fn publish_regions_or_fault<T>(
     channel: &mut ControlChannel<T>,
     regions: &mut HarnessRegions,
+    config: &SetupConfig,
 ) -> Result<(), SetupError>
 where
     T: DatagramTransport,
 {
-    match crate::agent::publish_regions(regions) {
+    match (config.publish)(regions) {
         Ok(_) => Ok(()),
         Err(err) => {
             let detail = err.to_string();
@@ -469,6 +476,54 @@ mod tests {
         let result = run_setup(&mut channel, loader, config);
         let sent = channel.transport().sent.clone();
         (result, sent)
+    }
+
+    /// Gap A negative test: a hard region-registration failure under the
+    /// agent must emit a `RegionRegFailed` fault, surface
+    /// `SetupError::AgentRegistration`, and make `Ready` unreachable.
+    /// (Shown to fail when the fault path is reverted to swallow the
+    /// error — guard-reversion checked 2026-07-03.)
+    #[test]
+    fn hard_registration_failure_faults_before_ready() {
+        let mut loader = FakeLoader::ok();
+        let config = SetupConfig {
+            publish: |_| {
+                Err(AgentPublishError {
+                    region: "wram",
+                    detail: "injected registration failure".into(),
+                })
+            },
+            ..SetupConfig::default()
+        };
+        let (result, sent) = run_with(
+            vec![
+                wire(CtlMsg::Hello {
+                    proto_version: PROTO_VERSION,
+                }),
+                wire(CtlMsg::LoadGame {
+                    dev_path: "/dev/vdb".into(),
+                }),
+            ],
+            &mut loader,
+            config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(SetupError::AgentRegistration { ref detail })
+                if detail.contains("injected registration failure")
+        ));
+        assert!(
+            sent.iter().any(|msg| matches!(
+                msg,
+                CtlMsg::Fault { code: FaultCode::RegionRegFailed, .. }
+            )),
+            "RegionRegFailed fault must be emitted, sent: {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|msg| matches!(msg, CtlMsg::Ready { .. })),
+            "Ready must be unreachable after a registration fault, sent: {sent:?}"
+        );
     }
 
     #[test]

@@ -56,6 +56,45 @@ pub fn init_sdk() {
     let _ = detguest_sdk::init();
 }
 
+/// Crate-private seam over `detguest_sdk::register_region` so the hard-fault
+/// path is testable: the production impl is the SDK call, verbatim; tests
+/// substitute a registrar that fails with a non-`AgentUnavailable` error.
+pub(crate) trait RegionRegistrar {
+    type Handle;
+
+    /// # Safety
+    ///
+    /// Same contract as [`detguest_sdk::register_region`]: `ptr`/`len` name a
+    /// page-aligned mapping that stays valid and pinned for the handle's
+    /// lifetime.
+    unsafe fn register(
+        &self,
+        name: &'static str,
+        layout_version: u32,
+        ptr: *const u8,
+        len: usize,
+        flags: RegionFlags,
+    ) -> Result<Self::Handle, detguest_sdk::RegionError>;
+}
+
+struct SdkRegistrar;
+
+impl RegionRegistrar for SdkRegistrar {
+    type Handle = detguest_sdk::RegionHandle;
+
+    unsafe fn register(
+        &self,
+        name: &'static str,
+        layout_version: u32,
+        ptr: *const u8,
+        len: usize,
+        flags: RegionFlags,
+    ) -> Result<Self::Handle, detguest_sdk::RegionError> {
+        // SAFETY: forwarded contract; upheld by the caller of `register`.
+        unsafe { detguest_sdk::register_region(name, layout_version, ptr, len, flags) }
+    }
+}
+
 /// Register `wram`, `framebuffer`, and `meta` with the agent under the D7
 /// contract (`layout_version 1` for all three; the framebuffer flag drives
 /// the hypervisor's geometry derivation).
@@ -63,6 +102,13 @@ pub fn init_sdk() {
 /// Call after the regions are mapped and `meta` is initialized, before the
 /// harness reports `Ready` — READY must not precede live regions.
 pub fn publish_regions(regions: &HarnessRegions) -> Result<AgentPublication, AgentPublishError> {
+    publish_regions_with(&SdkRegistrar, regions)
+}
+
+pub(crate) fn publish_regions_with<R: RegionRegistrar>(
+    registrar: &R,
+    regions: &HarnessRegions,
+) -> Result<AgentPublication, AgentPublishError> {
     let entries: [(&'static str, u64, usize, RegionFlags); 3] = [
         (
             "wram",
@@ -92,8 +138,7 @@ pub fn publish_regions(regions: &HarnessRegions) -> Result<AgentPublication, Age
         // never unmaps); on failure the process exits before the mapping is
         // reused. The pointer never relocates — `PublishedRegion` moves do
         // not move the mapping.
-        let outcome =
-            unsafe { detguest_sdk::register_region(name, 1, gva as *const u8, len, flags) };
+        let outcome = unsafe { registrar.register(name, 1, gva as *const u8, len, flags) };
         match outcome {
             Ok(handle) => handles.push(handle),
             Err(detguest_sdk::RegionError::AgentUnavailable) => {
@@ -132,5 +177,33 @@ mod tests {
         let regions = HarnessRegions::required().expect("map regions");
         let outcome = publish_regions(&regions).expect("standalone is not an error");
         assert_eq!(outcome, AgentPublication::Standalone);
+    }
+
+    struct FailingRegistrar;
+
+    impl RegionRegistrar for FailingRegistrar {
+        type Handle = ();
+
+        unsafe fn register(
+            &self,
+            _name: &'static str,
+            _layout_version: u32,
+            _ptr: *const u8,
+            _len: usize,
+            _flags: RegionFlags,
+        ) -> Result<Self::Handle, detguest_sdk::RegionError> {
+            Err(detguest_sdk::RegionError::NotPinned)
+        }
+    }
+
+    /// A non-`AgentUnavailable` registration failure under the agent is a
+    /// hard error naming the region, never a silent standalone downgrade.
+    #[test]
+    fn hard_registration_failure_is_an_error_not_standalone() {
+        let regions = HarnessRegions::required().expect("map regions");
+        let err = publish_regions_with(&FailingRegistrar, &regions)
+            .expect_err("hard failure must not degrade to standalone");
+        assert_eq!(err.region, "wram");
+        assert!(err.detail.contains("NotPinned"), "detail: {}", err.detail);
     }
 }
