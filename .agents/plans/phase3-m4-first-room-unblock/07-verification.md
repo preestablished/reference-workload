@@ -106,3 +106,15 @@ this note's actionable blocker and known gaps:
 Remaining, unchanged: the operator-coordinated boot → READY snapshot →
 `BRIDGE_REAL_SNAPSHOT_REF` cutover → bridge browser verification, and
 the operator lab-run fields.
+
+## Addendum 2026-07-03 (later) — Phase 3 Gate 4 Green
+
+snapshot-store landed M7 GC (commits `3a539c7..62ac23c`; request +
+resolution + verification trail in
+`~/git/preestablished/snapshot-store/.agents/requests/phase3-m7-gc-exit-gate/`,
+00–05). Verified by the bridge side three ways, including the joint
+restore-after-GC sweep: 900/900 surviving refs served through a real
+scratch `dh-workerd → snapstore` path post-GC, zero store-misses,
+negative control correct. Phase 3 exit now reduces to: refwork M5 lab
+stamp, guest-sdk Ms5 CI gate, and the operator-coordinated first-room
+run.
