@@ -516,7 +516,10 @@ mod tests {
         assert!(
             sent.iter().any(|msg| matches!(
                 msg,
-                CtlMsg::Fault { code: FaultCode::RegionRegFailed, .. }
+                CtlMsg::Fault {
+                    code: FaultCode::RegionRegFailed,
+                    ..
+                }
             )),
             "RegionRegFailed fault must be emitted, sent: {sent:?}"
         );
