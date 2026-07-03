@@ -857,10 +857,15 @@ fn write_newc_initramfs(
     let entries = vec![
         CpioEntry::dir("."),
         CpioEntry::dir("dev"),
+        CpioEntry::dir("dev"),
+        CpioEntry::dir("dev/hugepages"),
         CpioEntry::dir("etc"),
         CpioEntry::dir("etc/detguest"),
         CpioEntry::dir("etc/refwork"),
+        CpioEntry::dir("proc"),
+        CpioEntry::dir("run"),
         CpioEntry::dir("sbin"),
+        CpioEntry::dir("sys"),
         CpioEntry::dir("usr"),
         CpioEntry::dir("usr/bin"),
         CpioEntry::file("etc/detguest/boot.toml", 0o100644, boot_toml.to_vec()),
@@ -870,15 +875,16 @@ fn write_newc_initramfs(
             expected_regions.to_vec(),
         ),
         CpioEntry::file("etc/refwork/harness.toml", 0o100644, harness_toml.to_vec()),
-        CpioEntry::file("init", 0o100755, init_script()),
+        // The image's only init path: /init IS the agent (guest-sdk
+        // ARCHITECTURE §4; mirrors image/build.sh's recipe). The previous
+        // #!/bin/sh init script could never exec — the image ships no
+        // shell — leaving the kernel with no working init: the guest
+        // spun to HARD_CAP on the first real boot (2026-07-03).
+        CpioEntry::symlink("init", "/sbin/detguest-agent"),
         CpioEntry::file("sbin/detguest-agent", 0o100755, agent),
         CpioEntry::file("usr/bin/refwork-harness", 0o100755, harness),
     ];
     write(out, &newc_archive(&entries))
-}
-
-fn init_script() -> Vec<u8> {
-    b"#!/bin/sh\nmount -t devtmpfs devtmpfs /dev 2>/dev/null || true\nmount -t proc proc /proc 2>/dev/null || true\nexec /sbin/detguest-agent /etc/detguest/boot.toml\n".to_vec()
 }
 
 fn compress_zstd(input: &Path, output: &Path) -> Result<(), ImageError> {
@@ -949,6 +955,15 @@ impl CpioEntry {
 
     fn file(path: &'static str, mode: u32, data: Vec<u8>) -> Self {
         Self { path, mode, data }
+    }
+
+    /// newc symlink entry: body bytes are the link target.
+    fn symlink(path: &'static str, target: &str) -> Self {
+        Self {
+            path,
+            mode: 0o120777,
+            data: target.as_bytes().to_vec(),
+        }
     }
 }
 
