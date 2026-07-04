@@ -1653,6 +1653,9 @@ fn validate_boot_toml(content: &str, errors: &mut Vec<String>) {
     if field_string(control, "game_dev").as_deref() != Some("/dev/vdb") {
         errors.push("boot.toml unit.control.game_dev must be /dev/vdb".into());
     }
+    if field_string(control, "game_source").as_deref() != Some("pv-blk") {
+        errors.push("boot.toml unit.control.game_source must be pv-blk".into());
+    }
     for spec in REQUIRED_REGIONS {
         let Some(block) = region_array_block(content, "expected_region", spec.name) else {
             errors.push(format!(

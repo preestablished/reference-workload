@@ -23,6 +23,10 @@ log_mask = 0x1F
 protocol = "refwork-ctl"
 proto_version = 1
 game_dev = "/dev/vdb"
+# The agent materializes the game from the pv-blk device into a tmpfs
+# file before LoadGame (guest-sdk request phase3-game-device-
+# materialization, resolution f143ffc). Required by our validator.
+game_source = "pv-blk"
 
 [[expected_region]]
 name = "wram"
