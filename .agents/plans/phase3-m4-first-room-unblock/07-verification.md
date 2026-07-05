@@ -118,3 +118,29 @@ scratch `dh-workerd → snapstore` path post-GC, zero store-misses,
 negative control correct. Phase 3 exit now reduces to: refwork M5 lab
 stamp, guest-sdk Ms5 CI gate, and the operator-coordinated first-room
 run.
+
+## Addendum 2026-07-05 — Phase 3 Step 2 CLEARS (first boot to READY)
+
+The workload-in-the-box booted to READY under the real deterministic
+worker for the first time. The last blocker — the boot handshake
+deadlocking under the worker's no-tick cooperative scheduling — was fixed
+in guest-sdk (`487ff56`, Fix A: the agent's pre-Ready boot waits park in
+the supervisor epoll instead of a sched_yield spin; proven sufficient by
+a non-preemptive probe reproducer with guard-reversion, and no workload
+tick-dependency — frames advance 0→3040 with no tick). Adopted here
+(`667ca8b`, lock → 487ff56). Real-worker `dh-m9-ready-handoff` reaches
+READY and snapshots (READY TakeSnapshot + RestoreSnapshot verification
+both succeeded); deployed worker slots clean 4/4 after.
+
+Five boot-integration bugs were found and cleared along the way to this:
+/init shell-in-shell-less-image, game-device materialization (guest-sdk),
+the refwork-ctl tag-7 decode gap, the fd-3 control-socket teardown
+(symptom 2), and this no-tick scheduling deadlock (symptom 1). Full trail
+across the `phase3-*` request threads in the four repos.
+
+Remaining Phase 3: regenerate the *deployed* READY snapshot through the
+deployed snapstore + `BRIDGE_REAL_SNAPSHOT_REF` cutover (step 3/4,
+operator-coordinated) → first real frame in the browser; plus refwork M5
+and guest-sdk Ms5 on their own tracks. Robustness item filed:
+determinism-hypervisor per-Run wall-clock backstop (guest-sdk resolution
+action #3).
