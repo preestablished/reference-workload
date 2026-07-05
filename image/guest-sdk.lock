@@ -11,7 +11,7 @@ kind = "refwork-guest-sdk-lock"
 [guest_sdk]
 status = "pinned-rev"
 repo = "guest-sdk"
-rev = "914dbde6831eafd60f286c75d3bb14bc65a49cbb"
+rev = "487ff564fe2b67dc2aef59aa90d31a74fc86c028"
 agent = "detguest-agent"
 agent_build = "cargo build --locked --release --target x86_64-unknown-linux-musl -p detguest-agent"
 
