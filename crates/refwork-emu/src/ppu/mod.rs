@@ -582,8 +582,8 @@ impl Ppu {
             // ── $2101 OBSEL ────────────────────────────────────
             0x01 => {
                 self.obsel.size = (value >> 5) & 0x07;
-                self.obsel.name_base = ((value >> 3) & 0x03) as u16;
-                self.obsel.name_select = ((value >> 1) & 0x03) as u16;
+                self.obsel.name_base = (value & 0x07) as u16;
+                self.obsel.name_select = ((value >> 3) & 0x03) as u16;
             }
 
             // ── $2102/$2103 OAMADD ─────────────────────────────
@@ -2680,11 +2680,11 @@ mod ppu_tests {
 
         // OBSEL: size pair 0 (8×8 small, 16×16 large), name_base=0, name_select=0.
         // Tile data will be placed in VRAM starting at OBJ name base.
-        // OBJ name base field (bits[4:3] of $2101): 0 → byte addr 0.
+        // OBJ name base field (bits[2:0] of $2101): 0 → byte addr 0.
         // But OBJ tile data shares the VRAM space with BG tiles. We use a
         // separate area: let OBSEL name_base=1 → byte addr = 1 << 14 = 0x4000.
-        assert!(p.write(0x01, 0x08).is_none()); // OBSEL: size=0, name_base=1, name_select=0
-                                                //   $2101 = 0b000_01_000 → [7:5]=0(size0), [4:3]=01(name_base=1), [2:1]=00(gap=0)
+        assert!(p.write(0x01, 0x01).is_none()); // OBSEL: size=0, name_base=1, name_select=0
+                                                //   $2101 = 0b000_00_001 → [7:5]=0(size0), [4:3]=00(gap=0), [2:0]=001(name_base=1)
 
         // OBJ tile 0 at 0x4000 (4bpp, 32 bytes): pixel row 0 = color_idx 2 (blue: B=31).
         // plane 0 row 0 = 0x00, plane 1 row 0 = 0xFF, plane 2/3 = 0

@@ -54,8 +54,8 @@ impl Default for Vmain {
 pub struct Obsel {
     /// Sprite size pair index 0-7.
     pub size: u8,
-    /// OBJ tile name base (bits [4:3] of $2101, shifted to a VRAM word address).
+    /// OBJ tile name base (bits [2:0] of $2101, in 8K-word units).
     pub name_base: u16,
-    /// Name-select gap between first and second sprite page (bits [2:1]).
+    /// Name-select gap between first and second sprite page (bits [4:3]).
     pub name_select: u16,
 }
