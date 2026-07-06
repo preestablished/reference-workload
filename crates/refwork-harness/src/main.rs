@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use refwork_harness::ctl::{ControlChannel, SeqpacketFd};
-use refwork_harness::frame::{run_frame_loop, NoopPlatform};
+use refwork_harness::frame::{run_frame_loop, SdkPlatform};
 use refwork_harness::game::FilesystemGameLoader;
 use refwork_harness::runner::{run_setup, SetupConfig};
 
@@ -46,7 +46,10 @@ fn run_fd3() {
         }
     };
 
-    let mut platform = NoopPlatform;
+    // Under the agent this drives the real detchannel: pv-pad input, ring-W
+    // FrameMark, and the pv-pad FRAME_COUNTER boundary the hypervisor's
+    // Run{frame_budget} stops on. Standalone it no-ops (see SdkPlatform).
+    let mut platform = SdkPlatform;
     if let Err(err) = run_frame_loop(&mut channel, setup, &mut platform) {
         eprintln!("refwork-harness: frame loop failed: {err}");
         std::process::exit(1);

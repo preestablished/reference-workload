@@ -29,6 +29,37 @@ impl Platform for NoopPlatform {
     fn quiesce_check(&mut self) {}
 }
 
+/// Production [`Platform`], backed by the guest SDK.
+///
+/// Under the agent (in the VM) [`crate::agent::init_sdk`] has bound the
+/// detchannel, so these calls drive the real host contract:
+/// - `poll_input` reads the pv-pad input latch (`detguest_sdk::poll_input`);
+/// - `frame_mark` publishes a ring-W `FrameMark` record and writes the pv-pad
+///   `FRAME_COUNTER` boundary — the exact stop condition the hypervisor's
+///   `Run{frame_budget}` waits for. The SDK owns the absolute frame counter, so
+///   the harness's per-frame `frame` argument is intentionally unused here; the
+///   loop calls this once per completed emulator frame, keeping the SDK counter
+///   in lockstep with the emulator's.
+/// - `quiesce_check` runs the cooperative SDK quiesce path.
+///
+/// Standalone (no detchannel — unit tests, `refwork-verify play`) every SDK
+/// call no-ops, so off-VM behavior matches [`NoopPlatform`] exactly.
+pub struct SdkPlatform;
+
+impl Platform for SdkPlatform {
+    fn poll_input(&mut self, port: u8) -> u16 {
+        detguest_sdk::poll_input(port) as u16
+    }
+
+    fn frame_mark(&mut self, _frame: u64) {
+        detguest_sdk::frame_mark();
+    }
+
+    fn quiesce_check(&mut self) {
+        detguest_sdk::quiesce_check();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameLoopExit {
     Shutdown { frame: u64 },
