@@ -54,5 +54,6 @@ pub mod introspect {
     pub use crate::apu::spc700::{ApuHalt, Spc700};
     pub use crate::apu::Apu;
     pub use crate::bus::Bus;
+    pub use crate::core_impl::DiagSnapshot;
     pub use crate::cpu::Cpu;
 }

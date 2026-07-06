@@ -48,6 +48,31 @@ pub struct Core {
     front: Box<[u8; FB_BYTES]>,
 }
 
+/// Clean-room-safe diagnostic snapshot (introspect-only). Every field is a
+/// boolean, a count, or a hardware address/config value — nothing here can
+/// reconstruct ROM code, audio-driver payload, graphics, or memory contents.
+#[cfg(feature = "introspect")]
+#[derive(Debug, Clone, Copy)]
+pub struct DiagSnapshot {
+    pub frame: u64,
+    pub force_blank: bool,
+    pub brightness: u8,
+    pub bg_mode: u8,
+    pub main_screen: u8,
+    pub cgram_nz: usize,
+    pub vram_nz: usize,
+    pub oam_nz: usize,
+    pub spc_pc: u16,
+    pub spc_in_ipl: bool,
+    pub nmi_enabled: bool,
+    pub autojoy_enabled: bool,
+    pub main_pc: u16,
+    pub rd_4210: u64,
+    pub rd_4211: u64,
+    pub rd_4212: u64,
+    pub rd_apu: u64,
+}
+
 impl Core {
     /// Deterministic construction (D3): fills WRAM with the fixed init
     /// pattern, applies documented power-on register state, runs the CPU
@@ -220,5 +245,37 @@ impl Core {
     #[cfg(feature = "introspect")]
     pub fn debug_peek(&self, bus_addr: u32) -> u8 {
         self.bus.peek(bus_addr).unwrap_or(0)
+    }
+
+    /// Clean-room-safe diagnostic snapshot (introspect-only, compiled out of the
+    /// guest binary). Emits booleans, counts, and hardware addresses/config —
+    /// never ROM bytes, framebuffer pixels, memory contents, or APU/DMA payload.
+    #[cfg(feature = "introspect")]
+    pub fn diag_snapshot(&self) -> DiagSnapshot {
+        let (force_blank, brightness, bg_mode, main_screen) = self.bus.ppu.diag();
+        let (cgram_nz, vram_nz, oam_nz) = self.bus.ppu.diag_nonzero_counts();
+        let spc_pc = self.bus.apu.cpu.pc;
+        let nmitimen = self.bus.nmitimen;
+        DiagSnapshot {
+            frame: self.frame,
+            force_blank,
+            brightness,
+            bg_mode,
+            main_screen,
+            cgram_nz,
+            vram_nz,
+            oam_nz,
+            spc_pc,
+            // SPC still executing the 64-byte IPL boot ROM ($FFC0-$FFFF) means the
+            // audio-driver upload has not handed off to game code yet.
+            spc_in_ipl: spc_pc >= 0xFFC0,
+            nmi_enabled: (nmitimen & 0x80) != 0,
+            autojoy_enabled: (nmitimen & 0x01) != 0,
+            main_pc: self.cpu.pc,
+            rd_4210: self.bus.diag_rd_4210,
+            rd_4211: self.bus.diag_rd_4211,
+            rd_4212: self.bus.diag_rd_4212,
+            rd_apu: self.bus.diag_rd_apu,
+        }
     }
 }

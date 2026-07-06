@@ -114,6 +114,17 @@ pub struct SysBus {
     /// Precomputed next H/V-IRQ target (absolute mclk_frame value), if armed.
     /// Recomputed on writes to $4200/$4207-$420A and at start_line.
     irq_target_mclk: Option<u64>,
+
+    /// Clean-room diagnostic read counters (introspect-only; compiled out of the
+    /// guest binary). Counts only — never the values read.
+    #[cfg(feature = "introspect")]
+    pub diag_rd_4210: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_rd_4211: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_rd_4212: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_rd_apu: u64,
 }
 
 impl SysBus {
@@ -157,6 +168,15 @@ impl SysBus {
 
             wrio: 0xFF,
             irq_target_mclk: None,
+
+            #[cfg(feature = "introspect")]
+            diag_rd_4210: 0,
+            #[cfg(feature = "introspect")]
+            diag_rd_4211: 0,
+            #[cfg(feature = "introspect")]
+            diag_rd_4212: 0,
+            #[cfg(feature = "introspect")]
+            diag_rd_apu: 0,
         }
     }
 
@@ -787,6 +807,10 @@ impl Bus for SysBus {
                     // $2140-$217F: APU ports (mirrors every 4).
                     // Catch the APU up to the current timestamp before reading.
                     0x2140..=0x217F => {
+                        #[cfg(feature = "introspect")]
+                        {
+                            self.diag_rd_apu += 1;
+                        }
                         let port = (off & 3) as u8;
                         self.apu_catch_up();
                         let v = self.apu.cpu_read_port(port);
@@ -826,6 +850,10 @@ impl Bus for SysBus {
 
                     // $4210: RDNMI.
                     0x4210 => {
+                        #[cfg(feature = "introspect")]
+                        {
+                            self.diag_rd_4210 += 1;
+                        }
                         // bit7 = nmi_flag; bits 6-4 = mdr; bits 3-0 = $2 (CPU version).
                         let v = ((self.nmi_flag as u8) << 7) | 0x02 | (self.mdr & 0x70);
                         self.nmi_flag = false; // read-clears (not nmi_pending)
@@ -835,6 +863,10 @@ impl Bus for SysBus {
 
                     // $4211: TIMEUP.
                     0x4211 => {
+                        #[cfg(feature = "introspect")]
+                        {
+                            self.diag_rd_4211 += 1;
+                        }
                         let v = ((self.irq_flag as u8) << 7) | (self.mdr & 0x7F);
                         self.irq_flag = false; // read-clears
                         self.mdr = v;
@@ -843,6 +875,10 @@ impl Bus for SysBus {
 
                     // $4212: HVBJOY.
                     0x4212 => {
+                        #[cfg(feature = "introspect")]
+                        {
+                            self.diag_rd_4212 += 1;
+                        }
                         // vblank flag: lines >= 225.
                         let vblank = self.line >= 225;
                         // hblank: approximate — mclk within current line >= 274*4.

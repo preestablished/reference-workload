@@ -12,3 +12,7 @@ license.workspace = true
 # Test-only direct state access (debug_peek, cpu/bus exports for the
 # single-step CPU test runner in xtask). Compiled out of the guest binary.
 introspect = []
+
+[[example]]
+name = "rom_diag"
+required-features = ["introspect"]

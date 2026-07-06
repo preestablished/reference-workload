@@ -474,6 +474,25 @@ impl Ppu {
 
     /// Write PPU register `$2100 + reg` (reg in 0x00..=0x33).
     /// Returns a fault if the write enables an M1-unimplemented feature.
+    /// Clean-room-safe display-state snapshot for diagnostics: force-blank,
+    /// master brightness (0-15), BG mode (0-7), and the main-screen layer-enable
+    /// mask (TM). All are non-expressive hardware configuration facts — no ROM
+    /// bytes, no framebuffer pixels, no memory contents.
+    #[cfg(feature = "introspect")]
+    pub fn diag(&self) -> (bool, u8, u8, u8) {
+        (self.force_blank, self.brightness, self.bg_mode, self.tm)
+    }
+
+    /// Count of non-zero bytes in CGRAM / VRAM / OAM — a "has any data landed"
+    /// signal that never reveals the data itself.
+    #[cfg(feature = "introspect")]
+    pub fn diag_nonzero_counts(&self) -> (usize, usize, usize) {
+        let cg = self.cgram.iter().filter(|&&b| b != 0).count();
+        let vr = self.vram.iter().filter(|&&b| b != 0).count();
+        let oa = self.oam.iter().filter(|&&b| b != 0).count();
+        (cg, vr, oa)
+    }
+
     pub fn write(&mut self, reg: u8, value: u8) -> Option<Fault> {
         match reg {
             // ── $2100 INIDISP ──────────────────────────────────

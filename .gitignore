@@ -25,3 +25,9 @@ dist/
 .dolt/
 *.db
 .beads-credential-key
+
+# Clean-room: never commit game ROMs or framebuffer dumps (operator-private).
+*.sfc
+*.smc
+game.img
+*.fb.bin
