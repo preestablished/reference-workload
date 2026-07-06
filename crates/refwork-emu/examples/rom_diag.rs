@@ -43,10 +43,10 @@ fn main() {
         let changed = d.force_blank != last_fb;
         if d.frame <= 3 || d.frame % 60 == 0 || changed || d.frame == frames {
             println!(
-                "f={:<4} fblank={} bright={:<2} main_pc={:#06x} spc_pc={:#06x} inIPL={} nmi={} \
-                 rd[4210]={} rd[4211]={} rd[4212]={} rd[apu]={} cgram_nz={}",
-                d.frame, d.force_blank, d.brightness, d.main_pc, d.spc_pc, d.spc_in_ipl,
-                d.nmi_enabled, d.rd_4210, d.rd_4211, d.rd_4212, d.rd_apu, d.cgram_nz
+                "f={:<4} fblank={} main_pc={:#06x} spc_pc={:#06x} inIPL={} nmi={} \
+                 rd[apu]={} wr[apu]={} wr_CC={} spc_port0_is_CC={} cgram_nz={}",
+                d.frame, d.force_blank, d.main_pc, d.spc_pc, d.spc_in_ipl,
+                d.nmi_enabled, d.rd_apu, d.wr_apu, d.wr_cc_port0, d.spc_port0_is_cc, d.cgram_nz
             );
         }
         last_fb = d.force_blank;

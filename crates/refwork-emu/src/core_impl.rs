@@ -71,6 +71,9 @@ pub struct DiagSnapshot {
     pub rd_4211: u64,
     pub rd_4212: u64,
     pub rd_apu: u64,
+    pub wr_apu: u64,
+    pub wr_cc_port0: bool,
+    pub spc_port0_is_cc: bool,
 }
 
 impl Core {
@@ -276,6 +279,11 @@ impl Core {
             rd_4211: self.bus.diag_rd_4211,
             rd_4212: self.bus.diag_rd_4212,
             rd_apu: self.bus.diag_rd_apu,
+            wr_apu: self.bus.diag_wr_apu,
+            wr_cc_port0: self.bus.diag_wr_cc_port0,
+            // Is the IPL kick constant currently sitting in the SPC-visible port-0
+            // latch? (known protocol constant, not game data.)
+            spc_port0_is_cc: self.bus.apu.spc_ports[0] == 0xCC,
         }
     }
 }

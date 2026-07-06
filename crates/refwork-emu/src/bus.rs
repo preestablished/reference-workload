@@ -125,6 +125,10 @@ pub struct SysBus {
     pub diag_rd_4212: u64,
     #[cfg(feature = "introspect")]
     pub diag_rd_apu: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_wr_apu: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_wr_cc_port0: bool,
 }
 
 impl SysBus {
@@ -177,6 +181,10 @@ impl SysBus {
             diag_rd_4212: 0,
             #[cfg(feature = "introspect")]
             diag_rd_apu: 0,
+            #[cfg(feature = "introspect")]
+            diag_wr_apu: 0,
+            #[cfg(feature = "introspect")]
+            diag_wr_cc_port0: false,
         }
     }
 
@@ -1060,6 +1068,16 @@ impl Bus for SysBus {
                     // Catch the APU up to the current timestamp before writing.
                     0x2140..=0x217F => {
                         let port = (off & 3) as u8;
+                        #[cfg(feature = "introspect")]
+                        {
+                            self.diag_wr_apu += 1;
+                            // $CC is the fixed IPL kick constant (a hardware
+                            // protocol value, not game data): note if the main
+                            // CPU ever delivers it to port 0.
+                            if port == 0 && value == 0xCC {
+                                self.diag_wr_cc_port0 = true;
+                            }
+                        }
                         self.apu_catch_up();
                         self.apu.cpu_write_port(port, value);
                     }
