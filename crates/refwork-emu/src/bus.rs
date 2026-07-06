@@ -50,10 +50,18 @@ pub struct SysBus {
     pub cart: Cartridge,
     pub ppu: Ppu,
     pub apu: Apu,
-    /// Master-clock timestamp of the last APU catch-up. The APU is advanced
-    /// to the current `mclk_total` whenever the CPU accesses $2140–$2143 and
-    /// at the end of each scanline.
+    /// Master-clock timestamp the APU has been serviced through. Normal catch-up
+    /// advances it to `mclk_total`.
     pub apu_mclk_base: u64,
+    /// A CPU write of the IPL `$CC` kick can be overwritten before the next APU
+    /// catch-up. Preserve that one protocol edge until the next safe APU-port
+    /// boundary so the IPL observes it without running the whole APU ahead.
+    apu_pending_ipl_cc: bool,
+    /// While the IPL transfer loop is active, a CPU can write port 0 before the
+    /// associated data byte reaches port 1 (for example as part of a 16-bit
+    /// store). Defer catch-up across the immediately following non-port0 write
+    /// so the HLE does not consume a stale data byte.
+    apu_pending_ipl_transfer_strobe: bool,
     pub dma: Dma,
     /// HDMA per-frame run-time state (D8: fixed-size, allocated in new).
     pub hdma: Hdma,
@@ -129,6 +137,16 @@ pub struct SysBus {
     pub diag_wr_apu: u64,
     #[cfg(feature = "introspect")]
     pub diag_wr_cc_port0: bool,
+    #[cfg(feature = "introspect")]
+    pub diag_cc_port0_mclk: Option<u64>,
+    #[cfg(feature = "introspect")]
+    pub diag_post_cc_port0_writes: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_first_post_cc_port0_delta_mclk: Option<u64>,
+    #[cfg(feature = "introspect")]
+    pub diag_apu_port0_service_count: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_first_cc_service_spc_pc: Option<u16>,
 }
 
 impl SysBus {
@@ -141,6 +159,8 @@ impl SysBus {
             ppu,
             apu: Apu::new(),
             apu_mclk_base: 0,
+            apu_pending_ipl_cc: false,
+            apu_pending_ipl_transfer_strobe: false,
             dma: Dma::new(),
             hdma: Hdma::new(),
             hdmaen: 0,
@@ -185,6 +205,16 @@ impl SysBus {
             diag_wr_apu: 0,
             #[cfg(feature = "introspect")]
             diag_wr_cc_port0: false,
+            #[cfg(feature = "introspect")]
+            diag_cc_port0_mclk: None,
+            #[cfg(feature = "introspect")]
+            diag_post_cc_port0_writes: 0,
+            #[cfg(feature = "introspect")]
+            diag_first_post_cc_port0_delta_mclk: None,
+            #[cfg(feature = "introspect")]
+            diag_apu_port0_service_count: 0,
+            #[cfg(feature = "introspect")]
+            diag_first_cc_service_spc_pc: None,
         }
     }
 
@@ -319,6 +349,63 @@ impl SysBus {
         }
     }
 
+    fn record_apu_halt(&mut self, halt: Option<crate::apu::spc700::ApuHalt>) {
+        let Some(h) = halt else {
+            return;
+        };
+        use crate::apu::spc700::ApuHalt;
+        match h {
+            ApuHalt::Stop => {
+                let pc = self.apu.cpu.pc;
+                self.fault(crate::fault::Fault::ApuStopped { pc });
+            }
+            ApuHalt::TestTrigger(v) => {
+                let pc = self.apu.cpu.pc;
+                self.fault(crate::fault::Fault::ApuTestTrigger { value: v, pc });
+            }
+            // SLEEP is not a fault; the APU will resume on the next interrupt.
+            ApuHalt::Sleep => {}
+        }
+    }
+
+    fn advance_apu_to(&mut self, target_mclk: u64) {
+        if self.apu_mclk_base >= target_mclk {
+            return;
+        }
+        let delta = target_mclk - self.apu_mclk_base;
+        self.apu_mclk_base = target_mclk;
+        let halt = self.apu.advance_master_cycles(delta);
+        self.record_apu_halt(halt);
+    }
+
+    fn should_capture_ipl_cc(&self, port: u8, value: u8) -> bool {
+        port == 0 && value == 0xCC && (0xFFC0..0xFFE0).contains(&self.apu.cpu.pc)
+    }
+
+    fn apu_in_ipl_transfer_loop(&self) -> bool {
+        (0xFFE0..=0xFFFF).contains(&self.apu.cpu.pc)
+    }
+
+    fn service_pending_ipl_cc(&mut self) {
+        if !self.apu_pending_ipl_cc {
+            return;
+        }
+        self.apu_pending_ipl_cc = false;
+        if !(0xFFC0..0xFFE0).contains(&self.apu.cpu.pc) || self.apu.spc_ports[0] != 0xCC {
+            return;
+        }
+
+        let _cycles = self.apu.step();
+        self.record_apu_halt(self.apu.halted);
+        #[cfg(feature = "introspect")]
+        {
+            self.diag_apu_port0_service_count += 1;
+            if self.diag_first_cc_service_spc_pc.is_none() {
+                self.diag_first_cc_service_spc_pc = Some(self.apu.cpu.pc);
+            }
+        }
+    }
+
     /// Catch the APU up to the current `mclk_total` timestamp.
     ///
     /// Called (a) whenever the CPU accesses $2140–$2143, and (b) at the end
@@ -329,28 +416,7 @@ impl SysBus {
     /// If the catch-up encounters an APU halt condition (SLEEP/STOP/test-register
     /// nonzero write), records the appropriate `Fault` (D9).
     pub fn apu_catch_up(&mut self) {
-        if self.apu_mclk_base >= self.mclk_total {
-            return;
-        }
-        let delta = self.mclk_total - self.apu_mclk_base;
-        self.apu_mclk_base = self.mclk_total;
-
-        let halt = self.apu.advance_master_cycles(delta);
-        if let Some(h) = halt {
-            use crate::apu::spc700::ApuHalt;
-            match h {
-                ApuHalt::Stop => {
-                    let pc = self.apu.cpu.pc;
-                    self.fault(crate::fault::Fault::ApuStopped { pc });
-                }
-                ApuHalt::TestTrigger(v) => {
-                    let pc = self.apu.cpu.pc;
-                    self.fault(crate::fault::Fault::ApuTestTrigger { value: v, pc });
-                }
-                // SLEEP is not a fault; the APU will resume on the next interrupt.
-                ApuHalt::Sleep => {}
-            }
-        }
+        self.advance_apu_to(self.mclk_total);
     }
 
     /// Frame scheduler hook: called by `Core` at the start of every
@@ -821,6 +887,7 @@ impl Bus for SysBus {
                         }
                         let port = (off & 3) as u8;
                         self.apu_catch_up();
+                        self.service_pending_ipl_cc();
                         let v = self.apu.cpu_read_port(port);
                         self.mdr = v;
                         v
@@ -1074,12 +1141,43 @@ impl Bus for SysBus {
                             // $CC is the fixed IPL kick constant (a hardware
                             // protocol value, not game data): note if the main
                             // CPU ever delivers it to port 0.
-                            if port == 0 && value == 0xCC {
-                                self.diag_wr_cc_port0 = true;
+                            if port == 0 {
+                                if !self.diag_wr_cc_port0 && value == 0xCC {
+                                    self.diag_wr_cc_port0 = true;
+                                    self.diag_cc_port0_mclk = Some(self.mclk_total);
+                                } else if self.diag_wr_cc_port0 {
+                                    self.diag_post_cc_port0_writes += 1;
+                                    if self.diag_first_post_cc_port0_delta_mclk.is_none() {
+                                        if let Some(first) = self.diag_cc_port0_mclk {
+                                            self.diag_first_post_cc_port0_delta_mclk =
+                                                Some(self.mclk_total.saturating_sub(first));
+                                        }
+                                    }
+                                }
                             }
                         }
-                        self.apu_catch_up();
+                        let defer_for_transfer_data = self.apu_pending_ipl_transfer_strobe
+                            && port != 0
+                            && self.apu_in_ipl_transfer_loop();
+                        if !defer_for_transfer_data {
+                            self.apu_catch_up();
+                        }
+                        if self.apu_pending_ipl_cc && port == 0 && value != 0xCC {
+                            self.service_pending_ipl_cc();
+                        }
                         self.apu.cpu_write_port(port, value);
+                        if self.should_capture_ipl_cc(port, value) {
+                            self.apu_pending_ipl_cc = true;
+                        } else if self.apu_pending_ipl_cc && port != 0 {
+                            self.service_pending_ipl_cc();
+                        }
+                        if defer_for_transfer_data {
+                            self.apu_pending_ipl_transfer_strobe = false;
+                            self.apu_catch_up();
+                        }
+                        if port == 0 && self.apu_in_ipl_transfer_loop() {
+                            self.apu_pending_ipl_transfer_strobe = true;
+                        }
                     }
 
                     // $2180: WMDATA write.
@@ -1306,6 +1404,24 @@ mod tests {
         Cartridge::from_rom(rom, None).unwrap()
     }
 
+    fn make_test_bus() -> SysBus {
+        let wram: &'static mut [u8; 0x20000] = Box::leak(Box::new([0u8; 0x20000]));
+        let vram: &'static mut [u8; 0x10000] = Box::leak(Box::new([0u8; 0x10000]));
+        SysBus::new(wram, make_test_cart(), Ppu::new(vram))
+    }
+
+    fn advance_apu_to_ipl_poll(bus: &mut SysBus) {
+        bus.add_mclk(21_477);
+        bus.apu_catch_up();
+        assert_eq!(bus.apu.cpu_read_port(0), 0xAA);
+        assert_eq!(bus.apu.cpu_read_port(1), 0xBB);
+        assert!(
+            bus.apu.cpu.pc >= 0xFFC8,
+            "IPL should have reached the port-0 poll, pc={:#06x}",
+            bus.apu.cpu.pc
+        );
+    }
+
     // ---- Mul/div register tests ----
 
     #[test]
@@ -1509,6 +1625,121 @@ mod tests {
     fn mclk_per_line_constant() {
         // Sanity: MCLK_PER_LINE = 1364.
         assert_eq!(MCLK_PER_LINE, 1364);
+    }
+
+    #[test]
+    fn apu_port0_service_preserves_ipl_kick_before_rapid_overwrite() {
+        let mut bus = make_test_bus();
+        advance_apu_to_ipl_poll(&mut bus);
+
+        bus.write(0x002142, 0x00);
+        bus.write(0x002143, 0x02);
+        bus.write(0x002141, 0x01);
+        bus.write(0x002140, 0xCC);
+        bus.write(0x002140, 0x00);
+
+        let mut echo = 0xCC;
+        for _ in 0..512 {
+            echo = bus.read(0x002140);
+            if echo == 0x00 {
+                break;
+            }
+        }
+        assert_eq!(
+            echo, 0x00,
+            "CPU read should observe the transfer-index echo"
+        );
+        assert!(
+            bus.apu.cpu.pc >= 0xFFE0,
+            "SPC should have left poll_cc for the transfer loop, pc={:#06x}",
+            bus.apu.cpu.pc
+        );
+    }
+
+    #[test]
+    fn apu_port0_service_applies_to_mirrors() {
+        let mut bus = make_test_bus();
+        advance_apu_to_ipl_poll(&mut bus);
+
+        bus.write(0x002142, 0x00);
+        bus.write(0x002143, 0x02);
+        bus.write(0x002141, 0x01);
+        bus.write(0x002144, 0xCC);
+
+        assert_eq!(
+            bus.read(0x002140),
+            0xCC,
+            "port-0 mirror write should receive the same IPL service"
+        );
+        assert!(bus.apu.cpu.pc >= 0xFFE0);
+    }
+
+    #[test]
+    fn apu_port0_service_does_not_spend_window_before_ipl_kick() {
+        let mut bus = make_test_bus();
+        advance_apu_to_ipl_poll(&mut bus);
+
+        bus.write(0x002140, 0x00);
+        assert_eq!(
+            bus.apu_mclk_base, bus.mclk_total,
+            "pre-kick port-0 setup writes must not consume future service"
+        );
+
+        bus.write(0x002141, 0x01);
+        bus.write(0x002140, 0xCC);
+        assert_eq!(
+            bus.read(0x002140),
+            0xCC,
+            "the real kick should be preserved until the CPU-visible poll"
+        );
+        assert!(
+            bus.apu_mclk_base <= bus.mclk_total,
+            "pending kick service must not leave artificial APU lead"
+        );
+    }
+
+    #[test]
+    fn apu_port0_service_lead_is_capped_and_not_double_run() {
+        let mut bus = make_test_bus();
+        advance_apu_to_ipl_poll(&mut bus);
+
+        bus.write(0x002141, 0x01);
+        bus.write(0x002140, 0xCC);
+        assert!(
+            bus.apu_mclk_base <= bus.mclk_total,
+            "capturing the pending IPL kick should not run APU ahead"
+        );
+        assert_eq!(bus.read(0x002140), 0xCC);
+        assert!(
+            bus.apu_mclk_base <= bus.mclk_total,
+            "servicing the pending IPL kick should not run APU ahead"
+        );
+
+        let serviced_through = bus.apu_mclk_base;
+        let pc_after_service = bus.apu.cpu.pc;
+        bus.apu_catch_up();
+        assert!(bus.apu_mclk_base >= serviced_through);
+        assert_eq!(bus.apu.cpu.pc, pc_after_service);
+
+        for strobe in 1..=16 {
+            bus.write(0x002140, strobe);
+            assert!(
+                bus.apu_mclk_base <= bus.mclk_total,
+                "transfer strobe {strobe} should not create APU lead"
+            );
+        }
+    }
+
+    #[test]
+    fn apu_halt_during_service_records_fault() {
+        let mut bus = make_test_bus();
+        bus.apu.cpu.pc = 0xFFC8;
+        bus.apu.halted = Some(crate::apu::spc700::ApuHalt::Stop);
+        bus.apu.cpu.halted = bus.apu.halted;
+
+        bus.write(0x002140, 0xCC);
+
+        assert!(matches!(bus.fault, Some(Fault::ApuStopped { pc: 0xFFC8 })));
     }
 
     // ---- HDMA state-machine tests ----

@@ -71,6 +71,17 @@ pub const SPC_DEN: u64 = 21477;
 /// SPC700 cycles per DSP sample.
 pub const DSP_CLOCKS_PER_SAMPLE: u64 = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IplHleState {
+    WaitCommand,
+    ReceiveBlock {
+        ptr: u16,
+        last_signal: u8,
+        expected: u8,
+    },
+    Done,
+}
+
 // ─── M2 Apu struct ───────────────────────────────────────────────────────────
 
 /// Full APU (M2): SPC700 CPU + ARAM + timers + DSP + I/O ports + IPL ROM.
@@ -100,6 +111,47 @@ pub struct Apu {
     dsp_addr: u8,
     /// Halt state, if the SPC700 stopped via SLEEP/STOP/test.
     pub halted: Option<ApuHalt>,
+    ipl_hle: IplHleState,
+    #[cfg(feature = "introspect")]
+    pub diag_spc_port_writes: [u64; 4],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_port_reads: [u64; 4],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_port_last_write_pc: [Option<u16>; 4],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_port_last_read_pc: [Option<u16>; 4],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_io_writes: [u64; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_io_reads: [u64; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_io_last_write_pc: [Option<u16>; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_io_last_read_pc: [Option<u16>; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_recent_pcs: [u16; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_recent_pc_pos: usize,
+    #[cfg(feature = "introspect")]
+    pub diag_spc_step_count: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_spc_first_pcs: [u16; 16],
+    #[cfg(feature = "introspect")]
+    pub diag_spc_first_pc_count: usize,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_first_load_addr: Option<u16>,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_last_load_addr: Option<u16>,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_jump_addr: Option<u16>,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_bytes_stored: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_block_count: u64,
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_block_addrs: [Option<u16>; 8],
+    #[cfg(feature = "introspect")]
+    pub diag_ipl_block_bytes: [u64; 8],
 
     /// SPC-cycle accumulator for the integer timing model.
     /// Holds fractional SPC cycles (0..SPC_DEN).
@@ -148,6 +200,47 @@ impl Apu {
             dsp,
             dsp_addr: 0,
             halted: None,
+            ipl_hle: IplHleState::WaitCommand,
+            #[cfg(feature = "introspect")]
+            diag_spc_port_writes: [0; 4],
+            #[cfg(feature = "introspect")]
+            diag_spc_port_reads: [0; 4],
+            #[cfg(feature = "introspect")]
+            diag_spc_port_last_write_pc: [None; 4],
+            #[cfg(feature = "introspect")]
+            diag_spc_port_last_read_pc: [None; 4],
+            #[cfg(feature = "introspect")]
+            diag_spc_io_writes: [0; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_io_reads: [0; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_io_last_write_pc: [None; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_io_last_read_pc: [None; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_recent_pcs: [0; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_recent_pc_pos: 0,
+            #[cfg(feature = "introspect")]
+            diag_spc_step_count: 0,
+            #[cfg(feature = "introspect")]
+            diag_spc_first_pcs: [0; 16],
+            #[cfg(feature = "introspect")]
+            diag_spc_first_pc_count: 0,
+            #[cfg(feature = "introspect")]
+            diag_ipl_first_load_addr: None,
+            #[cfg(feature = "introspect")]
+            diag_ipl_last_load_addr: None,
+            #[cfg(feature = "introspect")]
+            diag_ipl_jump_addr: None,
+            #[cfg(feature = "introspect")]
+            diag_ipl_bytes_stored: 0,
+            #[cfg(feature = "introspect")]
+            diag_ipl_block_count: 0,
+            #[cfg(feature = "introspect")]
+            diag_ipl_block_addrs: [None; 8],
+            #[cfg(feature = "introspect")]
+            diag_ipl_block_bytes: [0; 8],
             spc_accum: 0,
             dsp_cycle_accum: 0,
         }
@@ -251,14 +344,10 @@ impl Apu {
                 if value & 0x10 != 0 {
                     self.spc_ports[0] = 0;
                     self.spc_ports[1] = 0;
-                    self.cpu_ports[0] = 0;
-                    self.cpu_ports[1] = 0;
                 }
                 if value & 0x20 != 0 {
                     self.spc_ports[2] = 0;
                     self.spc_ports[3] = 0;
-                    self.cpu_ports[2] = 0;
-                    self.cpu_ports[3] = 0;
                 }
                 // Bit 7: IPL ROM enable (simply store it)
                 self.ctrl = value;
@@ -308,6 +397,182 @@ impl Apu {
         self.spc_ports[idx as usize & 3] = value;
     }
 
+    #[inline]
+    fn should_run_ipl_hle(&self) -> bool {
+        !self.cpu.corpus_mode
+            && self.ipl_enabled()
+            && self.cpu.pc >= 0xFFC0
+            && self.ipl_hle != IplHleState::Done
+    }
+
+    fn ipl_command_addr(&self) -> u16 {
+        (self.spc_ports[2] as u16) | ((self.spc_ports[3] as u16) << 8)
+    }
+
+    fn set_ipl_pointer(&mut self, ptr: u16) {
+        self.aram.write(0x0000, ptr as u8);
+        self.aram.write(0x0001, (ptr >> 8) as u8);
+    }
+
+    fn finish_ipl_jump(&mut self, addr: u16, command: u8) {
+        self.set_ipl_pointer(addr);
+        self.cpu.a = command;
+        self.cpu.x = command;
+        self.cpu.y = command;
+        self.cpu.psw = (self.cpu.psw & !(spc700::psw::N | spc700::psw::Z))
+            | if command == 0 {
+                spc700::psw::Z
+            } else {
+                command & spc700::psw::N
+            };
+        self.cpu.pc = addr;
+        self.ipl_hle = IplHleState::Done;
+    }
+
+    #[cfg(feature = "introspect")]
+    fn record_ipl_block_start(&mut self, addr: u16) {
+        let idx = self.diag_ipl_block_count as usize;
+        if idx < self.diag_ipl_block_addrs.len() {
+            self.diag_ipl_block_addrs[idx] = Some(addr);
+        }
+        self.diag_ipl_block_count += 1;
+    }
+
+    #[cfg(feature = "introspect")]
+    fn record_ipl_byte_stored(&mut self) {
+        self.diag_ipl_bytes_stored += 1;
+        let idx = self.diag_ipl_block_count.saturating_sub(1) as usize;
+        if idx < self.diag_ipl_block_bytes.len() {
+            self.diag_ipl_block_bytes[idx] += 1;
+        }
+    }
+
+    /// Clean-room implementation of the public SPC IPL upload protocol.
+    ///
+    /// The byte ROM remains available for corpus tests, but production uses this
+    /// observable state machine so commercial uploaders get zero-based byte
+    /// indices, multi-block termination, and command-0 jump semantics.
+    fn step_ipl_hle(&mut self) -> u32 {
+        match self.ipl_hle {
+            IplHleState::WaitCommand => {
+                self.cpu.pc = 0xFFCC;
+                if self.spc_ports[0] != 0xCC {
+                    return 7;
+                }
+
+                let command = self.spc_ports[1];
+                let addr = self.ipl_command_addr();
+                self.cpu_ports[0] = 0xCC;
+                #[cfg(feature = "introspect")]
+                {
+                    self.diag_spc_port_writes[0] += 1;
+                    self.diag_spc_port_last_write_pc[0] = Some(self.cpu.pc);
+                    self.diag_spc_io_writes[4] += 1;
+                    self.diag_spc_io_last_write_pc[4] = Some(self.cpu.pc);
+                }
+                if command == 0 {
+                    #[cfg(feature = "introspect")]
+                    {
+                        self.diag_ipl_jump_addr = Some(addr);
+                    }
+                    self.finish_ipl_jump(addr, command);
+                } else {
+                    #[cfg(feature = "introspect")]
+                    {
+                        if self.diag_ipl_first_load_addr.is_none() {
+                            self.diag_ipl_first_load_addr = Some(addr);
+                        }
+                        self.diag_ipl_last_load_addr = Some(addr);
+                        self.record_ipl_block_start(addr);
+                    }
+                    self.set_ipl_pointer(addr);
+                    self.cpu.y = 0;
+                    self.cpu.pc = 0xFFE0;
+                    self.ipl_hle = IplHleState::ReceiveBlock {
+                        ptr: addr,
+                        last_signal: 0xCC,
+                        expected: 0,
+                    };
+                }
+                36
+            }
+            IplHleState::ReceiveBlock {
+                mut ptr,
+                mut last_signal,
+                mut expected,
+            } => {
+                self.cpu.pc = 0xFFE2;
+                let signal = self.spc_ports[0];
+                if signal == last_signal {
+                    return 7;
+                }
+
+                if signal == expected {
+                    let data = self.spc_ports[1];
+                    self.mem_write(ptr, data);
+                    #[cfg(feature = "introspect")]
+                    {
+                        self.record_ipl_byte_stored();
+                    }
+                    ptr = ptr.wrapping_add(1);
+                    self.set_ipl_pointer(ptr);
+                    self.cpu_ports[0] = signal;
+                    #[cfg(feature = "introspect")]
+                    {
+                        self.diag_spc_port_writes[0] += 1;
+                        self.diag_spc_port_last_write_pc[0] = Some(self.cpu.pc);
+                        self.diag_spc_io_writes[4] += 1;
+                        self.diag_spc_io_last_write_pc[4] = Some(self.cpu.pc);
+                    }
+                    last_signal = signal;
+                    expected = expected.wrapping_add(1);
+                    self.cpu.y = expected;
+                    self.cpu.pc = 0xFFE0;
+                    self.ipl_hle = IplHleState::ReceiveBlock {
+                        ptr,
+                        last_signal,
+                        expected,
+                    };
+                    return 18;
+                }
+
+                let command = self.spc_ports[1];
+                let addr = self.ipl_command_addr();
+                self.cpu_ports[0] = signal;
+                #[cfg(feature = "introspect")]
+                {
+                    self.diag_spc_port_writes[0] += 1;
+                    self.diag_spc_port_last_write_pc[0] = Some(self.cpu.pc);
+                    self.diag_spc_io_writes[4] += 1;
+                    self.diag_spc_io_last_write_pc[4] = Some(self.cpu.pc);
+                }
+                if command == 0 {
+                    #[cfg(feature = "introspect")]
+                    {
+                        self.diag_ipl_jump_addr = Some(addr);
+                    }
+                    self.finish_ipl_jump(addr, command);
+                } else {
+                    #[cfg(feature = "introspect")]
+                    {
+                        self.diag_ipl_last_load_addr = Some(addr);
+                        self.record_ipl_block_start(addr);
+                    }
+                    self.set_ipl_pointer(addr);
+                    self.cpu.y = 0;
+                    self.cpu.pc = 0xFFE0;
+                    self.ipl_hle = IplHleState::ReceiveBlock {
+                        ptr: addr,
+                        last_signal: signal,
+                        expected: 0,
+                    };
+                }
+                24
+            }
+            IplHleState::Done => 0,
+        }
+    }
+
     // ---- Stepping ----
 
     /// Step the SPC700 core once (corpus/test mode: caller passes a flat
@@ -327,9 +592,23 @@ impl Apu {
         if self.halted.is_some() {
             return 0;
         }
+        if self.should_run_ipl_hle() {
+            return self.step_ipl_hle();
+        }
 
         // Fetch opcode with I/O overlay applied.
         let pc = self.cpu.pc;
+        #[cfg(feature = "introspect")]
+        {
+            let idx = self.diag_spc_recent_pc_pos & (self.diag_spc_recent_pcs.len() - 1);
+            self.diag_spc_recent_pcs[idx] = pc;
+            self.diag_spc_recent_pc_pos = self.diag_spc_recent_pc_pos.wrapping_add(1);
+            self.diag_spc_step_count = self.diag_spc_step_count.wrapping_add(1);
+            if self.diag_spc_first_pc_count < self.diag_spc_first_pcs.len() {
+                self.diag_spc_first_pcs[self.diag_spc_first_pc_count] = pc;
+                self.diag_spc_first_pc_count += 1;
+            }
+        }
         let opcode = self.mem_read(pc);
         self.cpu.pc = pc.wrapping_add(1);
 
@@ -383,10 +662,24 @@ impl Apu {
         // Sync-out: ports first ($F4-$F7 are bidirectional — restore the
         // saved SPC output unless this instruction actually wrote the port).
         let io_mask = self.cpu.io_written_mask;
+        #[cfg(feature = "introspect")]
+        {
+            for reg in 0..16 {
+                if io_mask & (1 << reg) != 0 {
+                    self.diag_spc_io_writes[reg] += 1;
+                    self.diag_spc_io_last_write_pc[reg] = Some(pc);
+                }
+            }
+        }
         for (i, &saved) in spc_out_save.iter().enumerate() {
             let port_bit = 1u16 << (4 + i); // bit 4 = $F4, bit 5 = $F5, …
             if io_mask & port_bit != 0 {
                 self.cpu_ports[i] = self.aram.read(0xF4 + i as u16);
+                #[cfg(feature = "introspect")]
+                {
+                    self.diag_spc_port_writes[i] += 1;
+                    self.diag_spc_port_last_write_pc[i] = Some(pc);
+                }
             } else {
                 self.cpu_ports[i] = saved;
             }
@@ -432,6 +725,21 @@ impl Apu {
 
         // Read side effects: timer outputs clear on read.
         let read_mask = self.cpu.io_read_mask;
+        #[cfg(feature = "introspect")]
+        {
+            for reg in 0..16 {
+                if read_mask & (1 << reg) != 0 {
+                    self.diag_spc_io_reads[reg] += 1;
+                    self.diag_spc_io_last_read_pc[reg] = Some(pc);
+                }
+            }
+            for i in 0..4 {
+                if read_mask & (1 << (0x4 + i)) != 0 {
+                    self.diag_spc_port_reads[i] += 1;
+                    self.diag_spc_port_last_read_pc[i] = Some(pc);
+                }
+            }
+        }
         if read_mask & (1 << 0xD) != 0 {
             self.timers[0].clear_output();
         }
@@ -525,8 +833,14 @@ mod tests {
         apu.mem_write(0x00F1, 0x10);
         assert_eq!(apu.spc_ports[0], 0);
         assert_eq!(apu.spc_ports[1], 0);
-        assert_eq!(apu.cpu_ports[0], 0);
-        assert_eq!(apu.cpu_ports[1], 0);
+        assert_eq!(
+            apu.cpu_ports[0], 0x11,
+            "SPC->CPU output port 0 is not cleared by PC10"
+        );
+        assert_eq!(
+            apu.cpu_ports[1], 0x22,
+            "SPC->CPU output port 1 is not cleared by PC10"
+        );
         // Ports 2/3 should be unaffected.
         assert_eq!(apu.spc_ports[2], 0);
     }
@@ -536,9 +850,19 @@ mod tests {
         let mut apu = Apu::new();
         apu.spc_ports[2] = 0xCC;
         apu.spc_ports[3] = 0xDD;
+        apu.cpu_ports[2] = 0x11;
+        apu.cpu_ports[3] = 0x22;
         apu.mem_write(0x00F1, 0x20);
         assert_eq!(apu.spc_ports[2], 0);
         assert_eq!(apu.spc_ports[3], 0);
+        assert_eq!(
+            apu.cpu_ports[2], 0x11,
+            "SPC->CPU output port 2 is not cleared by PC32"
+        );
+        assert_eq!(
+            apu.cpu_ports[3], 0x22,
+            "SPC->CPU output port 3 is not cleared by PC32"
+        );
     }
 
     #[test]
@@ -664,6 +988,40 @@ mod tests {
             0xCC,
             "IPL should have echoed $CC on port 0"
         );
+    }
+
+    #[test]
+    fn ipl_production_zero_based_upload_and_jump() {
+        let mut apu = Apu::new();
+        apu.advance_master_cycles(21_477);
+
+        apu.cpu_write_port(2, 0x00);
+        apu.cpu_write_port(3, 0x02);
+        apu.cpu_write_port(1, 0x01);
+        apu.cpu_write_port(0, 0xCC);
+        apu.advance_master_cycles(4096);
+        assert_eq!(apu.cpu_read_port(0), 0xCC);
+
+        apu.cpu_write_port(1, 0x42);
+        apu.cpu_write_port(0, 0x00);
+        apu.advance_master_cycles(4096);
+        assert_eq!(apu.cpu_read_port(0), 0x00);
+        assert_eq!(apu.aram.read(0x0200), 0x42);
+
+        apu.cpu_write_port(2, 0x00);
+        apu.cpu_write_port(3, 0x02);
+        apu.cpu_write_port(1, 0x00);
+        apu.cpu_write_port(0, 0x02);
+        apu.advance_master_cycles(4096);
+        assert!(
+            (0x0200..0xFFC0).contains(&apu.cpu.pc),
+            "SPC should have jumped into uploaded program space, pc={:#06x}",
+            apu.cpu.pc
+        );
+        assert_eq!(apu.cpu.a, 0);
+        assert_eq!(apu.cpu.x, 0);
+        assert_eq!(apu.cpu.y, 0);
+        assert_ne!(apu.cpu.psw & spc700::psw::Z, 0);
     }
 
     // ---- IPL upload protocol round-trip ----

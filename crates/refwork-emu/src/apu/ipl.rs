@@ -1,6 +1,12 @@
-//! Clean-room 64-byte IPL boot ROM for the SPC700 audio processor.
+//! Clean-room 64-byte IPL boot shim for SPC700 corpus tests.
 //!
-//! ## Protocol (publicly documented)
+//! Production execution uses `Apu::step_ipl_hle` for the public SPC IPL upload
+//! protocol. This compact byte program is retained for flat-memory SPC700 corpus
+//! tests and for preserving the IPL ROM overlay shape at `$FFC0-$FFFF`; it uses
+//! a deliberately small upload protocol instead of trying to reproduce the
+//! manufacturer ROM bytes.
+//!
+//! ## Compact test protocol
 //!
 //! 1. **Ready**: APU presents `$AA`/`$BB` on ports 0/1. Host polls until it
 //!    sees the signature, then writes `$CC` to port 0 to begin transfer.

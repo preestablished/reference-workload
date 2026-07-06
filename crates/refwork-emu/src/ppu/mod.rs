@@ -307,6 +307,21 @@ pub struct Ppu {
     sub_win_mask: Box<[[u8; 256]; 5]>,
     /// Combined color-math window mask (for CGWSEL bits [7:6]).
     math_win_mask: Box<[u8; 256]>,
+
+    #[cfg(feature = "introspect")]
+    diag_frame_final_nonzero: u64,
+    #[cfg(feature = "introspect")]
+    diag_frame_main_nonbackdrop: u64,
+    #[cfg(feature = "introspect")]
+    diag_frame_main_color_nonzero: u64,
+    #[cfg(feature = "introspect")]
+    diag_frame_main_clipped: u64,
+    #[cfg(feature = "introspect")]
+    diag_frame_math_applied: u64,
+    #[cfg(feature = "introspect")]
+    diag_frame_mode1_bg_opaque: [u64; 3],
+    #[cfg(feature = "introspect")]
+    diag_frame_mode1_selected: [u64; 5],
 }
 
 impl Ppu {
@@ -395,6 +410,21 @@ impl Ppu {
             main_win_mask: Box::new([[0u8; 256]; 5]),
             sub_win_mask: Box::new([[0u8; 256]; 5]),
             math_win_mask: Box::new([0u8; 256]),
+
+            #[cfg(feature = "introspect")]
+            diag_frame_final_nonzero: 0,
+            #[cfg(feature = "introspect")]
+            diag_frame_main_nonbackdrop: 0,
+            #[cfg(feature = "introspect")]
+            diag_frame_main_color_nonzero: 0,
+            #[cfg(feature = "introspect")]
+            diag_frame_main_clipped: 0,
+            #[cfg(feature = "introspect")]
+            diag_frame_math_applied: 0,
+            #[cfg(feature = "introspect")]
+            diag_frame_mode1_bg_opaque: [0; 3],
+            #[cfg(feature = "introspect")]
+            diag_frame_mode1_selected: [0; 5],
         }
     }
 
@@ -483,6 +513,33 @@ impl Ppu {
         (self.force_blank, self.brightness, self.bg_mode, self.tm)
     }
 
+    /// Additional display-compositor register snapshot for diagnostics.
+    #[cfg(feature = "introspect")]
+    pub fn diag_compositor(&self) -> (u8, u8, u8, u8, u16) {
+        (
+            self.ts,
+            self.tmw,
+            self.cgwsel,
+            self.cgadsub,
+            self.coldata_color,
+        )
+    }
+
+    /// Per-frame aggregate render counters. These expose only counts of
+    /// renderer decisions, never pixels or memory contents.
+    #[cfg(feature = "introspect")]
+    pub fn diag_render_counts(&self) -> (u64, u64, u64, u64, u64, [u64; 3], [u64; 5]) {
+        (
+            self.diag_frame_final_nonzero,
+            self.diag_frame_main_nonbackdrop,
+            self.diag_frame_main_color_nonzero,
+            self.diag_frame_main_clipped,
+            self.diag_frame_math_applied,
+            self.diag_frame_mode1_bg_opaque,
+            self.diag_frame_mode1_selected,
+        )
+    }
+
     /// Count of non-zero bytes in CGRAM / VRAM / OAM — a "has any data landed"
     /// signal that never reveals the data itself.
     #[cfg(feature = "introspect")]
@@ -491,6 +548,27 @@ impl Ppu {
         let vr = self.vram.iter().filter(|&&b| b != 0).count();
         let oa = self.oam.iter().filter(|&&b| b != 0).count();
         (cg, vr, oa)
+    }
+
+    /// Count distinct non-zero BGR555 colors present in CGRAM. This is a
+    /// structural rendering signal, not a payload dump.
+    #[cfg(feature = "introspect")]
+    pub fn diag_distinct_cgram_colors(&self) -> usize {
+        let mut seen = [0u64; 512];
+        let mut count = 0usize;
+        for idx in 0..256 {
+            let color = read_cgram_color(&self.cgram, idx) & 0x7FFF;
+            if color == 0 {
+                continue;
+            }
+            let word = (color / 64) as usize;
+            let bit = 1u64 << (color & 63);
+            if seen[word] & bit == 0 {
+                seen[word] |= bit;
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn write(&mut self, reg: u8, value: u8) -> Option<Fault> {
@@ -727,7 +805,6 @@ impl Ppu {
             0x2C => self.tm = value & 0x1F,
 
             // ── $212D TS (sub-screen layer enables) ────────────
-            // Stored but ignored in M1 — no subscreen blending implemented.
             0x2D => self.ts = value & 0x1F,
 
             // ── $212E TMW (main-screen window mask enable) ─────
@@ -738,7 +815,7 @@ impl Ppu {
             // ── $2130 CGWSEL ───────────────────────────────────
             // Bits [7:6]: color-math window clip region (0=never,1=in-win,2=out-win,3=always)
             // Bits [5:4]: color-math enabled region (same encoding)
-            // Bit 1: sub-screen black = 1, direct color mode (indirect not implemented → fault)
+            // Bit 1: sub-screen BG/OBJ enable (0=fixed color only, 1=sub-screen layers)
             // Bit 0: direct color mode — fault (not implemented; indirect-color corner)
             0x30 => {
                 self.cgwsel = value;
@@ -746,7 +823,6 @@ impl Ppu {
                 if value & 0x01 != 0 {
                     return Some(Fault::UnimplementedPpuFeature { reg, value });
                 }
-                // Sub-screen black (bit 1) is handled in the compositor.
             }
             // ── $2131 CGADSUB ──────────────────────────────────
             // Bit 7: add (0) / subtract (1); bit 6: half; bits [5:0]: layer enables
@@ -1172,7 +1248,9 @@ impl Ppu {
         //   0=never clip, 1=clip inside windows, 2=clip outside windows, 3=always
         // CGWSEL bits [5:4]: color math enable region.
         //   0=always, 1=inside windows, 2=outside windows, 3=never
-        // CGWSEL bit 1: sub-screen black (force sub to black when disabled)
+        // CGWSEL bit 1: sub-screen BG/OBJ enable. When clear, the color-math
+        // operand is the fixed color from COLDATA; when set, sub-screen pixels
+        // are used and transparent sub pixels fall back to COLDATA.
 
         let cgwsel = self.cgwsel;
         let cgadsub = self.cgadsub;
@@ -1206,26 +1284,46 @@ impl Ppu {
             cgram_color_components(&self.cgram, main_cgram)
         };
 
+        #[cfg(feature = "introspect")]
+        {
+            if !main_is_backdrop {
+                self.diag_frame_main_nonbackdrop += 1;
+            }
+            if clip_main {
+                self.diag_frame_main_clipped += 1;
+            }
+            if !main_is_backdrop && !clip_main && (main_r | main_g | main_b) != 0 {
+                self.diag_frame_main_color_nonzero += 1;
+            }
+            if do_math {
+                self.diag_frame_math_applied += 1;
+            }
+        }
+
         let final_color = if do_math && !main_is_backdrop {
             // Determine sub-screen color operand.
-            // CGWSEL bit 1: sub-screen black → use fixed black (0,0,0) as operand.
-            let sub_black = (cgwsel & 0x02) != 0;
-            let (sub_r, sub_g, sub_b) = if sub_black || sub_cgram == 0 {
-                // Use fixed-color when sub is backdrop or sub-screen black.
-                // CGADSUB bit 7: 0=add(use fixed or subscreen), 1=subtract.
-                // When sub_black=0 and sub_cgram=0: use fixed color register.
-                cgram_color_components_fixed(self.coldata_color)
-            } else {
+            let use_subscreen = (cgwsel & 0x02) != 0;
+            let sub_is_transparent = sub_cgram == 0;
+            let (sub_r, sub_g, sub_b) = if use_subscreen && !sub_is_transparent {
                 cgram_color_components(&self.cgram, sub_cgram)
+            } else {
+                cgram_color_components_fixed(self.coldata_color)
             };
 
             let add = (cgadsub & 0x80) == 0; // bit7=0 → add, bit7=1 → sub
-            let half = (cgadsub & 0x40) != 0;
+            let half = (cgadsub & 0x40) != 0 && !(use_subscreen && sub_is_transparent);
             color_math_op(main_r, main_g, main_b, sub_r, sub_g, sub_b, add, half)
         } else {
             // No math: use raw main color
             (main_r as u16) | ((main_g as u16) << 5) | ((main_b as u16) << 10)
         };
+
+        #[cfg(feature = "introspect")]
+        {
+            if final_color != 0 {
+                self.diag_frame_final_nonzero += 1;
+            }
+        }
 
         let pixel = bgr555_to_xrgb8888(final_color, self.brightness);
         let off = row_start + x * 4;
@@ -1434,6 +1532,11 @@ impl Ppu {
                 ts,
                 self.mosaic_line(line - 1, 0),
             );
+            #[cfg(feature = "introspect")]
+            {
+                self.diag_frame_mode1_bg_opaque[0] +=
+                    bg1.iter().filter(|p| !p.is_transparent()).count() as u64;
+            }
         }
         if self.tm & 0x02 != 0 {
             let ts = if self.bg_tile_size[1] { 16 } else { 8 };
@@ -1448,6 +1551,11 @@ impl Ppu {
                 ts,
                 self.mosaic_line(line - 1, 1),
             );
+            #[cfg(feature = "introspect")]
+            {
+                self.diag_frame_mode1_bg_opaque[1] +=
+                    bg2.iter().filter(|p| !p.is_transparent()).count() as u64;
+            }
         }
         if self.tm & 0x04 != 0 {
             let ts = if self.bg_tile_size[2] { 16 } else { 8 };
@@ -1462,6 +1570,11 @@ impl Ppu {
                 ts,
                 self.mosaic_line(line - 1, 2),
             );
+            #[cfg(feature = "introspect")]
+            {
+                self.diag_frame_mode1_bg_opaque[2] +=
+                    bg3.iter().filter(|p| !p.is_transparent()).count() as u64;
+            }
         }
         if self.tm & 0x10 != 0 {
             render_sprite_line(self.vram, &self.oam, self.obsel, &mut spr_pixels, line);
@@ -1484,42 +1597,51 @@ impl Ppu {
             let b3_vis = self.main_visible(bx3.is_transparent(), 2, x);
             let sp_vis = self.main_visible(sp.is_transparent(), 4, x);
 
-            let (main_cgram, main_is_backdrop, math_en) = 'pick: {
+            let (main_cgram, main_is_backdrop, math_en, source) = 'pick: {
                 if bg3_prio && b3_vis && bx3.priority {
-                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0);
+                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0, 2);
                 }
                 if sp_vis && sp.priority == 3 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, 3);
                 }
                 if b1_vis && bx1.priority {
-                    break 'pick (bx1.cgram_idx as usize, false, cgadsub & 0x01 != 0);
+                    break 'pick (bx1.cgram_idx as usize, false, cgadsub & 0x01 != 0, 0);
                 }
                 if b2_vis && bx2.priority {
-                    break 'pick (bx2.cgram_idx as usize, false, cgadsub & 0x02 != 0);
+                    break 'pick (bx2.cgram_idx as usize, false, cgadsub & 0x02 != 0, 1);
                 }
                 if sp_vis && sp.priority == 2 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, 3);
                 }
                 if b1_vis && !bx1.priority {
-                    break 'pick (bx1.cgram_idx as usize, false, cgadsub & 0x01 != 0);
+                    break 'pick (bx1.cgram_idx as usize, false, cgadsub & 0x01 != 0, 0);
                 }
                 if b2_vis && !bx2.priority {
-                    break 'pick (bx2.cgram_idx as usize, false, cgadsub & 0x02 != 0);
+                    break 'pick (bx2.cgram_idx as usize, false, cgadsub & 0x02 != 0, 1);
                 }
                 if sp_vis && sp.priority == 1 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, 3);
                 }
                 if !bg3_prio && b3_vis && bx3.priority {
-                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0);
+                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0, 2);
                 }
                 if sp_vis && sp.priority == 0 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, 3);
                 }
                 if b3_vis && !bx3.priority {
-                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0);
+                    break 'pick (bx3.cgram_idx as usize, false, cgadsub & 0x04 != 0, 2);
                 }
-                (0usize, true, cgadsub & 0x20 != 0) // backdrop
+                (0usize, true, cgadsub & 0x20 != 0, 4) // backdrop
             };
+
+            #[cfg(feature = "introspect")]
+            {
+                self.diag_frame_mode1_selected[source] += 1;
+            }
+            #[cfg(not(feature = "introspect"))]
+            {
+                let _ = source;
+            }
 
             let sub_cgram = self.sub_pixels[x] as usize;
             self.composite_pixel(
@@ -1985,6 +2107,16 @@ impl Ppu {
         // Reset OPHCT/OPVCT read toggles at frame start.
         self.ophct_read_high = false;
         self.opvct_read_high = false;
+        #[cfg(feature = "introspect")]
+        {
+            self.diag_frame_final_nonzero = 0;
+            self.diag_frame_main_nonbackdrop = 0;
+            self.diag_frame_main_color_nonzero = 0;
+            self.diag_frame_main_clipped = 0;
+            self.diag_frame_math_applied = 0;
+            self.diag_frame_mode1_bg_opaque = [0; 3];
+            self.diag_frame_mode1_selected = [0; 5];
+        }
     }
 
     /// Update the current scanline number (used by $2137 SLHV latch).
@@ -2734,6 +2866,35 @@ mod ppu_tests {
         // Subtract+half floors at 0: 10 - 31 = -21, half → -10, clamp → 0.
         let result = color_math_op(10, 0, 0, 31, 0, 0, false, true);
         assert_eq!(result & 0x1F, 0, "sub+half floors at 0");
+    }
+
+    /// CGWSEL bit 1 clear selects fixed-color math, not the sub-screen layer.
+    #[test]
+    fn ppu_cgwsel_fixed_color_ignores_enabled_subscreen_layer() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none());
+        assert!(p.write(0x05, 0x00).is_none());
+        assert!(p.write(0x07, 0x00).is_none());
+        assert!(p.write(0x0B, 0x01).is_none());
+        assert!(p.write(0x2C, 0x01).is_none());
+        assert!(p.write(0x2D, 0x01).is_none());
+        assert!(p.write(0x30, 0x00).is_none());
+        assert!(p.write(0x31, 0x81).is_none()); // subtract, BG1 participates
+
+        p.vram[0] = 0x00;
+        p.vram[1] = 0x00;
+        p.vram[0x2000] = 0xFF;
+        p.vram[0x2001] = 0x00;
+
+        assert!(p.write(0x21, 1).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+
+        p.render_scanline(1);
+
+        assert_eq!(p.back[0], 0, "blue");
+        assert_eq!(p.back[1], 0, "green");
+        assert_eq!(p.back[2], 255, "red");
     }
 
     /// COLDATA component write: each plane independently settable.

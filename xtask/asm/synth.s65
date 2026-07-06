@@ -969,11 +969,11 @@ spc_prog_end:
 ; Protocol:
 ;   1. Wait for $AA on APUIO0, $BB on APUIO1 (APU power-on ready signature).
 ;   2. Write load address $0200 to APUIO2/APUIO3.
-;   3. Write $CC to APUIO0 to start transfer; wait for APU to echo $CC back.
-;   4. Transfer loop: for each byte (index 1..177):
+;   3. Write a nonzero command to APUIO1 and $CC to APUIO0; wait for echo.
+;   4. Transfer loop: for each byte (index 0..176):
 ;        write byte to APUIO1, write index to APUIO0, wait for echo on APUIO0.
-;   5. Kick: write strobe 0 to APUIO0.
-;        APU sees strobe 0 (out-of-band sentinel) → jumps to load address $0200.
+;   5. Jump: write command 0 to APUIO1, execution address to APUIO2/APUIO3,
+;        then write a port-0 value at least 2 higher than the previous index.
 ;
 ; Registers on entry: 8-bit A, 16-bit X (as set in reset handler via REP #$30).
 ; Registers on exit:  A, X clobbered.  Y preserved (not used).
@@ -1001,7 +1001,9 @@ au_wait_bb:
     STA APUIO2
     LDA #$02
     STA APUIO3
-    ; ── Initiate transfer: write $CC to port 0 ──
+    ; ── Initiate transfer: nonzero command on port 1, $CC on port 0 ──
+    LDA #$01
+    STA APUIO1
     LDA #$CC
     STA APUIO0
     ; ── Wait for APU to acknowledge with $CC on port 0 ──
@@ -1009,10 +1011,10 @@ au_wait_ack:
     LDA APUIO0
     CMP #$CC
     BNE au_wait_ack
-    ; ── Transfer loop: send 177 bytes with monotonically increasing strobes ──
-    ; $40 = strobe byte (1-based, starts at $01)
+    ; ── Transfer loop: send 177 bytes with zero-based indices ──
+    ; $40 = strobe byte (zero-based, starts at $00)
     ; X   = byte index into spc_prog_start (0-based, 0..176)
-    LDA #$01
+    LDA #$00
     STA $40
     LDX #$00
 au_xfer_loop:
@@ -1029,11 +1031,18 @@ au_xfer_wait:
     INC $40            ; next strobe
     JMP au_xfer_loop
 au_xfer_kick:
-    ; Kick: strobe 0 on port 0 signals APU to jump to load address $0200.
-    ; Strobe 0 is the out-of-band kick sentinel; normal transfer strobes are
-    ; 1-based, so 0 is unambiguous regardless of the port-1 data value.
+    ; Jump command: command 0 on port 1, address on ports 2/3, and a port-0
+    ; value at least 2 higher than the previous data index.
     LDA #$00
-    STA APUIO0      ; strobe 0 = kick signal
+    STA APUIO2
+    LDA #$02
+    STA APUIO3
+    LDA #$00
+    STA APUIO1
+    LDA $40
+    CLC
+    ADC #$01
+    STA APUIO0
     RTS
 
 ; ─── ROM header ──────────────────────────────────────────────────────────────
