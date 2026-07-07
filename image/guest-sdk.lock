@@ -11,7 +11,10 @@ kind = "refwork-guest-sdk-lock"
 [guest_sdk]
 status = "pinned-rev"
 repo = "guest-sdk"
-rev = "487ff564fe2b67dc2aef59aa90d31a74fc86c028"
+# 2026-07-07 bump 487ff564 -> acb1d3e8: delta is guest-sdk request docs +
+# their own VM tests only (no detguest-agent source change); keeps the
+# exact-rev verify green against the sibling's current HEAD.
+rev = "acb1d3e8514a35eff66e94696d3a497b21328323"
 agent = "detguest-agent"
 agent_build = "cargo build --locked --release --target x86_64-unknown-linux-musl -p detguest-agent"
 
