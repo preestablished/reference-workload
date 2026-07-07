@@ -654,3 +654,69 @@ operator-confirmed 2026-07-02. Remaining vm-gates work is unchanged:
 the real-worker legs still wait on the coordinated boot/READY step.
 Open Items #1 and #3 remain open as written; #2 is superseded by the
 later dated sections above.
+
+### 2026-07-07 — Package-04 Rebuild At Current Main (refwork-gp9, build half)
+
+Recorded by Claude (coding agent), `main` at `7b0c7b2`, per plan
+`.agents/plans/phase3-m4-first-room-gate-and-m5-stamp/` step 02.
+
+Preflight (step 01): the staged-fixture mock had stopped compiling
+against the sibling `dh-proto`'s new `GetWorkerInfoResponse.build_profile`
+field; fixed at `34f034d`. `cargo test --workspace` green afterward,
+including the 6 `vm_first_room` and 4 `vm_suite` staged-fixture tests.
+
+Image inputs at this rebuild:
+
+- `image/guest-sdk.lock` bumped `487ff564` → `acb1d3e8` (`7b0c7b2`) — the
+  delta is guest-sdk request docs and their own VM tests only, no
+  `detguest-agent` source change; the bump keeps xtask's exact-rev
+  sibling verify green against the sibling's current HEAD.
+- Kernel unchanged: hash-pinned 6.12.93 artifact, bzImage BLAKE3
+  `595466463a37efac6822ffccf3e61d0a2230e7d223a94c0bce5eb78b2f43bee9`.
+- This is the first rebuild carrying the emulator accuracy chain
+  (`84933d9`, `8eff8d9`, `2ea42ad`) and the READY/boot fixes verified on
+  the real worker 2026-07-05
+  (`.agents/requests/phase3-ready-not-emitted-real-worker/04-verification.md`).
+
+Clean-root double-build at `7b0c7b2`: **OK, byte-identical**, canonical
+artifact record:
+
+| Artifact | BLAKE3 (clean-root) |
+|---|---|
+| `bzImage` (1,209,344 bytes) | `595466463a37efac6822ffccf3e61d0a2230e7d223a94c0bce5eb78b2f43bee9` |
+| `initramfs.cpio.zst` (490,922 bytes) | `67f1ed56769cd3f05b294c18068fb0c75d547da03ec2d6bc34bc127dd04c019b` |
+| `workload-image.yaml` (1,605 bytes) | `af14040444db6f5e182f52193d71abdbbfb8085673b45da76c21dc541ac3dceb` |
+
+`dist/workload-image-0.1.0/` now holds the clean-root artifacts (the
+2026-07-02 "in-tree vs clean-root harness dep-path metadata" wrinkle
+still exists; handoff continues to come from the clean-root builder).
+`determinism.unstamped.yaml` regenerated at `git_rev: 7b0c7b2` — the
+green stamp remains package-06's (`refwork-d7t.14`).
+
+Lab staging: the decompressed initramfs is staged for the M9 handoff as
+`~/.cache/dh-m9/reference-workload/initramfs.m4-regen-7b0c7b2.cpio`
+(BLAKE3 `36f50484f9fc1a8cfe6dd024dccac0a0…`; the existing hard-linked
+`initramfs.cpio` was left untouched). The cached `bzImage` already equals
+the pinned kernel artifact.
+
+CI (step 05, partial): `vm-gates.yaml` gained dispatch-gated real-worker
+`vm-first-room`/`vm-suite` legs (`3ddf34f`) reusing the smoke leg's
+scratch-worker recipe; they take the lab artifacts (image-cache,
+snapshot ref, snapstore UDS, padlogs, real map/expect) as
+`workflow_dispatch` inputs and skip when absent.
+
+Remaining before `refwork-gp9` can close (operator/joint lab session —
+no agent can supply these):
+
+1. READY snapshot regeneration via `dh-m9-ready-handoff`
+   (`../determinism-hypervisor/docs/ops/rom-bridge-o73-ready-snapshot.md`):
+   needs the operator's real `DH_M9_GAME_IMAGE` (the cached `game.img`
+   is the 32 KiB placeholder) and the private bridge refs (private root,
+   workload image ref, capture spec ref).
+2. The coordinated `BRIDGE_REAL_SNAPSHOT_REF` cutover (bridge team
+   executes; `rom-operator-bridge-72o` lease caveat).
+3. Operator lab fields for the M4/M5 evidence records: ROM BLAKE3,
+   first-room padlog BLAKE3, run owner.
+4. Real `feature-map.yaml` + `vm-expect.yaml` goldens (via `ramdiff` /
+   `refwork-verify map-check`) — `feature-maps/demo-game.yaml` is an
+   explicit placeholder; `vm-first-room` must not run against it.

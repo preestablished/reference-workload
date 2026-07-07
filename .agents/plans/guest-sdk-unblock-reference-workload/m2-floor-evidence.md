@@ -144,3 +144,71 @@ operator-game provenance block empty.
 | x86_64 and aarch64 deterministic hash evidence | Synthetic-only evidence: local x86_64 10k hash and nightly run `27900976973` matching 100k-frame x86_64/aarch64 hashes on the synthetic ROM. Operator-game host-side 100k x86_64/aarch64 evidence is not recorded here and remains BLOCKED unless replaced by lab artifacts or a durable operator-approved waiver. |
 | `determinism-proto` source recorded and buildable | Sibling `../control-plane` provenance and successful build command above. |
 | No game content committed | This note records only revisions, command results, hashes, and artifact pointers. |
+
+## 2026-07-07 Extension (plan phase3-m4-first-room-gate-and-m5-stamp, step 06)
+
+Recorded by Claude (coding agent), `main` at `7b0c7b2`. This section
+refreshes the synthetic floor at the current rev and records the state of
+each item `gaps.md` flagged, per the request's acceptance §5
+(`refwork-d7t.1` is to close on evidence, not implication).
+
+### Synthetic floor re-verification at current rev
+
+| Item | Result |
+|---|---|
+| `cargo test --workspace` | PASS at `7b0c7b2` (after the `refwork-dh-client` mock `build_profile` fix, `34f034d`) |
+| `xtask hash-chain --frames 10000` (local, x86_64) | `6d4133144b7f08b9a6ae7fb16241b733beb6f4ca01fc0959b4025b84f4a108a9` |
+| Nightly cross-arch 100k (run `28857976642`, 2026-07-07, head `2ea42ad`) | x86_64 == aarch64 == `aed8e9f8fff1c83e254ad9f45769a296733c29e33b0aebdcfe9bafabb74cd94b` |
+
+The 10k chain hash differs from the 2026-06-21 value (`2f785fa9…`) —
+expected: the SNES accuracy chain (`84933d9`, `8eff8d9`, `2ea42ad`)
+deliberately changed emulation output. Cross-arch equality is what M2
+asserts, and it holds at the new behavior on both architectures.
+
+Applicability: `git diff --name-only 2ea42ad..7b0c7b2` touches only
+`.agents/` docs, `crates/refwork-dh-client/src/mock.rs` (test mock),
+`.github/workflows/vm-gates.yaml`, and `image/guest-sdk.lock` — no
+emulator, hash, feature-map, or xtask gate inputs. The nightly evidence
+at `2ea42ad` therefore applies to `7b0c7b2`.
+
+### Host-side first-room evidence
+
+Still pending the operator-gated inputs (real feature map + expect
+goldens, ROM/padlog hashes) — tracked as the step 01 consolidated
+operator ask in `.agents/plans/phase3-m4-first-room-gate-and-m5-stamp/`.
+Nearest existing substance: the real-ROM render evidence in
+`.agents/plans/snes-rom-black-screen-compat/03-implementation-results.md`
+(non-black frames with render counters at multiple checkpoints) and the
+first real emulator+game READY on the real worker
+(`.agents/requests/phase3-ready-not-emitted-real-worker/04-verification.md`,
+2026-07-05). Neither is a scripted first-room `play`/`map-check` run;
+this clause stays open pending the lab session (plan step 03), or closes
+via the weaker host-side fallback only with an explicit flag in the
+closure reason.
+
+### Build-vs-vendor decision record
+
+Proposed resolution for operator confirmation: the kernel/agent artifact
+split decision
+(`.agents/decisions/2026-07-02-kernel-agent-artifact-split.md`) IS the
+build-vs-vendor record in substance — kernel = vendored hash-pinned
+guest-sdk artifact with provenance build key; agent + harness = built
+from pinned revs; `xtask image build` enforces both pins. If the
+operator agrees, a one-line confirmation (bead comment on
+`refwork-d7t.1` or a note here) closes this clause; if not, an explicit
+waiver with owner + date is required per the Waiver Status table above.
+
+### aarch64 operator-game double-run
+
+Unchanged: synthetic cross-arch evidence is current (table above), but
+the operator-game real-aarch64 run remains not-run. Decision requested
+from the operator (run it in the lab session, or defer with a recorded
+reason + tracking bead) — surfaced in the step 01 consolidated ask.
+
+### Bead status
+
+`refwork-d7t.1` remains BLOCKED pending exactly three operator inputs:
+(1) first-room lab artifacts or flagged fallback closure, (2)
+build-vs-vendor confirmation or waiver, (3) aarch64 run-or-defer
+decision. Everything agent-derivable at the current rev is recorded
+above; no further agent work exists on this bead.
