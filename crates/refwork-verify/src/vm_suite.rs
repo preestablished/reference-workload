@@ -315,7 +315,15 @@ fn cold_run(
     let lease = restored.lease.clone().expect("checked by restore_snapshot");
     let base = restored.frame_counter;
 
-    inject(session, lease.clone(), script, base, opts.port).map_err(suite_err("inject"))?;
+    // TakeSnapshot refuses while future input events are still queued
+    // (AgendaNotEmpty on the real worker), so a mid-run snapshot forces a
+    // split injection: everything up to the snapshot frame now, the tail
+    // (boundary-seeded, same math as continue_run) after the snapshot.
+    let head = match snapshot_at {
+        Some(k) => &script[..(k as usize).min(script.len())],
+        None => script,
+    };
+    inject(session, lease.clone(), head, base, opts.port).map_err(suite_err("inject"))?;
 
     let mut hashes = Vec::with_capacity(frames as usize);
     let mut mid = None;
@@ -329,6 +337,22 @@ fn cold_run(
                 .take_snapshot(lease.clone(), None)
                 .map_err(suite_err("snapshot"))?;
             mid = snapshot.snapshot.map(|s| s.hash);
+
+            let tail: Vec<u16> = script.iter().copied().skip(frame as usize).collect();
+            let boundary_word = script
+                .get(frame as usize - 1)
+                .or(script.last())
+                .copied()
+                .unwrap_or(0);
+            inject_with_boundary(
+                session,
+                lease.clone(),
+                &tail,
+                base + frame,
+                boundary_word,
+                opts.port,
+            )
+            .map_err(suite_err("inject"))?;
         }
     }
     session.destroy_vm(lease).map_err(suite_err("destroy"))?;

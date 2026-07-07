@@ -457,6 +457,13 @@ impl HypervisorWorker for MockWorker {
         let capture_spec = request.capture;
         let worker = self.clone();
         let (guest, response) = self.with_slot(request.lease.as_ref(), move |fixture, slot| {
+            // Real-worker contract (observed on dh-workerd 30d0cb9,
+            // 2026-07-07 rehearsal): TakeSnapshot refuses while future
+            // input events are still queued. Enforce it here so staged
+            // CI catches clients that snapshot with a non-drained agenda.
+            if slot.scheduled.keys().any(|&at| at > slot.state.frame_counter) {
+                return Err(Status::failed_precondition("AgendaNotEmpty"));
+            }
             let (feature_bytes, fb_lz4, fb_info) = match &capture_spec {
                 Some(spec) => worker.capture(&slot.state, spec)?,
                 None => (Vec::new(), Vec::new(), None),
