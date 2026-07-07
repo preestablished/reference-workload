@@ -17,6 +17,23 @@
 name: vm-gates
 on:
   workflow_dispatch:
+    inputs:
+      lab_root:
+        description: >-
+          Runner-local lab root for the real-worker legs. Must contain
+          image-cache/ (with the registered workload image),
+          first-room.padlog, run.padlog, feature-map.yaml, vm-expect.yaml.
+          Leave empty to run only the staged-fixture + smoke gates.
+        required: false
+        default: ""
+      snapshot_ref:
+        description: "READY snapshot ref (64-hex) served by the snapstore"
+        required: false
+        default: ""
+      snapstore_uds:
+        description: "UDS path of a running snapshot-store serving the ref"
+        required: false
+        default: ""
 jobs:
   staged-fixture-gates:
     runs-on: [self-hosted, intel, kvm]
@@ -51,7 +68,89 @@ jobs:
         env:
           REFWORK_VM_TESTS: "1"
           REFWORK_DH_WORKERD_BIN: ${{ github.workspace }}/determinism-hypervisor/target/debug/dh-workerd
-      # Remaining real-worker legs (vm-first-room / vm-suite against a real
-      # worker + READY snapshot) still wait on the step-03 outputs; they
-      # will reuse the same REFWORK_VM_TESTS gate and the smoke test's
-      # scratch-worker launch recipe.
+  # Real-worker legs (phase3-m4-first-room-gate-and-m5-stamp step 05).
+  # Single-iteration profile only — the 20x zero-flake M5 stamp stays a
+  # lab-manual event by design. Inputs are lab artifacts no CI run can
+  # fabricate (operator image-cache, READY snapshot, padlogs, real
+  # feature map + expect goldens): the job runs only when a dispatcher
+  # supplies them, and skips silently otherwise.
+  real-worker-gates:
+    if: inputs.lab_root != ''
+    runs-on: [self-hosted, intel, kvm]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/control-plane
+          path: control-plane
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/determinism-hypervisor
+          path: determinism-hypervisor
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/guest-sdk
+          path: guest-sdk
+      - uses: dtolnay/rust-toolchain@stable
+      - run: test -w /dev/kvm || { echo "runner lacks /dev/kvm access"; exit 1; }
+      - name: Validate lab inputs
+        run: |
+          test -n "${{ inputs.snapshot_ref }}" || { echo "snapshot_ref required with lab_root"; exit 1; }
+          test -S "${{ inputs.snapstore_uds }}" || { echo "snapstore_uds is not a live socket"; exit 1; }
+          for f in first-room.padlog run.padlog feature-map.yaml vm-expect.yaml; do
+            test -f "${{ inputs.lab_root }}/$f" || { echo "missing ${{ inputs.lab_root }}/$f"; exit 1; }
+          done
+          test -d "${{ inputs.lab_root }}/image-cache" || { echo "missing image-cache/"; exit 1; }
+      - run: cargo build --locked -p dh-worker --bin dh-workerd
+        working-directory: determinism-hypervisor
+      - run: cargo build --locked -p refwork-verify
+        working-directory: repo
+      # Scratch worker on this job's own UDS — never /run/dh/grpc.sock
+      # (deployed worker). Same recipe as the smoke leg, plus the lab
+      # snapstore so RestoreSnapshot can serve the READY ref.
+      - name: Launch scratch worker
+        run: |
+          ${{ github.workspace }}/determinism-hypervisor/target/debug/dh-workerd serve \
+            --uds "$RUNNER_TEMP/vm-gates-grpc.sock" \
+            --tcp 127.0.0.1:0 --http 127.0.0.1:0 \
+            --image-cache "${{ inputs.lab_root }}/image-cache" \
+            --snapstore-uds "${{ inputs.snapstore_uds }}" \
+            --skip-preflight &
+          echo $! > "$RUNNER_TEMP/workerd.pid"
+          for i in $(seq 1 50); do test -S "$RUNNER_TEMP/vm-gates-grpc.sock" && break; sleep 0.2; done
+          test -S "$RUNNER_TEMP/vm-gates-grpc.sock"
+      - name: vm-first-room
+        working-directory: repo
+        env:
+          REFWORK_VM_TESTS: "1"
+        run: |
+          ./target/debug/refwork-verify vm-first-room \
+            --worker "$RUNNER_TEMP/vm-gates-grpc.sock" \
+            --snapshot-ref "${{ inputs.snapshot_ref }}" \
+            --script "${{ inputs.lab_root }}/first-room.padlog" \
+            --map "${{ inputs.lab_root }}/feature-map.yaml" \
+            --expect "${{ inputs.lab_root }}/vm-expect.yaml" \
+            --report "$RUNNER_TEMP/vm-first-room-report.json"
+      - name: vm-suite (single iteration)
+        working-directory: repo
+        env:
+          REFWORK_VM_TESTS: "1"
+        run: |
+          ./target/debug/refwork-verify vm-suite \
+            --worker "$RUNNER_TEMP/vm-gates-grpc.sock" \
+            --snapshot-ref "${{ inputs.snapshot_ref }}" \
+            --script "${{ inputs.lab_root }}/run.padlog" \
+            --report "$RUNNER_TEMP/vm-suite-report.json"
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-worker-reports
+          path: ${{ runner.temp }}/vm-*-report.json
+          if-no-files-found: ignore
+      - name: Stop scratch worker
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/workerd.pid")" 2>/dev/null || true
