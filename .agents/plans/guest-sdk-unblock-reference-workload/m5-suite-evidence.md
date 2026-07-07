@@ -69,3 +69,29 @@ reports are in the same artifact root.
 - The `BRIDGE_REAL_SNAPSHOT_REF` cutover to the new snapshot is
   bridge-executed and pending scheduling; the private handoff env from
   the regen is ready for them.
+
+## 2026-07-07 (later): First Room In-VM — Exit Gate 3 Technical Half (`refwork-d7t.11`)
+
+The operator's game image enabled full feature discovery, so the
+first-room gate ran the same day. Clean-room note: the feature map,
+vm-expect goldens, and first-room padlog live in the private root
+(operator-side, outside every checkout); this note records hashes and
+pointers only.
+
+| Item | Value |
+|---|---|
+| Feature discovery | `ramdiff` record/search/watch against the operator ROM: marked session (title/menu/stage-card/gameplay), room feature at a WRAM u8 offset with monotone trajectory boot→0 → menu-select→48 → first-room→167, stable through all gameplay marks |
+| First-room padlog BLAKE3 | `e2565db2d40dfac0a398f15605835cac7fb8b96cf8a1ac24b183c89103fbb65c` (title → 1P GAME → intro skip → Stage 1 "TREETOPS" gameplay) |
+| Dry-run (goldens recorded) | PASS, report `e53d2fc8f14eec56f4cff9000d16820d2c95462677530efa341e62d6d879b6ff` |
+| **Validating run (goldens enforced)** | **PASS** — `frames_run=4200`, room transition 0→167 `observed_by_frame=1528`, both framebuffer checkpoints (3400, 4200) matched, `pad_trace_ok=true` |
+| Ready proof | `meta_status=ready`, `meta_frame=0`, `room=0` at root snapshot, framebuffer 229,376 B `xrgb8888-256x224-stride1024` |
+| **Host↔VM bit-exactness** | host-side `play --snap` framebuffer dumps at frames 3400/4200 hash byte-identical to the in-VM worker captures (`2867fa06…`, `5416075f…`) |
+| Sequence | `RestoreSnapshot → InjectInputs → Run → GetFramebuffer` end-to-end through the worker gRPC API — Phase 3 exit gate 3's command sequence verbatim |
+| Report | `target/m5-acceptance-20260707/vm-first-room-final-report.json` |
+
+Remaining on gate 3: the bridge team's browser-side confirmation after
+the coordinated `BRIDGE_REAL_SNAPSHOT_REF` cutover (their standing
+offer; human-visible half). Host time to READY: restore-based (the VM
+restores a READY snapshot rather than cold-booting), so the bead's
+"READY under 2s" clause is satisfied by the restore path; the cold-boot
+READY timing was verified worker-side 2026-07-05.

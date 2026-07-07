@@ -212,3 +212,26 @@ reason + tracking bead) — surfaced in the step 01 consolidated ask.
 build-vs-vendor confirmation or waiver, (3) aarch64 run-or-defer
 decision. Everything agent-derivable at the current rev is recorded
 above; no further agent work exists on this bead.
+
+### 2026-07-07 (later): host-side first-room clause SATISFIED
+
+The operator supplied the game image the same day; the host-side
+first-room evidence now exists on the real ROM:
+
+- `refwork-verify play` drove the scripted log host-side (title → 1P
+  GAME → Stage 1 "TREETOPS" gameplay); the room feature was discovered
+  with `ramdiff` record/search/watch (marked title/menu/stage-card/
+  gameplay session; monotone 0→48→167 trajectory, stable in-stage).
+- The same padlog ran in-VM through the worker gRPC path
+  (`vm-first-room` validating run PASS), and the host-side framebuffer
+  dumps at frames 3400/4200 hash **byte-identical** to the in-VM worker
+  captures — host and VM execution agree bit-exactly on the real ROM.
+- Pointers: `m5-suite-evidence.md` first-room section; report
+  `target/m5-acceptance-20260707/vm-first-room-final-report.json`
+  (map/expect/padlog are operator-side in the private root, per
+  clean-room rules).
+
+`refwork-d7t.1` now waits on exactly two operator one-liners: the
+build-vs-vendor confirmation-or-waiver, and the aarch64 operator-game
+run-or-defer decision. (The synthetic cross-arch floor is current — see
+the table above; only the operator-game real-aarch64 leg is undecided.)

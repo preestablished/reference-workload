@@ -87,3 +87,28 @@ artifact root `target/m5-acceptance-20260707/`.
 3. **M2 one-liners** (`refwork-d7t.1`): confirm the artifact-split
    decision doc as the build-vs-vendor record (or waive), and decide the
    aarch64 operator-game run (run vs defer-with-reason).
+
+---
+
+## Update 2026-07-07 (final): First Room In-VM PASSED — Gate 3 Technical Half Done
+
+Feature discovery ran with the repo's own `ramdiff` against the operator
+ROM, the first-room padlog was authored and verified host-side, and:
+
+- **`vm-first-room` validating run: PASS** against the real worker + real
+  READY snapshot — `RestoreSnapshot → InjectInputs → Run →
+  GetFramebuffer`, room transition observed by frame 1528, framebuffer
+  checkpoint goldens matched (frames 3400/4200), pad trace OK.
+- **Host↔VM bit-exactness**: host-side emulator framebuffer dumps hash
+  byte-identical to the in-VM worker captures at both checkpoints.
+- `refwork-d7t.11` **closed**. The `refwork-d7t` epic now waits on
+  `refwork-d7t.1` only.
+
+## Remaining Ask (final shrink — three items)
+
+1. **Bridge cutover window** (their `9xo`/`bvq` + the human-visible half
+   of gate 3): private handoff env ready; scratch worker/snapstore still
+   serving if you want to inspect first.
+2. **M2 build-vs-vendor**: confirm the artifact-split decision doc as
+   the record, or waive (one bead comment on `refwork-d7t.1`).
+3. **M2 aarch64 operator-game double-run**: run or defer-with-reason.
