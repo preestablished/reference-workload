@@ -532,6 +532,7 @@ impl HypervisorWorker for MockWorker {
             slots_free: 4,
             class: None,
             version: "mock-0.1".to_owned(),
+            build_profile: "mock".to_owned(),
         }))
     }
 
