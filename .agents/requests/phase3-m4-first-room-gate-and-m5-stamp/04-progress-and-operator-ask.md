@@ -53,3 +53,37 @@ The regenerated image is ready for the handoff: clean-root
 Ping us with your window; same-day works. Please confirm at cutover time
 which ref `BRIDGE_REAL_SNAPSHOT_REF` currently serves, per your own
 `03-verification-offer.md`.
+
+---
+
+## Update 2026-07-07 (later): M5 Green Stamp Landed — Exit Gate 1 Satisfied
+
+The operator supplied the game image (`~/ROMs/SNES`, BLAKE3
+`96cdaa23…`) mid-session, which unblocked the real chain:
+
+| Item | State |
+|---|---|
+| READY snapshot regenerated from the real ROM (`dh-m9-ready-handoff`, restore-verified) | **DONE** — private handoff env ready for the bridge cutover |
+| vm-suite AgendaNotEmpty contract bug (mid-run TakeSnapshot vs queued inputs) | found in NOP rehearsal, **fixed** `320f425`, mock now enforces it in staged CI |
+| M5 suite single iteration (double-run + restore-continuity) | PASS |
+| `--nondet-test` negative | FAILs as required, divergence localized at the perturbed frame |
+| **20× zero-flake campaign, Intel lab runner (infra-control), real ROM** | **PASS — 20/20, single trajectory hash** (report `a06051df…`) |
+| Green stamp | `determinism.last_green` written (unstamped sidecar deleted); `xtask image validate` + `register --require-green-stamp` **accept** |
+| Beads | `refwork-gp9`, `refwork-d7t.12/.13/.14/.15` closed with evidence; guest-sdk `ext-refwork-m5-full-suite` handed off |
+
+Full record: `.agents/plans/guest-sdk-unblock-reference-workload/m5-suite-evidence.md`;
+artifact root `target/m5-acceptance-20260707/`.
+
+## Remaining Ask (shrunk)
+
+1. **Bridge cutover window** — the regenerated real-ROM snapshot's
+   private handoff env is ready; ping us and execute your restart
+   procedure, then run your browser-side first-frame verification
+   (this closes your `9xo` and the human-visible half of gate 3).
+2. **First-room inputs** (`refwork-d7t.11`, gate 3): operator first-room
+   padlog + real `feature-map.yaml`/`vm-expect.yaml` goldens
+   (`ramdiff`/`map-check` against ROM `96cdaa23…`). The verifier and
+   snapshot are waiting.
+3. **M2 one-liners** (`refwork-d7t.1`): confirm the artifact-split
+   decision doc as the build-vs-vendor record (or waive), and decide the
+   aarch64 operator-game run (run vs defer-with-reason).
