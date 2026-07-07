@@ -32,6 +32,13 @@ left.
 - `dist/workload-image-0.1.0/determinism.unstamped.yaml` still pins
   `git_rev: 84933d9` and defers the stamp — replacing it with a green
   stamp is step 04's deliverable.
+- **The workspace does not currently compile with the `mock` feature**:
+  `crates/refwork-dh-client/src/mock.rs:529` is missing the
+  `build_profile` field that the sibling `dh-proto` added to
+  `GetWorkerInfoResponse`. Step 01 fixes this before anything else runs.
+- `image/guest-sdk.lock` was already bumped to `487ff564` on 2026-07-05
+  (commit `667ca8b`), which includes the boot-scheduling deadlock fix —
+  older bead comments citing pin `c03e90b` are stale.
 
 ## Bead Map And Sequencing
 
@@ -42,7 +49,7 @@ left.
 | 03 | `03-first-room-in-vm.md` | `refwork-d7t.11` | 02 + operator cutover |
 | 04 | `04-m5-suite-and-green-stamp.md` | `refwork-d7t.12/.13/.14` | 03 |
 | 05 | `05-ci-and-closeout.md` | `refwork-d7t.15` | 04 |
-| 06 | `06-m2-paper-trail.md` | `refwork-d7t.1` | none — interleave anytime |
+| 06 | `06-m2-paper-trail.md` | `refwork-d7t.1` | soft on 03 — fuller evidence if run after it (see file) |
 
 Steps 02→03 are designed as **one lab session** with the bridge team on
 the cutover (their offer: `03-verification-offer.md` in the request dir;

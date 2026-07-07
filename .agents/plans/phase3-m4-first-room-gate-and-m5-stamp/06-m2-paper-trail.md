@@ -1,6 +1,10 @@
 # Step 06 — M2 Paper Trail: Resolve `refwork-d7t.1`
 
-Small, independent of the lab chain — interleave anytime. The bead is P1,
+Small, mostly independent of the lab chain — but note the soft ordering:
+item 1 below is strongest citing step 03's lab evidence. Closing this
+bead *before* step 03 lands means relying on the weaker host-side
+`double-run` fallback; if you do that, flag it explicitly in the recorded
+closure reason. The bead is P1,
 currently BLOCKED, and it blocks the `refwork-d7t` epic, so the epic
 cannot close without it. "Closed", not "a record exists", is the bar
 (request acceptance §5).

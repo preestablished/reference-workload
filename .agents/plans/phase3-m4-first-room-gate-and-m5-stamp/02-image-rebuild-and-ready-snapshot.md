@@ -28,16 +28,21 @@ exit bar.
 
 ## Work
 
-1. **Rebuild** via the `xtask image` flow from current `main`. Verify the
-   agent pin: check whether the pinned sibling guest-sdk rev in the image
-   locks (`c03e90b` at last build) needs bumping to include the deadlock
-   fix (`914dbde` or later) — if the fix postdates the pin, bump the pin
-   and note it in the evidence. Kernel artifact stays hash-pinned 6.12.93
-   unless guest-sdk republished.
+1. **Rebuild** via the `xtask image` flow from current `main`. The agent
+   pin is already current: `image/guest-sdk.lock` was bumped to
+   `487ff564` on 2026-07-05 (commit `667ca8b`), which descends from the
+   deadlock fix `914dbde` — verify only whether guest-sdk has anything
+   *newer* that matters; don't trust older bead comments citing
+   `c03e90b`. Kernel artifact stays hash-pinned 6.12.93 unless guest-sdk
+   republished.
 2. **Prove double-build reproducibility at the new rev**: clean-root
    double build, byte-identical artifact hashes (the fixed-dir
    build+rename workaround for the out-of-workspace dep is already in the
-   flow). Record all artifact BLAKE3s.
+   flow). Record all artifact BLAKE3s. If the hashes differ, check
+   embedded `built_from.git_rev`/timestamp fields first (the known prior
+   cause — see the prior plan's `07-verification.md`); if the diff
+   persists beyond those, treat it as a new bug and do NOT proceed to
+   READY regen on a non-reproducible image.
 3. **Regenerate the READY snapshot** under a **locally-launched real
    worker** via the hypervisor M9 handoff (`dh-m9-ready-handoff` flow):
    - Build `dh-workerd` from a FRESH pinned hypervisor scratch worktree —

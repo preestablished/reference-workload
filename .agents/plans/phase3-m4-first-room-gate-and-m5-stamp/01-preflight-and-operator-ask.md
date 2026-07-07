@@ -41,28 +41,44 @@ mid-session:
    - operator ROM BLAKE3
    - first-room padlog BLAKE3
    - run owner
-2. **Cutover window**: a same-day window with the bridge team to write
+2. **Real feature-map + expect goldens** (hard precondition for step 03):
+   `refwork-verify vm-first-room` requires `--map <feature-map.yaml>` and
+   `--expect <vm-expect.yaml>`. The only committed map,
+   `feature-maps/demo-game.yaml`, is an explicit placeholder — its own
+   comment says real values must be discovered with `ramdiff` /
+   `refwork-verify map-check` and committed by the operator for their ROM
+   revision. Ask the operator to produce (or pair on producing) the real
+   map and the framebuffer-checkpoint expect goldens. Running step 03
+   against the demo placeholder would produce a bogus room_id decode —
+   never substitute it silently.
+3. **Cutover window**: a same-day window with the bridge team to write
    `BRIDGE_REAL_SNAPSHOT_REF` after step 02 produces the new snapshot
    ref (they execute the restart procedure; we only hand over the ref).
-3. **CI runner label decision** (needed by step 05, ask early): guest-sdk
-   uses `[self-hosted, intel, kvm]`, determinism-hypervisor uses
-   `[self-hosted, kvm-intel]` — which label should this repo's
-   `vm-gates.yaml` real-worker legs use on the shared `infra-control`
-   runner? (Or: recorded decision that the lab legs stay manual.)
 4. **M2 build-vs-vendor record** (step 06): confirm whether a
    build-vs-vendor decision record exists anywhere, or grant an explicit
    waiver to be recorded in `m2-floor-evidence.md`.
 5. **M2 aarch64 cross-arch double-run** (step 06): run it, or explicitly
    defer with a recorded reason.
 
+(The CI runner-label question the request raises is already settled:
+`vm-gates.yaml` carries `[self-hosted, intel, kvm]` with an inline
+comment "confirmed by the operator 2026-07-02", and a live-worker smoke
+leg gated by `REFWORK_VM_TESTS=1` already exists. Step 05 reuses that;
+no ask needed unless the operator wants the new legs lab-manual.)
+
 Steps 02 and 04–06 can proceed while waiting on answers; only step 03's
 cutover and the final stamp fields hard-block on them.
 
-## 4. Sanity checks before the lab session
+## 4. Fix the known build break, then sanity checks
 
-- Workspace tests green at the build rev: `cargo test --workspace`
-  (expect ~452 passing as of `2ea42ad`).
-- `refwork-verify vm-first-room` / `vm-suite` staged-fixture tests pass
+- **The workspace does NOT currently build with the `mock` feature**
+  (verified 2026-07-07): `crates/refwork-dh-client/src/mock.rs:529`
+  constructs `proto::GetWorkerInfoResponse` without the `build_profile`
+  field that the sibling `dh-proto`
+  (`../determinism-hypervisor/crates/dh-proto`) has since added. Fix the
+  mock (and audit for any other proto drift), commit, and only then trust
+  test baselines — don't assume the ~452-test count from `2ea42ad` holds.
+- Then: `cargo test --workspace` green, and the staged-fixture tests pass
   (6 in `vm_first_room.rs`, 4 in `vm_suite.rs`).
 - Local-probe gotcha carried from the READY-fix work: a zero-filled game
   image no longer boots (`BadResetVector`). Local probes need a NOP ROM —

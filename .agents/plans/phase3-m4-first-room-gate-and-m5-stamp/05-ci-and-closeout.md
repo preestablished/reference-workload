@@ -2,23 +2,24 @@
 
 Prior-plan reference:
 `.agents/plans/phase3-m4-first-room-unblock/06-verification-and-closeout.md`.
-The staged-fixture CI legs already exist (`.github/workflows/vm-gates.yaml`);
-this step adds the real-worker legs and closes the paper trail.
+`.github/workflows/vm-gates.yaml` already has the staged-fixture legs
+AND a `live-worker smoke` leg (builds `dh-workerd` from the sibling
+checkout, runs `refwork-dh-client --test live_worker_smoke`), gated by
+`REFWORK_VM_TESTS=1` on runner label `[self-hosted, intel, kvm]` — the
+label was confirmed by the operator 2026-07-02 per the file's own inline
+comment. This step extends that, it does not start from scratch.
 
 ## Work
 
 1. **Real-worker CI legs** in `vm-gates.yaml`:
-   - Runner label per the operator's answer from step 01 (guest-sdk:
-     `[self-hosted, intel, kvm]`; hypervisor: `[self-hosted, kvm-intel]`
-     — do not guess; if no answer yet, this is the one item allowed to
-     block).
-   - Gate behind an env var (guest-sdk's `DETGUEST_VM_TESTS` pattern) so
-     laptop `cargo test` stays fast; nightly/manual trigger, not per-PR.
-   - Legs: `vm-first-room` and `vm-suite` (single-iteration profile —
-     the 20× stamp stays a lab-manual event, that's expected).
-   - If the operator decides the legs stay lab-manual entirely, record
-     that decision + reason in the evidence note instead — the request's
-     acceptance §4 explicitly allows it.
+   - Add `vm-first-room` and `vm-suite` legs (single-iteration profile —
+     the 20× stamp stays a lab-manual event, that's expected), reusing
+     the existing live-worker-smoke recipe: same runner label, same
+     `REFWORK_VM_TESTS=1` gating, same sibling scratch-worker build.
+   - Nightly/manual trigger, not per-PR.
+   - If the operator decides the new legs stay lab-manual entirely,
+     record that decision + reason in the evidence note instead — the
+     request's acceptance §4 explicitly allows it.
 2. **Deferred items from step 04**: if the `--register` refusal gate or
    `determinism.last_green` manifest population was deferred, finish it
    here — acceptance §3 requires either done-in-04 or
@@ -40,6 +41,11 @@ this step adds the real-worker legs and closes the paper trail.
 ## Exit Criteria
 
 - CI shows the real-worker legs (or the recorded lab-manual decision).
+- **Acceptance §2 fully satisfied before declaring done**: confirm the
+  bridge's browser-side verification note actually landed in the request
+  directory (step 03 allowed it to be "pending"; closeout does not). If
+  it is still pending, say so explicitly in the closeout record instead
+  of silently closing.
 - Guest-sdk handoff updated; their external bead unblocked.
 - `refwork-d7t.15` closed; epic closeout done or blocked only on step 06.
 - `bd ready` shows no remaining unblocked child work for the epic.

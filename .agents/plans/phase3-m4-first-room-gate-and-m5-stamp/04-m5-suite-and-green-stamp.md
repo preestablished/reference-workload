@@ -28,6 +28,9 @@ Against the real image + step 02 snapshot on the **local** worker
    continued hashes equal the uninterrupted run's from k on.
 3. Hashing host-side only (region reads / CaptureSpec) — no guest round
    trips in the verification path.
+4. **Choosing N**: pick the frame count ≥ the operator padlog's script
+   length, so the run is driven by real inputs rather than the held-pad
+   policy; record the chosen N and rationale in the evidence.
 
 Suite report must include: suite_version, profile, image/repo/external
 revs, ROM + padlog hashes, frames, snapshot_at, per-leg results, first
@@ -45,20 +48,33 @@ divergence diagnostics on failure.
    run) on the Intel lab runner, zero flakes. `--iterations 20` exists
    for this. Record per-run hashes in an evidence.json-style artifact
    under the artifact root from `.12`.
-3. **Convert the stamp**: replace
-   `dist/workload-image-0.1.0/determinism.unstamped.yaml` with the green
-   stamp (`kind: determinism-green` or the schema the xtask expects —
-   check `xtask/src/image.rs`, which already references `last_green`).
-   Stamp carries: revs (repo, guest-sdk pin, hypervisor), image manifest
-   hash, host, date, run owner + ROM/padlog BLAKE3s, 20/20 result,
-   negative-test demonstration pointer.
+   **If a run fails**: the count resets to zero — "consecutive" is the
+   bar. Capture the divergence report (first divergent frame +
+   region/offset window) before retrying. Two failed campaigns in a row
+   means stop retrying and escalate to the operator as a suspected
+   suite/image determinism bug, not lab noise.
+3. **Convert the stamp**: write the green stamp with the exact schema
+   `xtask/src/image.rs` validates (see `validate` around lines
+   1530–1595): `schema_version: 1`, `kind: determinism-last-green`,
+   `workload_image` matching `{WORKLOAD_NAME}@{VERSION}`,
+   `image_manifest_hash` (must match the manifest BLAKE3),
+   `reference_workload_git_rev` (must match the manifest's),
+   `suite_version`, `timestamp`, `suite_report_blake3` (64 lowercase hex).
+   Include the run metadata alongside: guest-sdk pin, hypervisor rev,
+   host, run owner + ROM/padlog BLAKE3s, 20/20 result, negative-test
+   demonstration pointer. Remove/replace
+   `determinism.unstamped.yaml` per the xtask's expectations.
 4. **Register-gate bar** (IMPLEMENTATION-PLAN's own M5 bar, restated in
-   the request's acceptance §3): `xtask image --register` refuses
-   without a fresh green stamp, and the manifest's
-   `determinism.last_green` is populated. Both are partially wired in
-   `xtask/src/image.rs` — verify, finish whatever's missing, and add a
-   test for the refusal path. If genuinely deferring either, record the
-   reason and carry it to step 05 explicitly.
+   the request's acceptance §3): the refusal gate **already exists and
+   is tested** in `xtask/src/image.rs` — `register_image` refuses when
+   `determinism.unstamped.yaml` is present without a green stamp, with
+   tests (`register_rejects_unstamped_manifest_when_green_stamp_is_required`,
+   `register_accepts_green_stamped_manifest`,
+   `register_rejects_dummy_green_stamp`). The work here is to run
+   `xtask image --register` against the REAL green stamp and confirm it
+   accepts, and confirm the manifest's `determinism.last_green` is
+   populated. If either genuinely can't complete, record the reason and
+   carry it to step 05 explicitly.
 
 ## Exit Criteria
 

@@ -14,6 +14,12 @@ the **lab run**, not implementation. Prior-plan reference:
 - Step 02's regenerated READY snapshot exists.
 - Operator lab fields in hand (ROM BLAKE3, padlog BLAKE3, run owner) —
   hard-required by the evidence record.
+- **Real `--map` feature-map and `--expect` goldens in hand** (step 01
+  ask item 2). `feature-maps/demo-game.yaml` is a placeholder — real
+  values come from `ramdiff` / `refwork-verify map-check` against the
+  operator's ROM revision and must be operator-committed. Do not run this
+  step against the demo map; a room_id decoded through placeholder
+  offsets is not evidence.
 - For the bridge-visible half: cutover executed by the bridge team
   (their procedure, their window). The lab run itself can go first
   against the **local** worker + new snapshot without waiting.
@@ -52,6 +58,11 @@ the **lab run**, not implementation. Prior-plan reference:
   regression, not a new mystery).
 - No READY: read the `boot: *` breadcrumbs in the dump; decision table in
   `.agents/plans/phase3-ready-not-emitted-real-worker/01-diagnosis-breadcrumbs.md` §5.
+- Timing-only misses (e.g. READY exceeds 2s on real lab hardware while
+  everything else passes): record as a deviation with rationale in the
+  evidence and continue — fixture timing does not automatically transfer
+  to lab hardware. Correctness-class failures (wrong room_id, hash
+  mismatch, regions not live) halt the run and get triaged.
 - Worker RPC failures: gRPC code + message at
   `journalctl -u rom-operator-bridge` (bridge side); the hypervisor names
   offenders precisely (layout version, byte counts).
