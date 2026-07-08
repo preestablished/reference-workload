@@ -11,8 +11,11 @@ The Phase-3 capture engine (`CaptureSpec`/`ExtractRange` → packed
 workload image (`dist/workload-image-0.1.0`), on both capture surfaces
 (`Run`-with-capture and `TakeSnapshot`-with-capture):
 
-- `feature_bytes` bit-match independent `detguest-host` reads of the
-  same ranges; packing is request order;
+- `feature_bytes` bit-match a `ReadGuestMemory` read of the same
+  ranges (a common-mode cross-check — both share `detguest-host`
+  `read_region`, so this proves the engine *uses* the primitive
+  correctly, not the primitive's own correctness); packing is request
+  order;
 - `fb_lz4` decodes to the 229,376-byte D7 framebuffer and matches an
   independent framebuffer read;
 - a restored/forked child returns bit-identical bytes for unchanged
@@ -36,8 +39,9 @@ determinism-hypervisor repo:
 
 ## Build To Capture Against
 
-The engine proof ran on worker `b1eba73`, which carries the OOM fix
-`c0337ab`. **Capture against `c0337ab`+ only.** On that build a capture
+The engine proof ran with worker HEAD at `b1eba73`, which carries the
+OOM fix `c0337ab` (the test itself was committed at `4ac66b5`+).
+**Capture against `c0337ab`+ only.** On that build a capture
 session is safe unbounded (the `RunWithFrameCapture` OOM is fixed and
 the segment budget green-lit unbounded — bridge `9bx`). If your lab
 worker is still on a pre-`c0337ab` build when you capture, use
