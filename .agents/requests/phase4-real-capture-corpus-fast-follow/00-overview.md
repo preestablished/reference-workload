@@ -1,5 +1,9 @@
 # Request: The Real-Capture Golden Corpus — Phase 4's Entry Ticket (Fast-Follow, Gated)
 
+> **CURRENT STATUS (2026-07-10):** Partially unblocked. Read
+> `05-current-status-2026-07-10.md`; engine and Phase 3 technical prerequisites
+> are complete, while the operator corpus session remains gated.
+
 ## Who Is Asking
 
 The phases track, on behalf of Phase 4's consumers: the state-scorer

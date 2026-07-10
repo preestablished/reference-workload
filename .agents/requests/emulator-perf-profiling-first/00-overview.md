@@ -1,5 +1,8 @@
 # Request: Profile The Emulator — Zero Behavior Change — So The Unowned Speedup Gets An Owner And A Price
 
+> **CURRENT STATUS (2026-07-10):** Open and now startable by the primary agent.
+> Read `04-current-status-2026-07-10.md` for the ordering update.
+
 ## Who Is Asking
 
 The phases track, round 3 (2026-07-07), on behalf of the three consumers
