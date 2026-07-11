@@ -1,0 +1,16 @@
+[package]
+name = "refwork-emu-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-only benchmark lane for refwork-emu"
+
+[[bin]]
+name = "refwork-emu-bench"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+refwork-emu = { path = "../refwork-emu" }
+refwork-hash = { path = "../refwork-hash" }
+refwork-script = { path = "../refwork-script" }

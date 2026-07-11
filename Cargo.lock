@@ -1308,6 +1308,16 @@ name = "refwork-emu"
 version = "0.1.0"
 
 [[package]]
+name = "refwork-emu-bench"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "refwork-emu",
+ "refwork-hash",
+ "refwork-script",
+]
+
+[[package]]
 name = "refwork-featuremap"
 version = "0.1.0"
 dependencies = [
