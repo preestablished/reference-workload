@@ -37,7 +37,8 @@ are in `docs/emulator-performance-profile-data/synthetic-20260711.md`.
   (3.61–5.35 ms observed range);
 - exact instruction totals jittered by 26–2,295 instructions per window despite
   unscaled counting, a required reproducibility finding;
-- 4,047-sample steady profile, zero lost samples, 99.99% top-level attribution.
+- 4,047-sample steady profile and 3,256-sample boot profile, zero lost samples,
+  99.99–100.00% top-level attribution.
 
 | Subsystem | Share | Estimated instructions/frame | Notes |
 |---|---:|---:|---|

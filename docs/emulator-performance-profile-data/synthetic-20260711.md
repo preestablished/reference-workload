@@ -79,3 +79,9 @@ does not honestly split every CPU instruction among those requested sub-buckets.
 The whole CPU parent is only 8.24%; the unresolved *sub-bucket* split is recorded
 as a methodology limitation, not assigned by intuition. Host-lane subsystem
 coverage remains above 90% because the complete CPU parent is identified.
+
+The zero-warmup 300-frame boot sample independently captured approximately
+7,291,272,062 instructions in 3,256 samples with zero loss. Its top-level split
+was PPU 82.33%, CPU 8.06%, APU 7.01%, and scheduler/direct core 2.60%, summing to
+100.00%. The close agreement with steady state shows that the synthetic boot
+phase does not expose a materially different optimization ranking.
