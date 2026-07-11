@@ -208,6 +208,7 @@ impl WorkerSession {
                     hash: snapshot_hash,
                 }),
                 entropy_seed,
+                baseline: None,
             }))?
             .into_inner();
         if response.lease.is_none() {
