@@ -65,5 +65,7 @@ is the authoritative AC0 evidence for this pass.
 - No local aarch64 execution was available. A final-revision cross-architecture
   CI result requires a pushed commit.
 - The prior first-room report proves the private run existed, but the operator
-  ROM and padlog are absent now. No matched KVM calibration can be run from the
-  retained hashes/report alone.
+  ROM is absent. The exact padlog and live worker socket were recovered on a
+  later audit, but the sole 32-KiB non-synthetic file is not a valid cartridge
+  (zero reset vector). No matched host/KVM calibration can be run from a padlog,
+  snapshot, and retained hashes without the operator ROM.

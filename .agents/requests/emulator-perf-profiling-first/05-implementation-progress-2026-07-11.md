@@ -35,3 +35,17 @@ operator-private and matched KVM evidence.
 The retained first-room JSON contains hashes and aggregate success evidence but
 not the private inputs, so it cannot be replayed or profiled. No completion claim
 or fabricated calibration is made.
+
+## Private-Lab Re-audit
+
+A later re-audit found the live private lab root and worker socket again, plus a
+padlog whose BLAKE3 exactly matches the retained first-room report
+(`e2565db2…fbb65c`). The root contains no valid operator ROM. Its only
+32-KiB non-synthetic candidate fails `Cartridge::from_rom` with a zero reset
+vector, so it is not silently substituted as the game. No larger copier-header
+or power-of-two ROM candidate exists under the lab root or operator home.
+
+This recovers one required input and confirms the worker is listening, but it
+does not make the host/private denominator reproducible: extracting guest ROM
+bytes from a snapshot would violate the clean-room boundary and is not attempted.
+The operator ROM remains the concrete missing input.
