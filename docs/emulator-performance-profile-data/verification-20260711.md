@@ -22,6 +22,25 @@
   zero lost samples.
 - `bash -n tools/refwork-emu-perf/*.sh`: passed.
 
+## Before/After Emulator Proof (AC3)
+
+The completed harness source from `ccaf1b4` was applied without emulator changes
+to a clean worktree at pre-request revision `6cdeb3e`. Baseline and HEAD used the
+same compiler, release flags, synthetic ROM, 600-frame prefix, and 100/200/300
+measured windows.
+
+- both statically linked benchmark executables were byte-identical:
+  SHA-256 `1655ee9c3915862a24030d2e75bc2d17ac040cf9236417a6ca34863af8103c49`;
+- all 300-frame runs produced final-state proof
+  `4fafa9790105305b87d74460802901cb976e69f817a3d32c921fb5593a1287d6`;
+- baseline 100→300 slopes were 24,356,289.32–24,356,291.18
+  instructions/frame;
+- HEAD slopes were 24,356,289.64–24,356,292.20 instructions/frame.
+
+The executable identity proves the shipped emulator instruction path did not
+change. The few-instruction slope spread is the already documented perf-control
+edge jitter, not a differing binary or frame result.
+
 ## Dependency And Shipped-Binary Guard
 
 `Cargo.lock` adds only the new workspace package `refwork-emu-bench` and points

@@ -109,3 +109,15 @@ Recommendation: do not optimize yet. First complete the operator-private
 first-room profile and a matched KVM calibration. Then file only candidates that
 remain material on the real workload, with explicit re-baseline owners and the
 A1 dependency.
+
+## Tracking And Handback
+
+- busy-scene profiling fallback: `refwork-4nv`;
+- PPU candidate: `refwork-rbz`;
+- CPU/bus candidate: `refwork-0um`;
+- APU candidate: `refwork-hbh`;
+- determinism-hypervisor pointer: `38b6` comment
+  `019f4f53-cab3-7365-a5cd-07ae83ae3b1d`.
+
+The candidate beads inherit the blast-radius and re-baseline requirements above;
+they do not authorize optimization as part of this profiling request.
