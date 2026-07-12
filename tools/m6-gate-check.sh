@@ -33,12 +33,21 @@ bead_closed() {
 }
 
 # 1. scorer M3 closed — lives in another repo; only PASS on positive evidence.
+# Word-anchored match (-w) so IDs/titles merely containing "m3" as a substring
+# (e.g. "arm32", a hash like "xm3q") can never fail-open; the closed marker
+# must be at line start. Re-verify the naming convention once state-scorer
+# actually creates its M1-M4 milestone beads (their packet's work item 0).
+scorer_milestone() { # $1=M3|M4 -> echoes matching bd list line, if any
+  (cd "$SCORER_REPO" && bd list --limit 0 2>/dev/null) | grep -iw "$1" || true
+}
 if [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null; then
-  m3_line=$( (cd "$SCORER_REPO" && bd list --limit 0 2>/dev/null) | grep -i 'M3' || true)
-  if [ -n "$m3_line" ] && echo "$m3_line" | grep -q '✓'; then
+  m3_line=$(scorer_milestone M3)
+  if [ -n "$m3_line" ] && printf '%s\n' "$m3_line" | grep -q '^✓'; then
     report PASS "scorer-M3" "$m3_line"
+  elif [ -n "$m3_line" ]; then
+    report FAIL "scorer-M3" "$m3_line"
   else
-    report FAIL "scorer-M3" "${m3_line:-no M3 bead found in state-scorer}"
+    report UNKNOWN "scorer-M3" "no M3-titled bead in state-scorer — verify in their packet; counts as not-passed"
   fi
 else
   report UNKNOWN "scorer-M3" "verify in state-scorer packet (no beads DB found) — counts as not-passed"
@@ -49,13 +58,23 @@ for b in refwork-czi refwork-20v; do
   if bead_closed "$b"; then
     report PASS "$b" "closed"
   else
-    report FAIL "$b" "$(bd show "$b" 2>/dev/null | head -1 || echo 'bd unavailable')"
+    detail=$(bd show "$b" 2>/dev/null | head -1)
+    report FAIL "$b" "${detail:-bd unavailable or bead missing}"
   fi
 done
 
 # 4. hand-play artifact — probe in preference order; report which branch.
 branch=NONE
-probe() { for p in "$@"; do [ -e "$p" ] && { echo "$p"; return 0; }; done; return 1; }
+# Non-empty required: a stray `mkdir -p` or zero-byte file must not pass the
+# gate. Tighten further to a specific manifest/marker file once the
+# fast-follow freezes its bundle layout.
+probe() {
+  for p in "$@"; do
+    if [ -d "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then echo "$p"; return 0; fi
+    if [ -f "$p" ] && [ -s "$p" ]; then echo "$p"; return 0; fi
+  done
+  return 1
+}
 if loc=$(probe "${CORPUS_CANDIDATES[@]}"); then
   branch=full-corpus
 elif loc=$(probe "${FALLBACK_CANDIDATES[@]}"); then
@@ -75,6 +94,12 @@ fi
 
 # Informational (not gating)
 echo "── info (not gating) ──"
+if [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null; then
+  m4_line=$(scorer_milestone M4)
+  echo "info: scorer-M4 (items 4-5 need it): ${m4_line:-no M4-titled bead in state-scorer}"
+else
+  echo "info: scorer-M4 status unknown (no beads DB found in state-scorer)"
+fi
 bd show rom-operator-bridge-l1w >/dev/null 2>&1 \
   && echo "info: rom-operator-bridge-l1w visible via bd (check its state for smoke-window coordination)" \
   || echo "info: hypervisor leak bead rom-operator-bridge-l1w — check rom-operator-bridge repo before scheduling the smoke"
