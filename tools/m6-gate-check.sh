@@ -38,7 +38,9 @@ bead_closed() {
 # must be at line start. Re-verify the naming convention once state-scorer
 # actually creates its M1-M4 milestone beads (their packet's work item 0).
 scorer_milestone() { # $1=M3|M4 -> echoes matching bd list line, if any
-  (cd "$SCORER_REPO" && bd list --limit 0 2>/dev/null) | grep -iw "$1" || true
+  # --all: closed beads are hidden by default, and closed is exactly the
+  # state this gate is looking for.
+  (cd "$SCORER_REPO" && bd list --limit 0 --all 2>/dev/null) | grep -iw "$1" || true
 }
 if [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null; then
   m3_line=$(scorer_milestone M3)
