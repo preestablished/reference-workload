@@ -35,3 +35,18 @@ that bead closed 2026-07-11 with M2 floor evidence at `9f9b840`.
 - Package 02: **complete** with this record.
 - Packages 03/04: unblocked pending the scheduled operator session
   (Ask 2 = the session itself).
+
+## Addendum — Operator ask 3 and delegation resolution (2026-07-12, later)
+
+- **Push approved and done** (both repos): reference-workload
+  `9f9b840..00a3ce9`, state-scorer `f3e3592..6b75dec`.
+- **Delegation record for the plan's implementation:** package 01 was
+  self-executed by the orchestrating agent (commit `2827665`) before the
+  operator articulated the delegate-implementation requirement; a separate
+  coding agent then independently verified all 8 exit criteria (PASS).
+  Packages 03–05's agent-implementable work was implemented by delegated
+  coding agents (`592f279` discovery analysis, `f4fff56` session pipeline
+  + runbook). **Operator decision (structured ask): ACCEPT package 01 as
+  done and continue** — the goal proceeds with the operator session
+  (Run A/B), after which remaining execution is delegated as it unblocks.
+- Session status: Run A briefed and pending operator availability.
