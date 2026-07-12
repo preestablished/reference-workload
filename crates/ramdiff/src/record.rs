@@ -204,6 +204,9 @@ pub struct InteractiveOpts {
     pub session_dir: std::path::PathBuf,
     /// Path to the output `.padlog` file (written incrementally).
     pub output_log: std::path::PathBuf,
+    /// Explicit evdev gamepad node (Linux). `None` = auto-detect; the pad is
+    /// optional either way and merges with (never replaces) the keyboard.
+    pub gamepad: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "interactive")]
@@ -261,9 +264,43 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     let mut frame: u64 = 0;
 
+    // Optional evdev gamepad (Linux): merged with the keyboard via OR.
+    #[cfg(target_os = "linux")]
+    let mut gamepad = match &opts.gamepad {
+        Some(path) => match crate::gamepad::Gamepad::open_path(path) {
+            Ok(g) => {
+                eprintln!("interactive: gamepad {}", g.description);
+                Some(g)
+            }
+            Err(e) => {
+                eprintln!("interactive: {} — keyboard only", e);
+                None
+            }
+        },
+        None => match crate::gamepad::Gamepad::open_auto() {
+            Ok(Some(g)) => {
+                eprintln!("interactive: gamepad {}", g.description);
+                Some(g)
+            }
+            Ok(None) => {
+                eprintln!("interactive: no gamepad detected — keyboard only");
+                None
+            }
+            Err(e) => {
+                eprintln!("interactive: {} — keyboard only", e);
+                None
+            }
+        },
+    };
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Build pad from current key state.
-        let pad = build_pad(&window);
+        // Build pad from current key state, merged with the gamepad if any.
+        #[allow(unused_mut)]
+        let mut pad = build_pad(&window);
+        #[cfg(target_os = "linux")]
+        if let Some(g) = gamepad.as_mut() {
+            pad |= g.poll();
+        }
 
         let flags = core.run_one_frame(pad);
         if let Some(fault) = core.fault() {

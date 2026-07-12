@@ -6,6 +6,7 @@
 //! ramdiff record --rom <file.rom> --script <run.padlog> --session <dir>
 //!                [--mark <frame>=<label>] [--dump-every N] [--frames N]
 //!                [--interactive]   (only when compiled with --features interactive)
+//!                [--gamepad /dev/input/eventN]   (interactive; default: auto-detect)
 //!
 //! ramdiff search --session <dir>
 //!                [--width u8|u16le]
@@ -45,6 +46,10 @@
 //! | Right Shift | Select | 11 |
 //! | F5 | Dump WRAM (prompts for label) | — |
 //! | Esc | Quit | — |
+//!
+//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux and
+//! merged with the keyboard; see `gamepad.rs` for the button mapping in
+//! both XInput and DirectInput switch positions. F5/Esc remain keyboard-only.
 
 #![forbid(unsafe_code)]
 
@@ -95,6 +100,7 @@ fn usage() {
     println!("         [--mark <frame>=<label>] [--dump-every N] [--frames N]");
     #[cfg(feature = "interactive")]
     println!("         [--interactive] [--output-log <file.padlog>]");
+    println!("         [--gamepad /dev/input/eventN]   (default: auto-detect)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -124,6 +130,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut total_frames: Option<u64> = None;
     let mut interactive = false;
     let mut output_log: Option<std::path::PathBuf> = None;
+    let mut gamepad: Option<std::path::PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -168,6 +175,10 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
                 i += 1;
                 output_log = Some(need_path("record", "--output-log", args, i)?);
             }
+            "--gamepad" => {
+                i += 1;
+                gamepad = Some(need_path("record", "--gamepad", args, i)?);
+            }
             other => {
                 return Err(format!("record: unknown option {:?}", other));
             }
@@ -184,6 +195,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             rom,
             session_dir,
             output_log: out_log,
+            gamepad,
         });
     }
 
