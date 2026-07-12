@@ -67,11 +67,16 @@ use refwork_script::parse as parse_padlog;
 use refwork_verify::double_run::double_run;
 use refwork_verify::expectations::parse_expectations;
 use refwork_verify::map_check::{map_check, MapCheckResult};
+use refwork_verify::phase4_artifact_check::check_phase4_artifacts;
 use refwork_verify::phase4_bundle_check::check_phase4_bundle;
+use refwork_verify::phase4_capture_export::{export_phase4_captures, CaptureExportOptions};
 use refwork_verify::phase4_checksum_manifest::{
-    write_phase4_checksum_manifest, ChecksumManifestOptions,
+    set_phase4_payload_root, verify_phase4_checksum_manifest, write_phase4_checksum_manifest,
+    ChecksumManifestOptions,
 };
 use refwork_verify::phase4_context_check::check_phase4_context_bundle;
+use refwork_verify::phase4_context_export::{export_phase4_context, ContextExportOptions};
+use refwork_verify::phase4_fallback_check::check_phase4_fallback;
 use refwork_verify::phase4_layout::{write_phase4_layout, LayoutOptions};
 use refwork_verify::phase4_private_intake::{prepare_phase4_private_intake, PrivateIntakeOptions};
 use refwork_verify::phase4_score_plan::{write_phase4_score_plan, ScorePlanOptions};
@@ -97,8 +102,12 @@ fn main() {
         "trace" => cmd_trace(&args[1..]),
         "double-run" => cmd_double_run(&args[1..]),
         "phase4-bundle-check" => cmd_phase4_bundle_check(&args[1..]),
+        "phase4-artifact-check" => cmd_phase4_artifact_check(&args[1..]),
+        "phase4-capture-export" => cmd_phase4_capture_export(&args[1..]),
         "phase4-checksum-manifest" => cmd_phase4_checksum_manifest(&args[1..]),
         "phase4-context-check" => cmd_phase4_context_check(&args[1..]),
+        "phase4-context-export" => cmd_phase4_context_export(&args[1..]),
+        "phase4-fallback-check" => cmd_phase4_fallback_check(&args[1..]),
         "phase4-layout" => cmd_phase4_layout(&args[1..]),
         "phase4-private-intake" => cmd_phase4_private_intake(&args[1..]),
         "phase4-score-plan" => cmd_phase4_score_plan(&args[1..]),
@@ -149,10 +158,27 @@ fn usage() {
     println!("  phase4-bundle-check --bundle <private-bundle-dir>");
     println!("                      [--report <out.json>]");
     println!();
-    println!("  phase4-checksum-manifest --bundle <private-bundle-dir> --out <out.json>");
+    println!("  phase4-artifact-check --bundle <private-bundle-dir> --report <out.json>");
+    println!();
+    println!("  phase4-capture-export --endpoint <worker> --snapshot <blake3> --padlog <file>");
+    println!(
+        "                        --map <feature-map.yaml> --layout <layout.json> --bundle <dir>"
+    );
+    println!(
+        "                        --count N --cadence N --hard-icount-cap N --source-ref <opaque>"
+    );
+    println!();
+    println!("  phase4-checksum-manifest --bundle <private-bundle-dir>");
+    println!("                           (--set-payload-root | --out <out.json> | --verify <freeze.json>)");
     println!();
     println!("  phase4-context-check --bundle <private-context-dir>");
     println!("                       [--report <out.json>]");
+    println!();
+    println!("  phase4-context-export --corpus <bundle> --out <context-dir> --capture-id <id> ...");
+    println!("                        --context-artifact-id <opaque> --access-requirement <role>");
+    println!("                        --retention <text> --pad-table-hash <blake3> [--recent-input <padlog>]");
+    println!();
+    println!("  phase4-fallback-check --bundle <private-bundle-dir> [--report <out.json>]");
     println!();
     println!("  phase4-layout --map <feature-map.yaml> --out <layout.json>");
     println!("                --capture-spec-hash <hash-or-ref>");
@@ -197,6 +223,151 @@ fn usage() {
     println!("  Phase 3 exit gate 1 (M5): in-VM double-run + mid-game snapshot/");
     println!("  restore continuity, hashed host-side at every FrameMark. Not the");
     println!("  in-process double-run — this one runs through the worker gRPC API.");
+}
+
+fn cmd_phase4_artifact_check(args: &[String]) {
+    let mut bundle = None;
+    let mut report_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bundle" => {
+                i += 1;
+                bundle = Some(require_arg("phase4-artifact-check", "--bundle", args, i));
+            }
+            "--report" => {
+                i += 1;
+                report_path = Some(require_arg("phase4-artifact-check", "--report", args, i));
+            }
+            other => {
+                eprintln!("phase4-artifact-check: unknown option '{other}'");
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+    let bundle = bundle.unwrap_or_else(|| missing_required("phase4-artifact-check", "--bundle"));
+    let report = check_phase4_artifacts(&bundle);
+    if let Some(path) = report_path {
+        let json = serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
+            eprintln!("phase4-artifact-check: report serialization failed: {e}");
+            process::exit(1);
+        });
+        if let Err(e) = std::fs::write(&path, json) {
+            eprintln!("phase4-artifact-check: cannot write report: {e}");
+            process::exit(1);
+        }
+    }
+    if report.passed() {
+        println!(
+            "phase4-artifact-check: PASS — captures={} artifacts={}",
+            report.capture_count,
+            report.feature_artifact_count + report.framebuffer_artifact_count
+        );
+    } else {
+        eprintln!(
+            "phase4-artifact-check: FAIL — {} issue(s)",
+            report.errors.len()
+        );
+        for error in report.errors {
+            eprintln!("  - {error}");
+        }
+        process::exit(1);
+    }
+}
+
+fn cmd_phase4_capture_export(args: &[String]) {
+    let mut values = std::collections::BTreeMap::new();
+    let mut production = false;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--production" {
+            production = true;
+            i += 1;
+            continue;
+        }
+        let key = args[i].clone();
+        if !key.starts_with("--") {
+            eprintln!("phase4-capture-export: unexpected argument");
+            process::exit(1);
+        }
+        if ![
+            "--endpoint",
+            "--snapshot",
+            "--padlog",
+            "--map",
+            "--layout",
+            "--bundle",
+            "--count",
+            "--cadence",
+            "--hard-icount-cap",
+            "--source-ref",
+        ]
+        .contains(&key.as_str())
+        {
+            eprintln!("phase4-capture-export: unknown option '{key}'");
+            process::exit(1);
+        }
+        i += 1;
+        values.insert(
+            key,
+            require_arg_str("phase4-capture-export", "value", args, i).to_owned(),
+        );
+        i += 1;
+    }
+    let take = |name: &str| {
+        values.get(name).cloned().unwrap_or_else(|| {
+            eprintln!("phase4-capture-export: {name} is required");
+            process::exit(1)
+        })
+    };
+    let number = |name: &str| -> u32 {
+        take(name).parse().unwrap_or_else(|_| {
+            eprintln!("phase4-capture-export: {name} must be an integer");
+            process::exit(1)
+        })
+    };
+    let opts = CaptureExportOptions {
+        endpoint: take("--endpoint"),
+        snapshot_hash: take("--snapshot"),
+        padlog: take("--padlog").into(),
+        map: take("--map").into(),
+        layout: take("--layout").into(),
+        bundle: take("--bundle").into(),
+        count: number("--count"),
+        cadence: number("--cadence"),
+        hard_icount_cap: take("--hard-icount-cap")
+            .parse::<u64>()
+            .unwrap_or_else(|_| {
+                eprintln!("phase4-capture-export: --hard-icount-cap must be an integer");
+                process::exit(1)
+            }),
+        production,
+        source_ref: take("--source-ref"),
+    };
+    let report = export_phase4_captures(&opts);
+    let report_path = opts.bundle.join("validation/capture-export-report.json");
+    if let Err(e) = std::fs::create_dir_all(report_path.parent().unwrap())
+        .and_then(|_| std::fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()))
+    {
+        eprintln!("phase4-capture-export: cannot write private export report: {e}");
+        process::exit(1);
+    }
+    if report.passed() {
+        println!(
+            "phase4-capture-export: PASS — captures={}",
+            report.completed
+        )
+    } else {
+        eprintln!(
+            "phase4-capture-export: FAIL — {} issue(s)",
+            report.errors.len()
+        );
+        for e in report.errors {
+            eprintln!("  - {e}")
+        }
+        process::exit(1)
+    }
 }
 
 // ─── vm-suite ────────────────────────────────────────────────────────────────
@@ -1018,6 +1189,8 @@ fn cmd_phase4_bundle_check(args: &[String]) {
 fn cmd_phase4_checksum_manifest(args: &[String]) {
     let mut bundle_path: Option<PathBuf> = None;
     let mut out_path: Option<PathBuf> = None;
+    let mut verify_path: Option<PathBuf> = None;
+    let mut set_payload_root = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1030,6 +1203,11 @@ fn cmd_phase4_checksum_manifest(args: &[String]) {
                 i += 1;
                 out_path = Some(require_arg("phase4-checksum-manifest", "--out", args, i));
             }
+            "--verify" => {
+                i += 1;
+                verify_path = Some(require_arg("phase4-checksum-manifest", "--verify", args, i));
+            }
+            "--set-payload-root" => set_payload_root = true,
             other => {
                 eprintln!("phase4-checksum-manifest: unknown option '{}'", other);
                 process::exit(1);
@@ -1038,18 +1216,37 @@ fn cmd_phase4_checksum_manifest(args: &[String]) {
         i += 1;
     }
 
-    let opts = ChecksumManifestOptions {
-        bundle: bundle_path
-            .unwrap_or_else(|| missing_required("phase4-checksum-manifest", "--bundle")),
-        out: out_path.unwrap_or_else(|| missing_required("phase4-checksum-manifest", "--out")),
+    let bundle =
+        bundle_path.unwrap_or_else(|| missing_required("phase4-checksum-manifest", "--bundle"));
+    if usize::from(out_path.is_some())
+        + usize::from(verify_path.is_some())
+        + usize::from(set_payload_root)
+        != 1
+    {
+        eprintln!("phase4-checksum-manifest: exactly one of --out, --verify, or --set-payload-root is required");
+        process::exit(1);
+    }
+    let (report, output) = if set_payload_root {
+        (set_phase4_payload_root(&bundle), None)
+    } else if let Some(manifest) = verify_path {
+        (verify_phase4_checksum_manifest(&bundle, &manifest), None)
+    } else {
+        let out = out_path.unwrap();
+        let opts = ChecksumManifestOptions {
+            bundle,
+            out: out.clone(),
+        };
+        (write_phase4_checksum_manifest(&opts), Some(out))
     };
-    let report = write_phase4_checksum_manifest(&opts);
     if report.passed() {
         println!(
-            "phase4-checksum-manifest: PASS — files={} bytes={} out={}",
+            "phase4-checksum-manifest: PASS — files={} bytes={}{}",
             report.file_count,
             report.total_bytes,
-            opts.out.display()
+            output
+                .as_ref()
+                .map(|p| format!(" out={}", p.display()))
+                .unwrap_or_default()
         );
     } else {
         eprintln!(
@@ -1124,6 +1321,121 @@ fn cmd_phase4_context_check(args: &[String]) {
             eprintln!("  - {err}");
         }
         process::exit(1);
+    }
+}
+
+fn cmd_phase4_context_export(args: &[String]) {
+    let mut values = std::collections::BTreeMap::new();
+    let mut ids = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let key = args[i].clone();
+        if ![
+            "--corpus",
+            "--out",
+            "--capture-id",
+            "--context-artifact-id",
+            "--access-requirement",
+            "--retention",
+            "--pad-table-hash",
+            "--recent-input",
+            "--evidence-type",
+        ]
+        .contains(&key.as_str())
+        {
+            eprintln!("phase4-context-export: unknown option '{key}'");
+            process::exit(1);
+        }
+        i += 1;
+        let value = require_arg_str("phase4-context-export", &key, args, i).to_owned();
+        i += 1;
+        if key == "--capture-id" {
+            ids.push(value);
+        } else {
+            values.insert(key, value);
+        }
+    }
+    let take = |name: &str| {
+        values.get(name).cloned().unwrap_or_else(|| {
+            eprintln!("phase4-context-export: {name} is required");
+            process::exit(1)
+        })
+    };
+    let opts = ContextExportOptions {
+        corpus: take("--corpus").into(),
+        out: take("--out").into(),
+        capture_ids: ids,
+        context_artifact_id: take("--context-artifact-id"),
+        access_requirement: take("--access-requirement"),
+        retention: take("--retention"),
+        pad_table_hash: take("--pad-table-hash"),
+        recent_input: values.get("--recent-input").map(PathBuf::from),
+        evidence_type: values
+            .get("--evidence-type")
+            .cloned()
+            .unwrap_or_else(|| "live".into()),
+    };
+    let report = export_phase4_context(&opts);
+    if report.passed() {
+        println!(
+            "phase4-context-export: PASS — contexts={}",
+            report.capture_count
+        )
+    } else {
+        eprintln!(
+            "phase4-context-export: FAIL — {} issue(s)",
+            report.errors.len()
+        );
+        for e in report.errors {
+            eprintln!("  - {e}")
+        }
+        process::exit(1)
+    }
+}
+
+fn cmd_phase4_fallback_check(args: &[String]) {
+    let mut bundle = None;
+    let mut report_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bundle" => {
+                i += 1;
+                bundle = Some(require_arg("phase4-fallback-check", "--bundle", args, i))
+            }
+            "--report" => {
+                i += 1;
+                report_path = Some(require_arg("phase4-fallback-check", "--report", args, i))
+            }
+            other => {
+                eprintln!("phase4-fallback-check: unknown option '{other}'");
+                process::exit(1)
+            }
+        }
+        i += 1
+    }
+    let bundle = bundle.unwrap_or_else(|| missing_required("phase4-fallback-check", "--bundle"));
+    let report = check_phase4_fallback(&bundle);
+    if let Some(path) = report_path {
+        if let Err(e) = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()) {
+            eprintln!("phase4-fallback-check: cannot write report: {e}");
+            process::exit(1)
+        }
+    }
+    if report.passed() {
+        println!(
+            "phase4-fallback-check: PASS — captures={}",
+            report.capture_count
+        )
+    } else {
+        eprintln!(
+            "phase4-fallback-check: FAIL — {} issue(s)",
+            report.errors.len()
+        );
+        for e in report.errors {
+            eprintln!("  - {e}")
+        }
+        process::exit(1)
     }
 }
 

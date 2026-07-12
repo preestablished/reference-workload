@@ -26,14 +26,16 @@
 //! 7. `double_run_rejects_continue_past_faults_flag` — double-run CLI
 //!    rejects the flag.
 
+use refwork_dh_client::mock::{spawn_uds, MockFixture};
 use refwork_featuremap::parse_feature_map;
 use refwork_script::PadLog;
 use refwork_verify::double_run::double_run;
 use refwork_verify::expectations::parse_expectations;
 use refwork_verify::map_check::{map_check, MapCheckResult};
 use refwork_verify::phase4_bundle_check::check_phase4_bundle;
+use refwork_verify::phase4_capture_export::{export_phase4_captures, CaptureExportOptions};
 use refwork_verify::phase4_checksum_manifest::{
-    write_phase4_checksum_manifest, ChecksumManifestOptions,
+    set_phase4_payload_root, write_phase4_checksum_manifest, ChecksumManifestOptions,
 };
 use refwork_verify::phase4_context_check::check_phase4_context_bundle;
 use refwork_verify::phase4_layout::{write_phase4_layout, LayoutOptions};
@@ -449,6 +451,7 @@ fn write_synthetic_phase4_bundle() -> TempDir {
             "decoded_values": [i as u64, (i & 0xff) as u64, (i & 1) as u64],
             "framebuffer": {
                 "ref": format!("artifact:framebuffer-{i:06}"),
+                "len": 1024,
                 "encoding": "fb_lz4",
                 "width": 256,
                 "height": 224,
@@ -456,6 +459,7 @@ fn write_synthetic_phase4_bundle() -> TempDir {
                 "pixel_format": "xrgb8888",
                 "uncompressed_len": 229376,
                 "blake3": fake_hash(2000 + i as u64)
+                ,"uncompressed_blake3": fake_hash(3000 + i as u64)
             }
         });
         captures.push_str(&serde_json::to_string(&row).unwrap());
@@ -735,6 +739,77 @@ fn phase4_bundle_check_accepts_synthetic_contract_shape() {
     assert_eq!(report.capture_count, 1000);
     assert_eq!(report.score_plan_batch_ids, ["phase4-k32-0001"]);
     assert_eq!(report.trajectory_files.len(), 1);
+}
+
+#[test]
+fn phase4_capture_export_row_is_accepted_inside_synthetic_full_bundle() {
+    let exported = TempDir::new("phase4-export-e2e");
+    let map = exported.path.join("map.yaml");
+    let layout = exported.path.join("layout.json");
+    std::fs::write(&map, SYNTH_PHASE4_MAP_YAML).unwrap();
+    let layout_report = write_phase4_layout(&LayoutOptions {
+        map: map.clone(),
+        out: layout.clone(),
+        capture_spec_hash: fake_hash(99),
+        layout_version: 1,
+        compiler_or_exporter_commit: "0123456789012345678901234567890123456789".into(),
+    });
+    assert!(layout_report.passed());
+    std::fs::write(exported.path.join("input.padlog"), "padlog v1\n1x0000\n").unwrap();
+    let uds = exported.path.join("worker.sock");
+    let _worker = spawn_uds(MockFixture::default(), &uds).unwrap();
+    let out = exported.path.join("out");
+    let report = export_phase4_captures(&CaptureExportOptions {
+        endpoint: uds.to_string_lossy().into(),
+        snapshot_hash: "ab".repeat(32),
+        padlog: exported.path.join("input.padlog"),
+        map: map.clone(),
+        layout: layout.clone(),
+        bundle: out.clone(),
+        count: 1,
+        cadence: 1,
+        hard_icount_cap: 10_000_000,
+        production: false,
+        source_ref: "snapshot:synthetic-e2e".into(),
+    });
+    assert!(report.passed(), "{:?}", report.errors);
+    let mut exported_row: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(out.join("captures/index.jsonl"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    exported_row["capture_id"] = "cap-000000".into();
+    let bundle = write_synthetic_phase4_bundle();
+    std::fs::copy(&layout, bundle.path.join("layout.json")).unwrap();
+    let layout_hash = layout_report.layout_hash.unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle.path.join("manifest.json")).unwrap())
+            .unwrap();
+    manifest["layout_hash"] = layout_hash.clone().into();
+    write_json(&bundle.path.join("manifest.json"), &manifest);
+    let mut rows = std::fs::read_to_string(bundle.path.join("captures/index.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    for row in &mut rows {
+        row["layout_hash"] = layout_hash.clone().into();
+        row["feature_bytes"]["len"] = 4.into()
+    }
+    rows[0] = exported_row;
+    let text = rows
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        bundle.path.join("captures/index.jsonl"),
+        format!("{text}\n"),
+    )
+    .unwrap();
+    let checked = check_phase4_bundle(&bundle.path);
+    assert!(checked.passed(), "{:?}", checked.errors)
 }
 
 #[test]
@@ -1040,10 +1115,9 @@ fn phase4_layout_export_rejects_zero_width_range() {
 #[test]
 fn phase4_checksum_manifest_writes_relative_hash_manifest() {
     let tmp = write_synthetic_phase4_bundle();
-    let out = tmp
-        .path
-        .join("validation")
-        .join("generated-checksum-manifest.json");
+    let seal = TempDir::new("phase4-seal");
+    let out = seal.path.join("generated-checksum-manifest.json");
+    assert!(set_phase4_payload_root(&tmp.path).passed());
 
     let report = write_phase4_checksum_manifest(&ChecksumManifestOptions {
         bundle: tmp.path.clone(),
@@ -1061,10 +1135,7 @@ fn phase4_checksum_manifest_writes_relative_hash_manifest() {
         .files
         .iter()
         .any(|entry| entry.path == "trajectory/first-boss.jsonl"));
-    assert!(!report
-        .files
-        .iter()
-        .any(|entry| entry.path == "validation/generated-checksum-manifest.json"));
+    assert!(report.payload_root.is_some());
 
     let report_json = std::fs::read_to_string(out).unwrap();
     assert!(!report_json.contains(tmp.path.to_string_lossy().as_ref()));
@@ -1074,11 +1145,13 @@ fn phase4_checksum_manifest_writes_relative_hash_manifest() {
 #[test]
 fn phase4_checksum_manifest_rejects_missing_required_file() {
     let tmp = write_synthetic_phase4_bundle();
+    let seal = TempDir::new("phase4-seal-missing");
     std::fs::remove_file(tmp.path.join("score-plan.json")).unwrap();
+    let _ = set_phase4_payload_root(&tmp.path);
 
     let report = write_phase4_checksum_manifest(&ChecksumManifestOptions {
         bundle: tmp.path.clone(),
-        out: tmp.path.join("validation/generated-checksum-manifest.json"),
+        out: seal.path.join("generated-checksum-manifest.json"),
     });
 
     assert!(!report.passed());

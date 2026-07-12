@@ -751,7 +751,9 @@ impl<'a> Checker<'a> {
 
             let fb_path = &["framebuffer"][..];
             self.require_string(&row, &[fb_path[0], "ref"]);
+            self.require_u64(&row, &[fb_path[0], "len"]);
             self.require_hash(&row, &[fb_path[0], "blake3"]);
+            self.require_hash(&row, &[fb_path[0], "uncompressed_blake3"]);
             if value_at(&row, &[fb_path[0], "bytes"]).is_some() {
                 self.error(format!(
                     "captures/index.jsonl:{line_no}: framebuffer must use private refs, not inline bytes"

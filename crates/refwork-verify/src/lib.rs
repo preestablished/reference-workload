@@ -20,9 +20,13 @@ pub(crate) mod decode;
 pub mod double_run;
 pub mod expectations;
 pub mod map_check;
+pub mod phase4_artifact_check;
 pub mod phase4_bundle_check;
+pub mod phase4_capture_export;
 pub mod phase4_checksum_manifest;
 pub mod phase4_context_check;
+pub mod phase4_context_export;
+pub mod phase4_fallback_check;
 pub mod phase4_layout;
 pub mod phase4_private_intake;
 pub mod phase4_score_plan;
@@ -33,9 +37,11 @@ pub mod vm_first_room;
 pub mod vm_suite;
 
 pub use expectations::{Assertion, Expectations, NeverClause};
+pub use phase4_artifact_check::{check_phase4_artifacts, ArtifactCheckReport};
 pub use phase4_bundle_check::{check_phase4_bundle, Phase4BundleReport};
 pub use phase4_checksum_manifest::{
-    write_phase4_checksum_manifest, ChecksumManifestOptions, ChecksumManifestReport,
+    set_phase4_payload_root, verify_phase4_checksum_manifest, write_phase4_checksum_manifest,
+    ChecksumManifestOptions, ChecksumManifestReport,
 };
 pub use phase4_context_check::{check_phase4_context_bundle, Phase4ContextReport};
 pub use phase4_layout::{write_phase4_layout, LayoutOptions, LayoutReport};

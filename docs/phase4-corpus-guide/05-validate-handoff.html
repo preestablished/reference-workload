@@ -48,11 +48,23 @@ git diff --check</code></pre>
 
 cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
   --bundle &lt;private-bundle-dir&gt; \
-  --out &lt;private-bundle-dir&gt;/validation/checksum-manifest.json
+  --set-payload-root
+
+cargo run --locked -p refwork-verify -- phase4-artifact-check \
+  --bundle &lt;private-bundle-dir&gt; \
+  --report &lt;external-private-seal-dir&gt;/artifact-check.json
 
 cargo run --locked -p refwork-verify -- phase4-bundle-check \
   --bundle &lt;private-bundle-dir&gt; \
-  --report &lt;private-bundle-dir&gt;/validation/phase4-bundle-check.json</code></pre>
+  --report &lt;external-private-seal-dir&gt;/phase4-bundle-check.json
+
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --bundle &lt;private-bundle-dir&gt; \
+  --out &lt;external-private-seal-dir&gt;/freeze-manifest.json
+
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --verify &lt;external-private-seal-dir&gt;/freeze-manifest.json \
+  --bundle &lt;freshly-retrieved-private-bundle&gt;</code></pre>
 
       <h2>Redaction Scan Public Notes</h2>
       <p>
@@ -95,7 +107,7 @@ cargo run --locked -p refwork-verify -- phase4-bundle-check \
         <li>Framebuffer metadata exists for the primary corpus.</li>
         <li>Feature-map/scoring validation passes.</li>
         <li>Trace report passes.</li>
-        <li>Checksum manifest exists.</li>
+        <li>The embedded payload root matches and the recursive external freeze manifest verifies a fresh retrieval without mutation.</li>
         <li>Redaction scan passes against the public note.</li>
         <li>The fulfillment note is updated with sanitized evidence only.</li>
       </ul>

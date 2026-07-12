@@ -1370,6 +1370,7 @@ name = "refwork-verify"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "lz4_flex",
  "refwork-dh-client",
  "refwork-emu",
  "refwork-featuremap",
@@ -1378,6 +1379,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "xtask",
 ]
 

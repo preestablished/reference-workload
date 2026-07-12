@@ -461,7 +461,11 @@ impl HypervisorWorker for MockWorker {
             // 2026-07-07 rehearsal): TakeSnapshot refuses while future
             // input events are still queued. Enforce it here so staged
             // CI catches clients that snapshot with a non-drained agenda.
-            if slot.scheduled.keys().any(|&at| at > slot.state.frame_counter) {
+            if slot
+                .scheduled
+                .keys()
+                .any(|&at| at > slot.state.frame_counter)
+            {
                 return Err(Status::failed_precondition("AgendaNotEmpty"));
             }
             let (feature_bytes, fb_lz4, fb_info) = match &capture_spec {

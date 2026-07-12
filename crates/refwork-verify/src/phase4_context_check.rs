@@ -53,11 +53,8 @@ impl<'a> Checker<'a> {
             bundle,
             report: Phase4ContextReport {
                 schema_version: 1,
-                command: format!(
-                    "refwork-verify phase4-context-check --bundle {}",
-                    bundle.display()
-                ),
-                bundle_root: bundle.display().to_string(),
+                command: "refwork-verify phase4-context-check --bundle <redacted>".to_owned(),
+                bundle_root: "<redacted>".to_owned(),
                 status: "fail".to_owned(),
                 ..Phase4ContextReport::default()
             },
