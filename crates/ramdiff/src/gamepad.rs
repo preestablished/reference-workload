@@ -22,6 +22,12 @@
 //! little-endian on every supported target). 32-bit targets (16-byte events)
 //! are not supported; both lab machines are 64-bit.
 
+// The 24-byte event parse below is the 64-bit ABI only; fail loudly on any
+// 32-bit Linux target (16-byte events) instead of silently misparsing pad
+// input mid-session.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("gamepad.rs assumes the 64-bit struct input_event layout (24 bytes)");
+
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -190,11 +196,15 @@ impl Gamepad {
         match candidate {
             None => Ok(None),
             Some(path) => Self::open_path(&path).map(Some).map_err(|e| {
-                format!(
-                    "{} — if this is a permissions error, add your user to the \
-                     `input` group or install a udev rule for the pad",
+                if e.contains("ermission denied") {
+                    format!(
+                        "{} — replug the pad (logind grants a seat ACL to \
+                         joystick devices) or add your user to the `input` group",
+                        e
+                    )
+                } else {
                     e
-                )
+                }
             }),
         }
     }
@@ -207,6 +217,9 @@ impl Gamepad {
         let mut buf = [0u8; EVENT_SIZE * 32];
         loop {
             match self.file.read(&mut buf) {
+                // Evdev nodes report device removal as an error (ENODEV/EIO),
+                // not EOF, so Ok(0) is treated as "nothing this tick" rather
+                // than a dead device.
                 Ok(0) => break,
                 Ok(n) => self.state.feed(&buf[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
