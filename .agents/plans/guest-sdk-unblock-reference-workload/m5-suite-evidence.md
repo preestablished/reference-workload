@@ -95,3 +95,13 @@ offer; human-visible half). Host time to READY: restore-based (the VM
 restores a READY snapshot rather than cold-booting), so the bead's
 "READY under 2s" clause is satisfied by the restore path; the cold-boot
 READY timing was verified worker-side 2026-07-05.
+
+## 2026-07-12: Bridge Cutover Confirmed — Exit Gate 3 Fully Closed
+
+The coordinated `BRIDGE_REAL_SNAPSHOT_REF` cutover to `948b73e6…` (this
+suite's READY snapshot) executed 2026-07-12; the operator confirmed live
+frames from the real ROM rendering in the deployed browser, with the worker
+session slot RUNNING from that snapshot. Record:
+`rom-operator-bridge/.agents/handoffs/2026-07-12-real-snapshot-cutover-confirmation.md`
+(request handback: `.agents/requests/phase3-m4-first-room-gate-and-m5-stamp/05-cutover-verification.md`).
+All four Phase 3 exit gates are now green.
