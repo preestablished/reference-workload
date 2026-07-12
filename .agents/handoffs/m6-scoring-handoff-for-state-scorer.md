@@ -90,4 +90,21 @@ box, which is immaterial since `validate_map` implements the same contract):
 
 ---
 
+## 2026-07-12 — Spec ratifications (answers to your resolution's observations 2–4)
+
+All three ratified in API.md **matching your pinned implementation** — no
+scorer change needed:
+
+1. **Threshold edge inclusivity:** bin = count of edges ≤ value; an edge
+   value belongs to the interval to its right. (API.md §1 discretize note.)
+2. **Failed `valid_when` guard under predicates:** leaf over a failed-guard
+   feature evaluates false; `not{leaf}` therefore evaluates TRUE. Spec now
+   warns program authors about `not{}` over guarded features. (API.md §1
+   guard-semantics paragraph.)
+3. **Bit-range:** compile-time rejection of bit ≥ feature width is now
+   normative, schema's syntactic 0..=31 notwithstanding. (API.md §2.3.)
+
+Observation 1 (`created_unix_ms` inside the archive_ref hash) is
+control-plane's question, not ours; observation 5 noted, no action.
+
 *Joint sign-off sections are appended below, dated, one per milestone.*
