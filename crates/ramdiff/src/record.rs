@@ -250,7 +250,10 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         "ramdiff record [interactive] — F5=dump, Esc=quit",
         FB_WIDTH,
         FB_HEIGHT,
-        WindowOptions::default(),
+        WindowOptions {
+            scale: minifb::Scale::X4,
+            ..WindowOptions::default()
+        },
     )
     .map_err(|e| format!("cannot open window: {}", e))?;
 
@@ -425,15 +428,16 @@ fn build_pad(window: &minifb::Window) -> u16 {
 
 /// Convert XRGB8888 framebuffer bytes to minifb's u32 slice.
 /// minifb expects each u32 as 0x00RRGGBB (native endian, X byte ignored).
+/// The emu stores each pixel as a little-endian 0x00RRGGBB u32, so the
+/// byte layout is [B, G, R, X].
 #[cfg(feature = "interactive")]
 fn xrgb_to_u32(src: &[u8], dst: &mut [u32], width: usize, height: usize) {
     for y in 0..height {
         for x in 0..width {
             let base = (y * width + x) * 4;
-            let _x_byte = src[base];
-            let r = src[base + 1];
-            let g = src[base + 2];
-            let b = src[base + 3];
+            let b = src[base];
+            let g = src[base + 1];
+            let r = src[base + 2];
             dst[y * width + x] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         }
     }
