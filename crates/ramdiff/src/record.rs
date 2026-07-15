@@ -204,6 +204,42 @@ pub struct InteractiveOpts {
     pub session_dir: std::path::PathBuf,
     /// Path to the output `.padlog` file (written incrementally).
     pub output_log: std::path::PathBuf,
+    /// Replay the existing output log to restore emulator state, then append.
+    pub resume: bool,
+    /// Explicit evdev gamepad node (Linux). `None` enables auto-detection.
+    pub gamepad: Option<std::path::PathBuf>,
+}
+
+#[cfg(any(feature = "interactive", test))]
+fn load_resume_log(path: &std::path::Path, resume: bool) -> Result<PadLog, String> {
+    if !resume || !path.exists() {
+        return Ok(PadLog::default());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read resume log {}: {}", path.display(), e))?;
+    refwork_script::parse(&text)
+        .map_err(|e| format!("cannot parse resume log {}: {}", path.display(), e))
+}
+
+#[cfg(any(feature = "interactive", test))]
+fn open_interactive_log(path: &std::path::Path, append: bool) -> Result<std::fs::File, String> {
+    use std::io::Write;
+
+    let mut open = std::fs::OpenOptions::new();
+    open.create(true);
+    if append {
+        open.append(true);
+    } else {
+        open.write(true).truncate(true);
+    }
+    let mut file = open
+        .open(path)
+        .map_err(|e| format!("cannot open log file {}: {}", path.display(), e))?;
+    if !append {
+        writeln!(file, "padlog v1").map_err(|e| format!("write error: {}", e))?;
+        file.flush().map_err(|e| format!("flush error: {}", e))?;
+    }
+    Ok(file)
 }
 
 #[cfg(feature = "interactive")]
@@ -231,23 +267,40 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     let mut core =
         Core::new(cart, regions).map_err(|e| format!("core construction failed: {:?}", e))?;
 
-    // Open the output log file.  Write header once, then append per frame.
-    let mut log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&opts.output_log)
-        .map_err(|e| format!("cannot open log file: {}", e))?;
-    writeln!(log_file, "padlog v1").map_err(|e| format!("write error: {}", e))?;
-    log_file
-        .flush()
-        .map_err(|e| format!("flush error: {}", e))?;
+    // Resume is deterministic replay: validate and run every recorded input
+    // before opening the log for append. A replay fault leaves the log intact.
+    let prior_log = load_resume_log(&opts.output_log, opts.resume)?;
+    if !prior_log.is_empty() {
+        eprintln!(
+            "interactive: replaying {} frames to restore session state",
+            prior_log.len()
+        );
+        for (index, &pad) in prior_log.frames.iter().enumerate() {
+            let flags = core.run_one_frame(pad);
+            if let Some(fault) = core.fault() {
+                return Err(format!(
+                    "cannot resume: replay fault at frame {} (flags={:?}): {:?}",
+                    index, flags, fault
+                ));
+            }
+            if (index + 1).is_multiple_of(10_000) {
+                eprintln!("interactive: replayed {} frames", index + 1);
+            }
+        }
+        eprintln!("interactive: resumed at frame {}", prior_log.len());
+    }
+
+    let append = opts.resume && opts.output_log.exists();
+    let mut log_file = open_interactive_log(&opts.output_log, append)?;
 
     let mut window = Window::new(
         "ramdiff record [interactive] — F5=dump, Esc=quit",
         FB_WIDTH,
         FB_HEIGHT,
-        WindowOptions::default(),
+        WindowOptions {
+            scale: minifb::Scale::X4,
+            ..WindowOptions::default()
+        },
     )
     .map_err(|e| format!("cannot open window: {}", e))?;
 
@@ -259,11 +312,45 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // minifb expects u32 XRGB8888 in native endian.
     let mut fb_u32 = vec![0u32; FB_WIDTH * FB_HEIGHT];
 
-    let mut frame: u64 = 0;
+    let mut frame = prior_log.len() as u64;
+
+    // Optional evdev gamepad (Linux): merged with the keyboard via OR.
+    #[cfg(target_os = "linux")]
+    let mut gamepad = match &opts.gamepad {
+        Some(path) => match crate::gamepad::Gamepad::open_path(path) {
+            Ok(g) => {
+                eprintln!("interactive: gamepad {}", g.description);
+                Some(g)
+            }
+            Err(e) => {
+                eprintln!("interactive: {} - keyboard only", e);
+                None
+            }
+        },
+        None => match crate::gamepad::Gamepad::open_auto() {
+            Ok(Some(g)) => {
+                eprintln!("interactive: gamepad {}", g.description);
+                Some(g)
+            }
+            Ok(None) => {
+                eprintln!("interactive: no gamepad detected - keyboard only");
+                None
+            }
+            Err(e) => {
+                eprintln!("interactive: {} - keyboard only", e);
+                None
+            }
+        },
+    };
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Build pad from current key state.
-        let pad = build_pad(&window);
+        // Build pad from current key state, merged with the gamepad if any.
+        #[allow(unused_mut)]
+        let mut pad = build_pad(&window);
+        #[cfg(target_os = "linux")]
+        if let Some(g) = gamepad.as_mut() {
+            pad |= g.poll();
+        }
 
         let flags = core.run_one_frame(pad);
         if let Some(fault) = core.fault() {
@@ -388,15 +475,15 @@ fn build_pad(window: &minifb::Window) -> u16 {
 
 /// Convert XRGB8888 framebuffer bytes to minifb's u32 slice.
 /// minifb expects each u32 as 0x00RRGGBB (native endian, X byte ignored).
+/// The emulator buffer stores little-endian 0x00RRGGBB as `[B, G, R, X]`.
 #[cfg(feature = "interactive")]
 fn xrgb_to_u32(src: &[u8], dst: &mut [u32], width: usize, height: usize) {
     for y in 0..height {
         for x in 0..width {
             let base = (y * width + x) * 4;
-            let _x_byte = src[base];
-            let r = src[base + 1];
-            let g = src[base + 2];
-            let b = src[base + 3];
+            let b = src[base];
+            let g = src[base + 1];
+            let r = src[base + 2];
             dst[y * width + x] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         }
     }
@@ -546,6 +633,52 @@ mod tests {
         let log = PadLog::from_frames(vec![]).unwrap();
         assert_eq!(get_pad(&log, 0), 0);
         assert_eq!(get_pad(&log, 99), 0);
+    }
+
+    #[test]
+    fn resume_log_is_loaded_only_when_requested() {
+        let temp = std::env::temp_dir().join(format!(
+            "ramdiff-resume-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&temp, "padlog v1\n0001\n2x0002\n").unwrap();
+
+        let fresh = load_resume_log(&temp, false).unwrap();
+        assert!(fresh.is_empty());
+        let resumed = load_resume_log(&temp, true).unwrap();
+        assert_eq!(resumed.frames, vec![1, 2, 2]);
+
+        std::fs::remove_file(temp).unwrap();
+    }
+
+    #[test]
+    fn resume_log_open_appends_without_rewriting_header() {
+        use std::io::Write;
+
+        let temp = std::env::temp_dir().join(format!(
+            "ramdiff-append-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&temp, "padlog v1\n0001\n").unwrap();
+
+        let mut file = open_interactive_log(&temp, true).unwrap();
+        writeln!(file, "0002").unwrap();
+        drop(file);
+
+        let parsed = refwork_script::parse(&std::fs::read_to_string(&temp).unwrap()).unwrap();
+        assert_eq!(parsed.frames, vec![1, 2]);
+        std::fs::remove_file(temp).unwrap();
+    }
+
+    #[cfg(feature = "interactive")]
+    #[test]
+    fn interactive_framebuffer_conversion_preserves_rgb_channels() {
+        let src = [0x33, 0x22, 0x11, 0x00, 0xcc, 0xbb, 0xaa, 0x00];
+        let mut dst = [0u32; 2];
+        xrgb_to_u32(&src, &mut dst, 2, 1);
+        assert_eq!(dst, [0x0011_2233, 0x00aa_bbcc]);
     }
 
     #[test]

@@ -5,10 +5,11 @@
 //! - NTSC-class frame: 262 scanlines (0..=261), 1364 master clocks each.
 //!   Fixed frame length [`MCLK_PER_FRAME`]; the short-line/long-line
 //!   interlace variations are deliberately not modeled in M1.
-//! - Visible scanlines are 1..=224 (rendered to framebuffer rows 0..=223).
-//! - V-blank begins at the start of scanline 225 (NMI flag set there);
-//!   it ends at the start of scanline 0.
-//! - Auto-joypad read occupies scanlines 225..=227.
+//! - Visible scanlines are 1..=224 normally and 1..=239 when frame-latched
+//!   SETINI overscan is active. The latter is projected into the fixed 224-row
+//!   framebuffer by cropping source lines 1..=7 and 232..=239.
+//! - V-blank begins at line 225 normally or line 240 in overscan mode and ends
+//!   at line 0. Auto-joypad occupies its first three scanlines.
 //! - One CPU internal cycle = 6 master clocks. Memory access costs follow
 //!   the documented region speed table ([`mem_speed`]).
 
@@ -22,7 +23,7 @@ pub const MCLK_PER_FRAME: u64 = LINES_PER_FRAME as u64 * MCLK_PER_LINE;
 pub const FIRST_VISIBLE_LINE: u16 = 1;
 /// Last visible scanline (inclusive).
 pub const LAST_VISIBLE_LINE: u16 = 224;
-/// Scanline at whose start v-blank begins and the NMI flag is raised.
+/// Default scanline at whose start vblank begins. Overscan uses line 240.
 pub const VBLANK_START_LINE: u16 = 225;
 /// Master clocks per CPU internal cycle.
 pub const MCLK_PER_INTERNAL_CYCLE: u64 = 6;

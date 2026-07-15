@@ -6,6 +6,7 @@
 //! ramdiff record --rom <file.rom> --script <run.padlog> --session <dir>
 //!                [--mark <frame>=<label>] [--dump-every N] [--frames N]
 //!                [--interactive]   (only when compiled with --features interactive)
+//!                [--resume] [--gamepad /dev/input/eventN]
 //!
 //! ramdiff search --session <dir>
 //!                [--width u8|u16le]
@@ -45,6 +46,9 @@
 //! | Right Shift | Select | 11 |
 //! | F5 | Dump WRAM (prompts for label) | — |
 //! | Esc | Quit | — |
+//!
+//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux and
+//! merged with the keyboard. F5 and Esc remain keyboard-only.
 
 #![forbid(unsafe_code)]
 
@@ -94,7 +98,8 @@ fn usage() {
     println!("  record --rom <file.rom> --script <run.padlog> --session <dir>");
     println!("         [--mark <frame>=<label>] [--dump-every N] [--frames N]");
     #[cfg(feature = "interactive")]
-    println!("         [--interactive] [--output-log <file.padlog>]");
+    println!("         [--interactive] [--resume] [--output-log <file.padlog>]");
+    println!("         [--gamepad /dev/input/eventN]   (default: auto-detect)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -123,7 +128,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut dump_every: Option<u64> = None;
     let mut total_frames: Option<u64> = None;
     let mut interactive = false;
+    let mut resume = false;
     let mut output_log: Option<std::path::PathBuf> = None;
+    let mut gamepad: Option<std::path::PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -164,9 +171,16 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             "--interactive" => {
                 interactive = true;
             }
+            "--resume" => {
+                resume = true;
+            }
             "--output-log" => {
                 i += 1;
                 output_log = Some(need_path("record", "--output-log", args, i)?);
+            }
+            "--gamepad" => {
+                i += 1;
+                gamepad = Some(need_path("record", "--gamepad", args, i)?);
             }
             other => {
                 return Err(format!("record: unknown option {:?}", other));
@@ -184,7 +198,16 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             rom,
             session_dir,
             output_log: out_log,
+            resume,
+            gamepad,
         });
+    }
+
+    if resume {
+        return Err("record: --resume requires --interactive".to_owned());
+    }
+    if gamepad.is_some() {
+        return Err("record: --gamepad requires --interactive".to_owned());
     }
 
     let rom = rom.ok_or_else(|| "record: --rom is required".to_owned())?;

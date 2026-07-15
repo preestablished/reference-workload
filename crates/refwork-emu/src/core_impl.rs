@@ -8,10 +8,7 @@ use crate::cart::Cartridge;
 use crate::cpu::Cpu;
 use crate::fault::{Fault, FrameFlags};
 use crate::ppu::Ppu;
-use crate::timing::{
-    FB_BYTES, FIRST_VISIBLE_LINE, LAST_VISIBLE_LINE, LINES_PER_FRAME, MCLK_PER_FRAME,
-    MCLK_PER_LINE, VBLANK_START_LINE,
-};
+use crate::timing::{FB_BYTES, FIRST_VISIBLE_LINE, LINES_PER_FRAME, MCLK_PER_FRAME, MCLK_PER_LINE};
 use crate::WRAM_INIT_BYTE;
 
 /// Construction-time errors. Runtime anomalies are [`Fault`]s, not errors.
@@ -184,6 +181,11 @@ impl Core {
         // Main scanline loop.
         let mut faulted_early = false;
         for line in 0..LINES_PER_FRAME {
+            if line == 0 {
+                // Latch SETINI display timing before the bus derives this
+                // frame's vblank/NMI/auto-joy boundary.
+                self.bus.ppu.begin_frame();
+            }
             // Per-line hooks (NMI, auto-joypad, IRQ reschedule).
             self.bus.start_line(line, pad);
             self.bus.ppu.set_line(line);
@@ -191,20 +193,19 @@ impl Core {
             // PPU frame/vblank hooks (separate from bus start_line to keep
             // bus unit-testable without a live PPU).
             if line == 0 {
-                self.bus.ppu.begin_frame();
                 // HDMA: initialize channel table pointers at start of frame
                 // (line 0 = end of v-blank, documented init point).
                 self.bus.init_hdma();
-            } else if line == VBLANK_START_LINE {
+            } else if line == self.bus.ppu.vblank_start_line() {
                 self.bus.ppu.begin_vblank();
             }
 
             // HDMA: apply per-scanline register writes before rendering the
             // line (writes land in h-blank before the visible raster begins).
-            // HDMA runs on visible lines only (1..=224); v-blank HDMA writes
+            // HDMA runs on visible lines only (through 224 or overscan line 239); vblank writes
             // are skipped per the documented behavior — the channel state
             // still advances so table reload at line 0 is consistent.
-            if (FIRST_VISIBLE_LINE..=LAST_VISIBLE_LINE).contains(&line) {
+            if line >= FIRST_VISIBLE_LINE && line < self.bus.ppu.vblank_start_line() {
                 self.bus.execute_hdma();
                 if self.bus.fault.is_some() {
                     faulted_early = true;
@@ -233,7 +234,7 @@ impl Core {
             }
 
             // Render visible scanlines.
-            if (FIRST_VISIBLE_LINE..=LAST_VISIBLE_LINE).contains(&line) {
+            if line >= FIRST_VISIBLE_LINE && line < self.bus.ppu.vblank_start_line() {
                 self.bus.ppu.render_scanline(line);
             }
 

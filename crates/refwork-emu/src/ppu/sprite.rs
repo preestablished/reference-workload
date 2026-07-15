@@ -164,6 +164,8 @@ pub fn render_sprite_line(
     obsel: Obsel,
     out: &mut [SpritePixel; 256],
     line: u16,
+    obj_interlace: bool,
+    field: bool,
 ) {
     // Initialize all pixels transparent.
     for p in out.iter_mut() {
@@ -183,18 +185,45 @@ pub fn render_sprite_line(
         // Check if this sprite's Y range covers the current scanline.
         // Y is the top of the sprite; comparison wraps at 256.
         let sprite_y = s.y as i32;
+        let obj_height = if obj_interlace && obsel.size >= 6 && s.width == 16 {
+            16
+        } else {
+            s.height
+        };
+        let visible_height = if obj_interlace {
+            obj_height / 2
+        } else {
+            obj_height
+        };
         let dy = (screen_y - sprite_y).rem_euclid(256);
-        if dy >= s.height as i32 {
+        if dy >= visible_height as i32 {
             continue;
         }
-        let tile_row_abs = dy as u16;
+        let mut tile_row_abs = dy as u16;
+        if obj_interlace {
+            tile_row_abs *= 2;
+        }
 
         // Compute tile pixel Y within the 8×8 sub-tile.
-        let tile_row_flipped = if s.vflip {
-            s.height - 1 - tile_row_abs
+        let mut tile_row_flipped = if s.vflip {
+            if s.width == obj_height {
+                obj_height - 1 - tile_row_abs
+            } else if tile_row_abs < s.width {
+                s.width - 1 - tile_row_abs
+            } else {
+                s.width + (s.width - 1) - (tile_row_abs - s.width)
+            }
         } else {
             tile_row_abs
         };
+        if obj_interlace {
+            if s.vflip {
+                tile_row_flipped = tile_row_flipped.wrapping_sub(field as u16);
+            } else {
+                tile_row_flipped = tile_row_flipped.wrapping_add(field as u16);
+            }
+        }
+        tile_row_flipped &= 0xff;
         let sub_tile_y = tile_row_flipped / 8;
         let pixel_y = tile_row_flipped & 7;
 

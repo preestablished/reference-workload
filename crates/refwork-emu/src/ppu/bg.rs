@@ -10,6 +10,8 @@ pub struct BgPixel {
     pub color_idx: u8,
     /// Absolute CGRAM index for this pixel.
     pub cgram_idx: u8,
+    /// Tilemap palette-group bits, used by direct-color modes.
+    pub palette_group: u8,
     /// Tile priority bit.
     pub priority: bool,
 }
@@ -18,6 +20,7 @@ impl BgPixel {
     pub const TRANSPARENT: BgPixel = BgPixel {
         color_idx: 0,
         cgram_idx: 0,
+        palette_group: 0,
         priority: false,
     };
 
@@ -50,7 +53,7 @@ fn decode_tile_entry(entry: u16) -> (u16, u8, bool, bool, bool) {
 ///   h=1,v=1: A top-left, B top-right, C bot-left, D bot-right
 ///             (+0x000, +0x800, +0x1000, +0x1800)
 #[inline]
-fn fetch_tilemap(
+pub(super) fn fetch_tilemap(
     vram: &[u8; 0x10000],
     tm_base_bytes: usize,
     tx: u16,
@@ -111,6 +114,107 @@ fn read_4bpp(vram: &[u8; 0x10000], tile_base: usize, px: u16, py: u16) -> u8 {
     p0 | (p1 << 1) | (p2 << 2) | (p3 << 3)
 }
 
+#[inline]
+fn read_8bpp(vram: &[u8; 0x10000], tile_base: usize, px: u16, py: u16) -> u8 {
+    let row = (tile_base + py as usize * 2) & 0xffff;
+    let bit = 7 - px;
+    let mut color = 0u8;
+    for pair in 0..4usize {
+        let base = (row + pair * 16) & 0xffff;
+        color |= ((vram[base] >> bit) & 1) << (pair * 2);
+        color |= ((vram[(base + 1) & 0xffff] >> bit) & 1) << (pair * 2 + 1);
+    }
+    color
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_bg_pixel(
+    vram: &[u8; 0x10000],
+    sc: BgSc,
+    tile_data_base_bytes: usize,
+    bpp: u8,
+    cgram_palette_base: u8,
+    tile_size_px: u16,
+    screen_x: u32,
+    screen_y: u32,
+) -> BgPixel {
+    render_bg_pixel_dims(
+        vram,
+        sc,
+        tile_data_base_bytes,
+        bpp,
+        cgram_palette_base,
+        tile_size_px,
+        tile_size_px,
+        screen_x,
+        screen_y,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_bg_pixel_dims(
+    vram: &[u8; 0x10000],
+    sc: BgSc,
+    tile_data_base_bytes: usize,
+    bpp: u8,
+    cgram_palette_base: u8,
+    tile_width_px: u16,
+    tile_height_px: u16,
+    screen_x: u32,
+    screen_y: u32,
+) -> BgPixel {
+    let tile_col = (screen_x / tile_width_px as u32) as u16;
+    let tile_row = (screen_y / tile_height_px as u32) as u16;
+    let raw_tx = (screen_x % tile_width_px as u32) as u16;
+    let raw_ty = (screen_y % tile_height_px as u32) as u16;
+    let tm_entry = fetch_tilemap(
+        vram,
+        sc.base as usize,
+        tile_col,
+        tile_row,
+        sc.h_wide,
+        sc.v_wide,
+    );
+    let (char_no, palette, priority, hflip, vflip) = decode_tile_entry(tm_entry);
+
+    let (sub_tx, sub_ty, pixel_x, pixel_y) = {
+        let stx_unflipped = raw_tx / 8;
+        let sty_unflipped = raw_ty / 8;
+        let hparts = tile_width_px / 8;
+        let vparts = tile_height_px / 8;
+        let stx = if hflip {
+            hparts - 1 - stx_unflipped
+        } else {
+            stx_unflipped
+        };
+        let sty = if vflip {
+            vparts - 1 - sty_unflipped
+        } else {
+            sty_unflipped
+        };
+        let px = if hflip { 7 - (raw_tx & 7) } else { raw_tx & 7 };
+        let py = if vflip { 7 - (raw_ty & 7) } else { raw_ty & 7 };
+        (stx, sty, px, py)
+    };
+    let final_char = ((char_no as u32 + sub_tx as u32 + sub_ty as u32 * 16) & 0x3ff) as u16;
+    let bytes_per_tile = bpp as usize * 8;
+    let tile_base = (tile_data_base_bytes + final_char as usize * bytes_per_tile) & 0xffff;
+    let color_idx = match bpp {
+        2 => read_2bpp(vram, tile_base, pixel_x, pixel_y),
+        4 => read_4bpp(vram, tile_base, pixel_x, pixel_y),
+        8 => read_8bpp(vram, tile_base, pixel_x, pixel_y),
+        _ => 0,
+    };
+    let palette_colors = 1u16 << bpp;
+    let cgram_idx = cgram_palette_base as u16 + palette as u16 * palette_colors + color_idx as u16;
+    BgPixel {
+        color_idx,
+        cgram_idx: cgram_idx as u8,
+        palette_group: palette,
+        priority,
+    }
+}
+
 /// Render one BG layer for 256 pixels into `out`.
 ///
 /// - `tile_data_base_bytes`: byte address of tile data region in VRAM
@@ -130,79 +234,19 @@ pub fn render_bg_line(
     tile_size_px: u16,
     line: u16,
 ) {
-    let palette_colors: u8 = if bpp == 2 { 4 } else { 16 };
-    let bytes_per_8x8_tile: usize = bpp as usize * 8; // 16 or 32
-
     let screen_y = ((line as u32).wrapping_add(scroll.vofs as u32)) & 0x1FF;
 
     for out_x in 0..256u16 {
         let screen_x = ((out_x as u32).wrapping_add(scroll.hofs as u32)) & 0x1FF;
-
-        // Tile grid position
-        let tile_col = (screen_x / tile_size_px as u32) as u16;
-        let tile_row = (screen_y / tile_size_px as u32) as u16;
-
-        // Pixel within tile (before flip)
-        let raw_tx = (screen_x % tile_size_px as u32) as u16;
-        let raw_ty = (screen_y % tile_size_px as u32) as u16;
-
-        let tm_entry = fetch_tilemap(
+        out[out_x as usize] = render_bg_pixel(
             vram,
-            sc.base as usize,
-            tile_col,
-            tile_row,
-            sc.h_wide,
-            sc.v_wide,
+            sc,
+            tile_data_base_bytes,
+            bpp,
+            cgram_palette_base,
+            tile_size_px,
+            screen_x,
+            screen_y,
         );
-        let (char_no, palette, priority, hflip, vflip) = decode_tile_entry(tm_entry);
-
-        // For 16×16 tiles: select sub-tile (0 or 1 in each dimension).
-        // Flip is applied at the sub-tile selection level, then within the 8×8.
-        let (sub_tx, sub_ty, pixel_x, pixel_y) = if tile_size_px == 16 {
-            let stx_unflipped = raw_tx / 8;
-            let sty_unflipped = raw_ty / 8;
-            let stx = if hflip {
-                1 - stx_unflipped
-            } else {
-                stx_unflipped
-            };
-            let sty = if vflip {
-                1 - sty_unflipped
-            } else {
-                sty_unflipped
-            };
-            let px = if hflip { 7 - (raw_tx & 7) } else { raw_tx & 7 };
-            let py = if vflip { 7 - (raw_ty & 7) } else { raw_ty & 7 };
-            (stx, sty, px, py)
-        } else {
-            let px = if hflip { 7 - raw_tx } else { raw_tx };
-            let py = if vflip { 7 - raw_ty } else { raw_ty };
-            (0u16, 0u16, px, py)
-        };
-
-        // Compute final 8×8 character number.
-        // For 16×16: sub_ty * 16 + sub_tx are added; char rows are spaced 16 chars apart.
-        let final_char = if tile_size_px == 16 {
-            ((char_no as u32 + sub_tx as u32 + sub_ty as u32 * 16) & 0x3FF) as u16
-        } else {
-            char_no & 0x3FF
-        };
-
-        let tile_base = (tile_data_base_bytes + final_char as usize * bytes_per_8x8_tile) & 0xFFFF;
-
-        let color_idx = match bpp {
-            2 => read_2bpp(vram, tile_base, pixel_x, pixel_y),
-            _ => read_4bpp(vram, tile_base, pixel_x, pixel_y),
-        };
-
-        let cgram_idx = cgram_palette_base
-            .wrapping_add(palette.wrapping_mul(palette_colors))
-            .wrapping_add(color_idx);
-
-        out[out_x as usize] = BgPixel {
-            color_idx,
-            cgram_idx,
-            priority,
-        };
     }
 }

@@ -17,23 +17,19 @@
 //! - Mosaic ($2106): size + per-BG enable, line-group quantization.
 //! - BG mode 3 (8bpp palette): 8bpp tile color indices into CGRAM directly.
 //! - BG mode 7 (affine): 8.8 fixed-point signed matrix math in i32, no floats.
-//!   EXTBG (SETINI bit 6) and hires/interlace remain faulting (D9).
-//!
-//! Still faulting (D9): modes 2, 4, 5, 6; SETINI interlace/overscan/hires;
-//! mode-7 EXTBG; indirect-color mode.
 //!
 //! Sprite range/time overflow limits are deliberately not modeled (documented
 //! simplification; determinism is unaffected).
 
 use crate::fault::Fault;
-use crate::timing::FB_BYTES;
+use crate::timing::{FB_BYTES, LAST_VISIBLE_LINE, VBLANK_START_LINE};
 
 mod bg;
 mod palette;
 mod regs;
 mod sprite;
 
-use bg::{render_bg_line, BgPixel};
+use bg::{fetch_tilemap, render_bg_line, render_bg_pixel_dims, BgPixel};
 use palette::{bgr555_to_xrgb8888, read_cgram_color};
 use regs::{BgNba, BgSc, BgScroll, Obsel, Vmain};
 use sprite::{render_sprite_line, SpritePixel};
@@ -140,6 +136,22 @@ fn color_math_op(
     (r5 as u16) | ((g5 as u16) << 5) | ((b5 as u16) << 10)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PixelColor {
+    Cgram(usize),
+    Direct(u16),
+}
+
+#[inline]
+fn direct_color(palette: u8, palette_group: u8) -> u16 {
+    ((palette as u16) << 7 & 0x6000)
+        | ((palette_group as u16) << 10 & 0x1000)
+        | ((palette as u16) << 4 & 0x0380)
+        | ((palette_group as u16) << 5 & 0x0040)
+        | ((palette as u16) << 2 & 0x001c)
+        | ((palette_group as u16) << 1 & 0x0002)
+}
+
 // ────────────────────────────────────────────────────────────────
 // PPU struct
 // ────────────────────────────────────────────────────────────────
@@ -179,7 +191,7 @@ pub struct Ppu {
     oam_latch_valid: bool,
 
     // ── $2105 BGMODE ────────────────────────────────────────────
-    /// Current BG mode (0-7; only 0 and 1 implemented).
+    /// Current BG mode (0-7).
     bg_mode: u8,
     /// BG3 priority bit (bit 3 of $2105, mode 1 only).
     bg3_priority: bool,
@@ -229,7 +241,7 @@ pub struct Ppu {
     // ── $212C/$212D TM/TS ───────────────────────────────────────
     /// Main-screen layer enable bits (honored).
     tm: u8,
-    /// Sub-screen layer enable bits (stored, ignored in M1 — no subscreen).
+    /// Sub-screen layer enable bits.
     ts: u8,
 
     // ── $212E/$212F TMW/TSW ─────────────────────────────────────
@@ -249,7 +261,7 @@ pub struct Ppu {
     setini: u8,
 
     // ── Mode-7 registers ($211A–$2120) ──────────────────────────
-    /// Mode-7 registers stored silently (mode 7 itself faults via BGMODE).
+    /// Mode-7 affine registers.
     m7sel: u8,
     m7a: i16, // signed 16-bit
     m7b: i16, // only low byte is the multiplier for $2134-$2136
@@ -259,9 +271,17 @@ pub struct Ppu {
     m7y: i16,
     /// Write-twice latch for mode-7 matrix/center params.
     m7_latch: u8,
+    /// Mode-7 horizontal/vertical scroll shadows written through $210D/$210E.
+    m7_hofs: i16,
+    m7_vofs: i16,
+
+    /// PPU field flag, toggled at every frame boundary and exposed by STAT78.
+    field: bool,
+    /// Frame-latched overscan state; changes the vblank boundary on the next frame.
+    frame_overscan: bool,
 
     // ── $213C/$213D OPHCT/OPVCT ─────────────────────────────────
-    /// Latched H counter (dot position; M1 simplification: always 0).
+    /// Latched H counter (dot position).
     ophct: u16,
     /// Latched V counter (current line).
     opvct: u16,
@@ -390,6 +410,10 @@ impl Ppu {
             m7x: 0,
             m7y: 0,
             m7_latch: 0,
+            m7_hofs: 0,
+            m7_vofs: 0,
+            field: false,
+            frame_overscan: false,
 
             ophct: 0,
             opvct: 0,
@@ -503,7 +527,8 @@ impl Ppu {
     // ────────────────────────────────────────────────────────────
 
     /// Write PPU register `$2100 + reg` (reg in 0x00..=0x33).
-    /// Returns a fault if the write enables an M1-unimplemented feature.
+    /// Retains the fault-shaped return contract used by the bus; all documented
+    /// PPU modes and feature bits are accepted.
     /// Clean-room-safe display-state snapshot for diagnostics: force-blank,
     /// master brightness (0-15), BG mode (0-7), and the main-screen layer-enable
     /// mask (TM). All are non-expressive hardware configuration facts — no ROM
@@ -628,11 +653,6 @@ impl Ppu {
             // ── $2105 BGMODE ───────────────────────────────────
             0x05 => {
                 let mode = value & 0x07;
-                // Modes 0, 1, 3, 7 are implemented; others fault (D9).
-                match mode {
-                    0 | 1 | 3 | 7 => {}
-                    _ => return Some(Fault::UnimplementedBgMode { mode }),
-                }
                 self.bg_mode = mode;
                 self.bg3_priority = (value & 0x08) != 0;
                 for i in 0..4 {
@@ -816,14 +836,8 @@ impl Ppu {
             // Bits [7:6]: color-math window clip region (0=never,1=in-win,2=out-win,3=always)
             // Bits [5:4]: color-math enabled region (same encoding)
             // Bit 1: sub-screen BG/OBJ enable (0=fixed color only, 1=sub-screen layers)
-            // Bit 0: direct color mode — fault (not implemented; indirect-color corner)
-            0x30 => {
-                self.cgwsel = value;
-                // Direct-color mode (bit 0): fault (D9 — not implemented).
-                if value & 0x01 != 0 {
-                    return Some(Fault::UnimplementedPpuFeature { reg, value });
-                }
-            }
+            // Bit 0 selects direct color for eligible BG1 modes.
+            0x30 => self.cgwsel = value,
             // ── $2131 CGADSUB ──────────────────────────────────
             // Bit 7: add (0) / subtract (1); bit 6: half; bits [5:0]: layer enables
             0x31 => self.cgadsub = value,
@@ -841,18 +855,10 @@ impl Ppu {
             }
 
             // ── $2133 SETINI ───────────────────────────────────
-            // Bit 6: EXTBG — fault (not implemented; affects mode-7 extra BG).
-            // Bits 3/0: overscan/interlace — fault (not implemented).
-            // Bit 2: pseudo-hires — fault (not implemented).
-            // Bit 1: BG2 area (mode-7 only) — fault when mode-7 EXTBG.
-            0x33 => {
-                self.setini = value;
-                if value & 0b0100_1111 != 0 {
-                    return Some(Fault::UnimplementedPpuFeature { reg, value });
-                }
-                // Bit 6 (EXTBG) only faults when mode 7 is active. Store it
-                // and fault at render time when relevant.
-            }
+            // EX..HOiI: external sync, EXTBG, pseudo-hires, overscan,
+            // OBJ interlace, screen interlace. Reserved/external-sync bits are
+            // latched and harmless in this standalone renderer.
+            0x33 => self.setini = value,
 
             // Writes to read-only registers ($2134–$213F) or beyond scope:
             // PPU open bus — return without action (deterministic, no fault).
@@ -882,10 +888,10 @@ impl Ppu {
     /// pre-allocated arrays. Called once per rendered line before compositing.
     ///
     /// Window SEL register layout (W12SEL = $2123):
-    ///   bits [1:0] = W1 BG1: bit0=enable, bit1=invert
-    ///   bits [3:2] = W2 BG1: bit2=enable, bit3=invert
-    ///   bits [5:4] = W1 BG2: bit4=enable, bit5=invert
-    ///   bits [7:6] = W2 BG2: bit6=enable, bit7=invert
+    ///   bits [1:0] = W1 BG1: bit0=invert, bit1=enable
+    ///   bits [3:2] = W2 BG1: bit2=invert, bit3=enable
+    ///   bits [5:4] = W1 BG2: bit4=invert, bit5=enable
+    ///   bits [7:6] = W2 BG2: bit6=invert, bit7=enable
     /// W34SEL ($2124) same layout for BG3/BG4.
     /// WOBJSEL ($2125):
     ///   bits [1:0] = W1 OBJ: bit0=enable, bit1=invert
@@ -903,14 +909,14 @@ impl Ppu {
 
         // Helper: build combined mask for one layer given its W1/W2 enable/invert bits
         // and the 2-bit combination op from a log register.
-        // sel_bits: [bit0]=W1_enable, [bit1]=W1_invert, [bit2]=W2_enable, [bit3]=W2_invert
+        // sel_bits: [bit0]=W1_invert, [bit1]=W1_enable, [bit2]=W2_invert, [bit3]=W2_enable
         // combination op: 2-bit value (0=OR,1=AND,2=XOR,3=XNOR)
         // Returns a 256-entry mask where 1 = pixel is inside the combined window.
         let build_layer_mask = |win1: &[u8; 256], win2: &[u8; 256], sel: u8, op: u8| -> [u8; 256] {
-            let w1_en = (sel & 0x01) != 0;
-            let w1_inv = (sel & 0x02) != 0;
-            let w2_en = (sel & 0x04) != 0;
-            let w2_inv = (sel & 0x08) != 0;
+            let w1_inv = (sel & 0x01) != 0;
+            let w1_en = (sel & 0x02) != 0;
+            let w2_inv = (sel & 0x04) != 0;
+            let w2_en = (sel & 0x08) != 0;
             let mut out = [0u8; 256];
             for x in 0..256usize {
                 let m1 = if w1_en {
@@ -998,6 +1004,10 @@ impl Ppu {
     ///   Effective: hofs[7:0] = prev_latch, hofs[9:8] = value[1:0] (for modes 0-6)
     ///              actually: hofs = { value[2:0], prev_latch } & 0x3FF
     fn write_bg_hofs(&mut self, bg: usize, value: u8) {
+        if bg == 0 {
+            self.m7_hofs = (((value as u16) << 8) | self.m7_latch as u16) as i16;
+            self.m7_latch = value;
+        }
         // Documented rule for BGnHOFS (applies to modes 0-6 standard BG):
         // hofs = (value & 3) << 8 | prev_latch
         // hofs[9:8] = value[1:0], hofs[7:0] = prev_latch
@@ -1007,6 +1017,10 @@ impl Ppu {
 
     /// Write BGnVOFS using the documented shared write-twice offset latch.
     fn write_bg_vofs(&mut self, bg: usize, value: u8) {
+        if bg == 0 {
+            self.m7_vofs = (((value as u16) << 8) | self.m7_latch as u16) as i16;
+            self.m7_latch = value;
+        }
         // vofs[9:8] = value[1:0], vofs[7:0] = prev_latch
         self.bg_scroll[bg].vofs = ((value as u16 & 0x03) << 8) | self.offset_latch as u16;
         self.offset_latch = value;
@@ -1128,15 +1142,16 @@ impl Ppu {
             0x3E => (mdr & 0x20) | 0x01,
 
             // ── $213F STAT78 ───────────────────────────────────
-            // Bit 7 = interlace field (0), bit 6 = counter latch flag, bit 5 = open bus,
+            // Bit 7 = field, bit 6 = counter latch flag, bit 5 = open bus,
             // bit 4 = NTSC=0/PAL=1 (NTSC → 0), bits [3:0] = PPU2 version = 1.
             // Reading clears the counter latch flag and resets $213C/$213D read latches.
             0x3F => {
                 let latch_bit = if self.counter_latched { 0x40 } else { 0 };
+                let field_bit = if self.field { 0x80 } else { 0 };
                 self.counter_latched = false;
                 self.ophct_read_high = false;
                 self.opvct_read_high = false;
-                (mdr & 0x20) | latch_bit | 0x01
+                field_bit | (mdr & 0x20) | latch_bit | 0x01
             }
 
             // Reads of write-only registers or unknown: return mdr (PPU open bus).
@@ -1148,12 +1163,22 @@ impl Ppu {
     // Scanline rendering
     // ────────────────────────────────────────────────────────────
 
-    /// Render visible scanline `line` (1..=224) into back-buffer row
-    /// `line - 1`, honoring force blank and brightness.
+    /// Render a visible source scanline into the fixed 224-row back buffer,
+    /// honoring force blank, brightness, and the overscan projection.
     pub fn render_scanline(&mut self, line: u16) {
         self.cur_line = line;
 
-        let row = (line - 1) as usize;
+        let row = if self.frame_overscan {
+            // 239 hardware-visible source lines projected into the fixed 224-row
+            // public buffer by cropping 7 at the top and 8 at the bottom.
+            if !(8..=231).contains(&line) {
+                return;
+            }
+            (line - 8) as usize
+        } else {
+            debug_assert!(line <= LAST_VISIBLE_LINE);
+            (line - 1) as usize
+        };
         let row_start = row * 1024;
 
         if self.force_blank {
@@ -1173,19 +1198,12 @@ impl Ppu {
         match self.bg_mode {
             0 => self.render_mode0(row_start, line),
             1 => self.render_mode1(row_start, line),
+            2 | 4 | 5 | 6 => self.render_mode_2_to_6(row_start, line),
             3 => self.render_mode3(row_start, line),
             7 => self.render_mode7(row_start, line),
-            _ => {
-                // Should have been caught at BGMODE write; render black (D9).
-                for i in 0..256 {
-                    let off = row_start + i * 4;
-                    self.back[off] = 0;
-                    self.back[off + 1] = 0;
-                    self.back[off + 2] = 0;
-                    self.back[off + 3] = 0;
-                }
-            }
+            _ => unreachable!("BGMODE is masked to three bits on write"),
         }
+        self.apply_pseudo_hires_from_sub_pixels(row_start);
     }
 
     /// Apply mosaic to `line` for BG `bg_idx` (0-indexed):
@@ -1239,8 +1257,8 @@ impl Ppu {
         &mut self,
         row_start: usize,
         x: usize,
-        main_cgram: usize,
-        sub_cgram: usize,
+        main_color: PixelColor,
+        sub_color: PixelColor,
         main_is_backdrop: bool,
         math_enabled: bool,
     ) {
@@ -1281,7 +1299,10 @@ impl Ppu {
         let (main_r, main_g, main_b) = if clip_main {
             (0u8, 0u8, 0u8) // clipped to black
         } else {
-            cgram_color_components(&self.cgram, main_cgram)
+            match main_color {
+                PixelColor::Cgram(index) => cgram_color_components(&self.cgram, index),
+                PixelColor::Direct(color) => cgram_color_components_fixed(color),
+            }
         };
 
         #[cfg(feature = "introspect")]
@@ -1303,9 +1324,12 @@ impl Ppu {
         let final_color = if do_math && !main_is_backdrop {
             // Determine sub-screen color operand.
             let use_subscreen = (cgwsel & 0x02) != 0;
-            let sub_is_transparent = sub_cgram == 0;
+            let sub_is_transparent = matches!(sub_color, PixelColor::Cgram(0));
             let (sub_r, sub_g, sub_b) = if use_subscreen && !sub_is_transparent {
-                cgram_color_components(&self.cgram, sub_cgram)
+                match sub_color {
+                    PixelColor::Cgram(index) => cgram_color_components(&self.cgram, index),
+                    PixelColor::Direct(color) => cgram_color_components_fixed(color),
+                }
             } else {
                 cgram_color_components_fixed(self.coldata_color)
             };
@@ -1331,6 +1355,33 @@ impl Ppu {
         self.back[off + 1] = ((pixel >> 8) & 0xFF) as u8;
         self.back[off + 2] = ((pixel >> 16) & 0xFF) as u8;
         self.back[off + 3] = 0;
+    }
+
+    #[inline]
+    fn pixel_color_xrgb(&self, color: PixelColor) -> u32 {
+        let bgr = match color {
+            PixelColor::Cgram(index) => read_cgram_color(&self.cgram, index),
+            PixelColor::Direct(value) => value,
+        };
+        bgr555_to_xrgb8888(bgr, self.brightness)
+    }
+
+    #[inline]
+    fn blend_published_with(&mut self, row_start: usize, x: usize, other: PixelColor) {
+        let off = row_start + x * 4;
+        let rhs = self.pixel_color_xrgb(other);
+        self.back[off] = ((self.back[off] as u16 + (rhs & 0xff) as u16) >> 1) as u8;
+        self.back[off + 1] = ((self.back[off + 1] as u16 + ((rhs >> 8) & 0xff) as u16) >> 1) as u8;
+        self.back[off + 2] = ((self.back[off + 2] as u16 + ((rhs >> 16) & 0xff) as u16) >> 1) as u8;
+    }
+
+    fn apply_pseudo_hires_from_sub_pixels(&mut self, row_start: usize) {
+        if self.setini & 0x08 == 0 || !matches!(self.bg_mode, 0 | 1 | 3) {
+            return;
+        }
+        for x in 0..256 {
+            self.blend_published_with(row_start, x, PixelColor::Cgram(self.sub_pixels[x] as usize));
+        }
     }
 
     /// Render one mode-0 scanline.
@@ -1366,7 +1417,15 @@ impl Ppu {
             );
         }
         if self.tm & 0x10 != 0 {
-            render_sprite_line(self.vram, &self.oam, self.obsel, &mut spr_pixels, line);
+            render_sprite_line(
+                self.vram,
+                &self.oam,
+                self.obsel,
+                &mut spr_pixels,
+                line,
+                self.setini & 0x02 != 0,
+                self.field,
+            );
         }
 
         // Build sub-screen pixels for color math.
@@ -1435,8 +1494,8 @@ impl Ppu {
             self.composite_pixel(
                 row_start,
                 x,
-                main_cgram,
-                sub_cgram,
+                PixelColor::Cgram(main_cgram),
+                PixelColor::Cgram(sub_cgram),
                 main_is_backdrop,
                 math_en,
             );
@@ -1577,7 +1636,15 @@ impl Ppu {
             }
         }
         if self.tm & 0x10 != 0 {
-            render_sprite_line(self.vram, &self.oam, self.obsel, &mut spr_pixels, line);
+            render_sprite_line(
+                self.vram,
+                &self.oam,
+                self.obsel,
+                &mut spr_pixels,
+                line,
+                self.setini & 0x02 != 0,
+                self.field,
+            );
         }
 
         // Build sub-screen pixel buffer for color math.
@@ -1647,11 +1714,248 @@ impl Ppu {
             self.composite_pixel(
                 row_start,
                 x,
-                main_cgram,
-                sub_cgram,
+                PixelColor::Cgram(main_cgram),
+                PixelColor::Cgram(sub_cgram),
                 main_is_backdrop,
                 math_en,
             );
+        }
+    }
+
+    fn offset_per_tile_coords(
+        &self,
+        mode: u8,
+        bg: usize,
+        sample_x: u32,
+        base_y: u32,
+        hires: bool,
+    ) -> (u32, u32) {
+        let scroll = self.bg_scroll[bg];
+        let hscale = if hires { 2 } else { 1 };
+        let mut sx = sample_x.wrapping_add(scroll.hofs as u32 * hscale);
+        let mut sy = base_y.wrapping_add(scroll.vofs as u32);
+        let first_column_width = 8 * hscale;
+        if sample_x < first_column_width || !matches!(mode, 2 | 4 | 6) {
+            return (sx, sy);
+        }
+
+        let opt = self.bg_scroll[2];
+        let opt_tile = if self.bg_tile_size[2] { 16 } else { 8 };
+        let lookup_x = sample_x
+            .wrapping_sub(first_column_width)
+            .wrapping_add(opt.hofs as u32 * if mode == 6 { 2 } else { 1 });
+        let lookup_y = base_y.wrapping_add(opt.vofs as u32);
+        let tx = (lookup_x / opt_tile) as u16;
+        let ty = (lookup_y / opt_tile) as u16;
+        let hword = fetch_tilemap(
+            self.vram,
+            self.bg_sc[2].base as usize,
+            tx,
+            ty,
+            self.bg_sc[2].h_wide,
+            self.bg_sc[2].v_wide,
+        );
+        let valid = 1u16 << (13 + bg);
+
+        if mode == 4 {
+            if hword & valid != 0 {
+                if hword & 0x8000 != 0 {
+                    sy = base_y.wrapping_add((hword & 0x1fff) as u32);
+                } else {
+                    sx = sample_x
+                        .wrapping_add((hword & 0x1ff8) as u32)
+                        .wrapping_add((scroll.hofs & 7) as u32 * hscale);
+                }
+            }
+        } else {
+            if hword & valid != 0 {
+                sx = sample_x
+                    .wrapping_add((hword & 0x1ff8) as u32)
+                    .wrapping_add((scroll.hofs & 7) as u32 * hscale);
+            }
+            let vword = fetch_tilemap(
+                self.vram,
+                self.bg_sc[2].base as usize,
+                tx,
+                ty.wrapping_add(1),
+                self.bg_sc[2].h_wide,
+                self.bg_sc[2].v_wide,
+            );
+            if vword & valid != 0 {
+                sy = base_y.wrapping_add((vword & 0x1fff) as u32);
+            }
+        }
+        (sx, sy)
+    }
+
+    fn render_mode_bg_pixel(
+        &self,
+        mode: u8,
+        bg: usize,
+        bpp: u8,
+        sample_x: u32,
+        line: u16,
+    ) -> BgPixel {
+        let hires = matches!(mode, 5 | 6);
+        let mut base_y = line as u32 - 1;
+        if hires && self.setini & 0x01 != 0 {
+            base_y = base_y * 2 + self.field as u32;
+        }
+        let (sx, sy) = self.offset_per_tile_coords(mode, bg, sample_x, base_y, hires);
+        let tile_height = if self.bg_tile_size[bg] { 16 } else { 8 };
+        let tile_width = if hires { 16 } else { tile_height };
+        render_bg_pixel_dims(
+            self.vram,
+            self.bg_sc[bg],
+            self.bg_tile_data_base(bg) as usize,
+            bpp,
+            0,
+            tile_width,
+            tile_height,
+            sx & 0x1fff,
+            sy & 0x1fff,
+        )
+    }
+
+    fn select_two_bg_pixel(
+        &self,
+        mode: u8,
+        bg1: BgPixel,
+        bg2: BgPixel,
+        sprite: SpritePixel,
+        x: usize,
+        sub: bool,
+    ) -> (PixelColor, bool, bool) {
+        let enabled = if sub { self.ts } else { self.tm };
+        let visible = |transparent: bool, layer: usize| {
+            if sub {
+                self.sub_visible(transparent, layer, x)
+            } else {
+                self.main_visible(transparent, layer, x)
+            }
+        };
+        let sp_vis = enabled & 0x10 != 0 && visible(sprite.is_transparent(), 4);
+        let b1_vis = enabled & 0x01 != 0 && visible(bg1.is_transparent(), 0);
+        let b2_vis = mode != 6 && enabled & 0x02 != 0 && visible(bg2.is_transparent(), 1);
+        let obj_math = self.cgadsub & 0x10 != 0 && sprite.cgram_idx >= 192;
+        let bg1_color = || {
+            if matches!(mode, 3 | 4) && self.cgwsel & 1 != 0 {
+                PixelColor::Direct(direct_color(bg1.color_idx, bg1.palette_group))
+            } else {
+                PixelColor::Cgram(bg1.cgram_idx as usize)
+            }
+        };
+
+        if sp_vis && sprite.priority == 3 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if b1_vis && bg1.priority {
+            return (bg1_color(), false, self.cgadsub & 0x01 != 0);
+        }
+        if sp_vis && sprite.priority == 2 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if b2_vis && bg2.priority {
+            return (
+                PixelColor::Cgram(bg2.cgram_idx as usize),
+                false,
+                self.cgadsub & 0x02 != 0,
+            );
+        }
+        if sp_vis && sprite.priority == 1 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if b1_vis {
+            return (bg1_color(), false, self.cgadsub & 0x01 != 0);
+        }
+        if sp_vis && sprite.priority == 0 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if b2_vis {
+            return (
+                PixelColor::Cgram(bg2.cgram_idx as usize),
+                false,
+                self.cgadsub & 0x02 != 0,
+            );
+        }
+        (PixelColor::Cgram(0), true, self.cgadsub & 0x20 != 0)
+    }
+
+    fn render_mode_2_to_6(&mut self, row_start: usize, line: u16) {
+        let mode = self.bg_mode;
+        let (bg1_bpp, bg2_bpp) = match mode {
+            2 => (4, 4),
+            4 => (8, 2),
+            5 => (4, 2),
+            6 => (4, 0),
+            _ => return,
+        };
+        let hires = matches!(mode, 5 | 6);
+        let mut sprites = [SpritePixel::TRANSPARENT; 256];
+        if (self.tm | self.ts) & 0x10 != 0 {
+            render_sprite_line(
+                self.vram,
+                &self.oam,
+                self.obsel,
+                &mut sprites,
+                line,
+                self.setini & 0x02 != 0,
+                self.field,
+            );
+        }
+
+        for (x, &sprite) in sprites.iter().enumerate() {
+            let samples = if hires { 2 } else { 1 };
+            let mut rendered = [0u32; 2];
+            for (phase, rendered_sample) in rendered.iter_mut().enumerate().take(samples) {
+                let sample_x = if hires {
+                    (x * 2 + phase) as u32
+                } else {
+                    x as u32
+                };
+                let bg1 = self.render_mode_bg_pixel(mode, 0, bg1_bpp, sample_x, line);
+                let bg2 = if bg2_bpp == 0 {
+                    BgPixel::TRANSPARENT
+                } else {
+                    self.render_mode_bg_pixel(mode, 1, bg2_bpp, sample_x, line)
+                };
+                let (main, backdrop, math) =
+                    self.select_two_bg_pixel(mode, bg1, bg2, sprite, x, false);
+                let (sub, _, _) = self.select_two_bg_pixel(mode, bg1, bg2, sprite, x, true);
+                self.composite_pixel(row_start, x, main, sub, backdrop, math);
+                if !hires && self.setini & 0x08 != 0 {
+                    self.blend_published_with(row_start, x, sub);
+                }
+                let off = row_start + x * 4;
+                *rendered_sample = self.back[off] as u32
+                    | (self.back[off + 1] as u32) << 8
+                    | (self.back[off + 2] as u32) << 16;
+            }
+            if hires {
+                let p0 = rendered[0];
+                let p1 = rendered[1];
+                let off = row_start + x * 4;
+                self.back[off] = (((p0 & 0xff) + (p1 & 0xff)) >> 1) as u8;
+                self.back[off + 1] = ((((p0 >> 8) & 0xff) + ((p1 >> 8) & 0xff)) >> 1) as u8;
+                self.back[off + 2] = ((((p0 >> 16) & 0xff) + ((p1 >> 16) & 0xff)) >> 1) as u8;
+                self.back[off + 3] = 0;
+            }
         }
     }
 
@@ -1684,7 +1988,15 @@ impl Ppu {
             );
         }
         if self.tm & 0x10 != 0 {
-            render_sprite_line(self.vram, &self.oam, self.obsel, &mut spr_pixels, line);
+            render_sprite_line(
+                self.vram,
+                &self.oam,
+                self.obsel,
+                &mut spr_pixels,
+                line,
+                self.setini & 0x02 != 0,
+                self.field,
+            );
         }
 
         // Sub-screen: fill with backdrop (0) for now — no TS layer in M2 mode3.
@@ -1703,40 +2015,45 @@ impl Ppu {
             let b2_vis = self.main_visible(b2.is_transparent(), 1, x);
             let sp_vis = self.main_visible(sp.is_transparent(), 4, x);
 
-            let (main_cgram, main_is_backdrop, math_en) = 'pick: {
+            let (main_cgram, main_is_backdrop, math_en, bg1_selected) = 'pick: {
                 if sp_vis && sp.priority == 3 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, false);
                 }
                 if b1_vis && b1.priority {
-                    break 'pick (b1.cgram_idx as usize, false, cgadsub & 0x01 != 0);
+                    break 'pick (b1.cgram_idx as usize, false, cgadsub & 0x01 != 0, true);
                 }
                 if b2_vis && b2.priority {
-                    break 'pick (b2.cgram_idx as usize, false, cgadsub & 0x02 != 0);
+                    break 'pick (b2.cgram_idx as usize, false, cgadsub & 0x02 != 0, false);
                 }
                 if sp_vis && sp.priority == 2 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, false);
                 }
                 if b1_vis && !b1.priority {
-                    break 'pick (b1.cgram_idx as usize, false, cgadsub & 0x01 != 0);
+                    break 'pick (b1.cgram_idx as usize, false, cgadsub & 0x01 != 0, true);
                 }
                 if b2_vis && !b2.priority {
-                    break 'pick (b2.cgram_idx as usize, false, cgadsub & 0x02 != 0);
+                    break 'pick (b2.cgram_idx as usize, false, cgadsub & 0x02 != 0, false);
                 }
                 if sp_vis && sp.priority == 1 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, false);
                 }
                 if sp_vis && sp.priority == 0 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
+                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0, false);
                 }
-                (0usize, true, cgadsub & 0x20 != 0)
+                (0usize, true, cgadsub & 0x20 != 0, false)
             };
 
             let sub_cgram = self.sub_pixels[x] as usize;
+            let main_color = if bg1_selected && self.cgwsel & 1 != 0 {
+                PixelColor::Direct(direct_color(b1.color_idx, b1.palette_group))
+            } else {
+                PixelColor::Cgram(main_cgram)
+            };
             self.composite_pixel(
                 row_start,
                 x,
-                main_cgram,
-                sub_cgram,
+                main_color,
+                PixelColor::Cgram(sub_cgram),
                 main_is_backdrop,
                 math_en,
             );
@@ -1882,136 +2199,171 @@ impl Ppu {
             out[out_x as usize] = BgPixel {
                 color_idx,
                 cgram_idx: color_idx,
+                palette_group: ((entry >> 10) & 0x07) as u8,
                 priority,
             };
         }
     }
 
-    /// Render one mode-7 scanline.
-    ///
-    /// Mode 7: single affine-transformed BG, 8bpp, 8.8 fixed-point matrix
-    /// in i32 (deny gate enforces no floats).
-    /// Registers: $211A M7SEL, $211B-$211E M7A/B/C/D, $211F/$2120 M7X/M7Y.
-    /// Priority: OBJ3/2/1/0 interleaved with single BG1 layer (no priority bit
-    /// in mode 7 — BG1 always below priority ≥ 2 sprites).
-    /// EXTBG (SETINI bit 6): faults at write time; not rendered here.
-    fn render_mode7(&mut self, row_start: usize, line: u16) {
-        let mut spr_pixels = [SpritePixel::TRANSPARENT; 256];
-        if self.tm & 0x10 != 0 {
-            render_sprite_line(self.vram, &self.oam, self.obsel, &mut spr_pixels, line);
+    #[inline]
+    fn mode7_pixel(&self, line: u16, x: usize) -> u8 {
+        #[inline]
+        fn sign13(value: i16) -> i32 {
+            ((value as i32) << 19) >> 19
+        }
+        #[inline]
+        fn clip(value: i32) -> i32 {
+            if value & 0x2000 != 0 {
+                value | !0x03ff
+            } else {
+                value & 0x03ff
+            }
         }
 
-        // M7SEL: bit 1 = vflip, bit 0 = hflip.
-        // bit 7: fill-outside mode (0 = use transparent/color0, 1 = tile 0 repeats).
-        let m7sel = self.m7sel;
-        let flip_h = (m7sel & 0x01) != 0;
-        let flip_v = (m7sel & 0x02) != 0;
-        let fill_tile0 = (m7sel & 0x80) != 0;
+        let mut sx = self.mosaic_x(x as u16, 0) as i32;
+        let mut sy = self.mosaic_line(line - 1, 0) as i32;
+        if self.m7sel & 0x01 != 0 {
+            sx = 255 - sx;
+        }
+        if self.m7sel & 0x02 != 0 {
+            sy = 255 - sy;
+        }
 
-        // Matrix components in 8.8 fixed point (i16 stored as signed, cast to i32).
-        let a = self.m7a as i32; // 8.8 fp; multiply by screen delta, shift right 8
+        let a = self.m7a as i32;
         let b = self.m7b as i32;
         let c = self.m7c as i32;
         let d = self.m7d as i32;
+        let cx = sign13(self.m7x);
+        let cy = sign13(self.m7y);
+        let hofs = sign13(self.m7_hofs);
+        let vofs = sign13(self.m7_vofs);
 
-        // Center (M7X/M7Y) are 13-bit signed (bits[12:0]).
-        // Sign-extend from bit 12: shift left 19 bits to reach bit 31, then arithmetic right 19.
-        let cx = ((self.m7x as i32) << 19) >> 19;
-        let cy = ((self.m7y as i32) << 19) >> 19;
+        let origin_x = ((a * clip(hofs - cx)) & !63)
+            + ((b * clip(vofs - cy)) & !63)
+            + ((b * sy) & !63)
+            + (cx << 8);
+        let origin_y = ((c * clip(hofs - cx)) & !63)
+            + ((d * clip(vofs - cy)) & !63)
+            + ((d * sy) & !63)
+            + (cy << 8);
+        let px = (origin_x + a * sx) >> 8;
+        let py = (origin_y + c * sx) >> 8;
+        let out_of_bounds = (px | py) & !1023 != 0;
+        let repeat = (self.m7sel >> 6) & 3;
+        if repeat == 2 && out_of_bounds {
+            return 0;
+        }
 
-        // Screen Y for this scanline (1-indexed → 0-indexed).
-        let screen_y = if flip_v {
-            255 - (line as i32 - 1)
+        let tile_no = if repeat == 3 && out_of_bounds {
+            0usize
         } else {
-            line as i32 - 1
+            let tile_x = ((px >> 3) & 0x7f) as usize;
+            let tile_y = ((py >> 3) & 0x7f) as usize;
+            self.vram[((tile_y * 128 + tile_x) * 2) & 0xffff] as usize
         };
+        let pixel_word = tile_no * 64 + ((py as usize) & 7) * 8 + ((px as usize) & 7);
+        self.vram[(pixel_word * 2 + 1) & 0xffff]
+    }
 
-        let cgadsub = self.cgadsub;
-        let bg1_enabled = self.tm & 0x01 != 0;
-
-        #[allow(clippy::needless_range_loop)] // x indexes several parallel line buffers
-        for x in 0..256usize {
-            let screen_x = if flip_h { 255 - x as i32 } else { x as i32 };
-
-            let dx = screen_x - cx;
-            let dy = screen_y - cy;
-
-            // 8.8 fixed-point affine transform.  A, B, C, D are already in 8.8 fp
-            // (i.e. value/256 gives the rational coefficient).  After multiplying by
-            // the integer screen-space deltas the products are in 8.8 fp, so we
-            // shift right by 8 to recover integer VRAM-space coordinates.
-            let vram_x = ((a * dx + b * dy) >> 8) + cx;
-            let vram_y = ((c * dx + d * dy) >> 8) + cy;
-
-            // Valid range is 0..=1023 (10-bit).
-            let in_range = (0..1024).contains(&vram_x) && (0..1024).contains(&vram_y);
-
-            let color_idx = if in_range || fill_tile0 {
-                let px = if in_range { vram_x as usize } else { 0 };
-                let py = if in_range { vram_y as usize } else { 0 };
-
-                // Mode-7 VRAM interleaved layout:
-                //   Word N (byte-pair at 2N, 2N+1):
-                //     Even byte (2N)   = tilemap entry (tile number) for tile (N/64 % 128, …)
-                //     Odd byte  (2N+1) = pixel data byte for some tile's pixel
-                //
-                // Tilemap: 128×128 tile grid.  Entry at (col, row) is the even byte of word
-                //   word_addr = row * 128 + col  → byte_addr = (row*128 + col) * 2
-                //
-                // Tile pixel data: tile T has 8×8 pixels.  Pixel at (px_in_tile, py_in_tile)
-                // is the odd byte of word:
-                //   word_addr = T * 64 + py_in_tile * 8 + px_in_tile
-                //   → byte_addr = word_addr * 2 + 1
-
-                let tile_col = px / 8;
-                let tile_row = py / 8;
-                let tile_entry_addr = (tile_row * 128 + tile_col) * 2;
-                let tile_no = self.vram[tile_entry_addr & 0xFFFF] as usize;
-
-                let px_in_tile = px & 7;
-                let py_in_tile = py & 7;
-                let pixel_word = tile_no * 64 + py_in_tile * 8 + px_in_tile;
-                let pixel_byte_addr = (pixel_word * 2 + 1) & 0xFFFF;
-                self.vram[pixel_byte_addr]
+    fn select_mode7_pixel(
+        &self,
+        raw: u8,
+        sprite: SpritePixel,
+        x: usize,
+        sub: bool,
+    ) -> (PixelColor, bool, bool) {
+        let enabled = if sub { self.ts } else { self.tm };
+        let visible = |transparent: bool, layer: usize| {
+            if sub {
+                self.sub_visible(transparent, layer, x)
             } else {
-                0 // out-of-range and not fill_tile0 → color 0 (transparent/backdrop)
-            };
+                self.main_visible(transparent, layer, x)
+            }
+        };
+        let sp_vis = enabled & 0x10 != 0 && visible(sprite.is_transparent(), 4);
+        let bg1_vis = enabled & 0x01 != 0 && visible(raw == 0, 0);
+        let extbg = self.setini & 0x40 != 0;
+        let bg2_color = raw & 0x7f;
+        let bg2_high = raw & 0x80 != 0;
+        let bg2_vis = extbg && enabled & 0x02 != 0 && visible(bg2_color == 0, 1);
+        let obj_math = self.cgadsub & 0x10 != 0 && sprite.cgram_idx >= 192;
 
-            // Mode-7 BG1: no priority bit (always "low" priority in hardware terms).
-            // Priority relative to sprites:
-            //   Sprites prio 3/2 always win over BG1; prio 1/0 lose to BG1.
-            let bg_pix = BgPixel {
-                color_idx,
-                cgram_idx: color_idx,
-                priority: false,
-            };
-
-            let sp = spr_pixels[x];
-            let sp_vis = self.main_visible(sp.is_transparent(), 4, x);
-            let b1_vis = bg1_enabled && self.main_visible(bg_pix.is_transparent(), 0, x);
-
-            let (main_cgram, main_is_backdrop, math_en) = 'pick: {
-                if sp_vis && sp.priority >= 2 {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
-                }
-                if b1_vis {
-                    break 'pick (bg_pix.cgram_idx as usize, false, cgadsub & 0x01 != 0);
-                }
-                if sp_vis {
-                    break 'pick (sp.cgram_idx as usize, false, cgadsub & 0x10 != 0);
-                }
-                (0usize, true, cgadsub & 0x20 != 0)
-            };
-
-            let sub_cgram = 0usize; // mode-7 has no sub-screen in this impl
-            self.composite_pixel(
-                row_start,
-                x,
-                main_cgram,
-                sub_cgram,
-                main_is_backdrop,
-                math_en,
+        if sp_vis && sprite.priority == 3 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
             );
+        }
+        if bg2_vis && bg2_high {
+            return (
+                PixelColor::Cgram(bg2_color as usize),
+                false,
+                self.cgadsub & 0x02 != 0,
+            );
+        }
+        if sp_vis && sprite.priority == 2 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if bg1_vis {
+            let color = if self.cgwsel & 1 != 0 {
+                PixelColor::Direct(direct_color(raw, 0))
+            } else {
+                PixelColor::Cgram(raw as usize)
+            };
+            return (color, false, self.cgadsub & 0x01 != 0);
+        }
+        if sp_vis && sprite.priority == 1 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        if bg2_vis && !bg2_high {
+            return (
+                PixelColor::Cgram(bg2_color as usize),
+                false,
+                self.cgadsub & 0x02 != 0,
+            );
+        }
+        if sp_vis && sprite.priority == 0 {
+            return (
+                PixelColor::Cgram(sprite.cgram_idx as usize),
+                false,
+                obj_math,
+            );
+        }
+        (PixelColor::Cgram(0), true, self.cgadsub & 0x20 != 0)
+    }
+
+    /// Render Mode 7, including the SETINI EXTBG duplicate layer.
+    fn render_mode7(&mut self, row_start: usize, line: u16) {
+        let mut spr_pixels = [SpritePixel::TRANSPARENT; 256];
+        if (self.tm | self.ts) & 0x10 != 0 {
+            render_sprite_line(
+                self.vram,
+                &self.oam,
+                self.obsel,
+                &mut spr_pixels,
+                line,
+                self.setini & 0x02 != 0,
+                self.field,
+            );
+        }
+
+        for (x, &sprite) in spr_pixels.iter().enumerate() {
+            let raw = self.mode7_pixel(line, x);
+            let (main, backdrop, math) = self.select_mode7_pixel(raw, sprite, x, false);
+            let (sub, _, _) = self.select_mode7_pixel(raw, sprite, x, true);
+            self.composite_pixel(row_start, x, main, sub, backdrop, math);
+            if self.setini & 0x08 != 0 {
+                self.blend_published_with(row_start, x, sub);
+            }
         }
     }
 
@@ -2089,19 +2441,21 @@ impl Ppu {
     // V-blank and frame hooks
     // ────────────────────────────────────────────────────────────
 
-    /// V-blank entry hook (start of line 225): internal OAM address reload
+    /// Vblank entry hook (line 225 normally, 240 in overscan): OAM address reload
     /// per documented behavior (reload from OAMADD base unless force-blanked).
     pub fn begin_vblank(&mut self) {
         if !self.force_blank {
             self.oam_addr = self.oam_base_addr << 1;
         }
-        self.cur_line = 225;
+        self.cur_line = self.vblank_start_line();
     }
 
     /// Frame start hook (line 0): clear v-blank-internal latches, reset
     /// mosaic start-line to line 1 (documented: mosaic block restarts at
     /// the top of each frame).
     pub fn begin_frame(&mut self) {
+        self.field = !self.field;
+        self.frame_overscan = self.setini & 0x04 != 0;
         self.cur_line = 0;
         self.mosaic_start_line = 1;
         // Reset OPHCT/OPVCT read toggles at frame start.
@@ -2122,6 +2476,15 @@ impl Ppu {
     /// Update the current scanline number (used by $2137 SLHV latch).
     pub fn set_line(&mut self, line: u16) {
         self.cur_line = line;
+    }
+
+    /// Frame-latched first vblank line (225 normally, 240 in overscan mode).
+    pub fn vblank_start_line(&self) -> u16 {
+        if self.frame_overscan {
+            240
+        } else {
+            VBLANK_START_LINE
+        }
     }
 
     /// Latch H/V counters when SLHV ($2137) is read.
@@ -2413,13 +2776,14 @@ mod ppu_tests {
         assert_eq!(p.oam[512], 0xF0, "high table byte 0 should be 0xF0");
     }
 
-    // ── Fault generation ─────────────────────────────────────────────────────
+    // ── Complete feature acceptance ──────────────────────────────────────────
 
     #[test]
-    fn ppu_fault_bg_mode2() {
+    fn ppu_all_bg_modes_are_accepted() {
         let mut p = make_ppu();
-        let f = p.write(0x05, 0x02); // mode 2
-        assert!(matches!(f, Some(Fault::UnimplementedBgMode { mode: 2 })));
+        for value in 0u8..=255 {
+            assert!(p.write(0x05, value).is_none(), "BGMODE ${value:02x}");
+        }
     }
 
     /// Mode 7 is now accepted (M2 implements it); writing BGMODE=7 must NOT fault.
@@ -2497,19 +2861,225 @@ mod ppu_tests {
     }
 
     #[test]
-    fn ppu_fault_setini_nonzero() {
+    fn ppu_all_setini_values_are_accepted() {
         let mut p = make_ppu();
-        let f = p.write(0x33, 0x01);
-        assert!(matches!(
-            f,
-            Some(Fault::UnimplementedPpuFeature { reg: 0x33, .. })
-        ));
+        for value in 0u8..=255 {
+            assert!(p.write(0x33, value).is_none(), "SETINI ${value:02x}");
+        }
     }
 
     #[test]
     fn ppu_no_fault_setini_zero() {
         let mut p = make_ppu();
         assert!(p.write(0x33, 0x00).is_none());
+    }
+
+    #[test]
+    fn ppu_all_cgwsel_values_are_accepted() {
+        let mut p = make_ppu();
+        for value in 0u8..=255 {
+            assert!(p.write(0x30, value).is_none(), "CGWSEL ${value:02x}");
+        }
+    }
+
+    #[test]
+    fn ppu_direct_color_bit_layout() {
+        assert_eq!(direct_color(0b1011_0111, 0b101), 0x531e);
+        assert_eq!(direct_color(0, 0), 0);
+    }
+
+    #[test]
+    fn ppu_window_selector_enable_and_invert_bits() {
+        let mut p = make_ppu();
+        p.wh0 = 0;
+        p.wh1 = 0;
+        p.w12sel = 0x02;
+        p.compute_window_masks();
+        assert_eq!(p.main_win_mask[0][0], 1);
+        assert_eq!(p.main_win_mask[0][1], 0);
+
+        p.w12sel = 0x03;
+        p.compute_window_masks();
+        assert_eq!(p.main_win_mask[0][0], 0);
+        assert_eq!(p.main_win_mask[0][1], 1);
+    }
+
+    #[test]
+    fn ppu_stat78_field_alternates_in_progressive_mode() {
+        let mut p = make_ppu();
+        assert_eq!(p.read(0x3f, 0) & 0x80, 0);
+        p.begin_frame();
+        assert_eq!(p.read(0x3f, 0) & 0x80, 0x80);
+        p.begin_frame();
+        assert_eq!(p.read(0x3f, 0) & 0x80, 0);
+    }
+
+    #[test]
+    fn ppu_mode7_extbg_priority_and_palette_bit() {
+        let mut p = make_ppu();
+        p.tm = 0x13;
+        p.setini = 0x40;
+        p.compute_window_masks();
+        let sprite = SpritePixel {
+            cgram_idx: 192,
+            color_idx: 1,
+            priority: 2,
+        };
+
+        let (high, _, _) = p.select_mode7_pixel(0x85, sprite, 0, false);
+        assert_eq!(high, PixelColor::Cgram(5));
+
+        p.tm = 0x12;
+        let low_sprite = SpritePixel {
+            priority: 0,
+            ..sprite
+        };
+        let (low, _, _) = p.select_mode7_pixel(0x05, low_sprite, 0, false);
+        assert_eq!(low, PixelColor::Cgram(5));
+    }
+
+    #[test]
+    fn ppu_mode7_identity_fetch_and_direct_color() {
+        let mut p = make_ppu();
+        p.m7a = 0x0100;
+        p.m7d = 0x0100;
+        p.vram[0] = 0;
+        p.vram[1] = 0x85;
+        assert_eq!(p.mode7_pixel(1, 0), 0x85);
+
+        p.tm = 0x01;
+        p.cgwsel = 0x01;
+        p.compute_window_masks();
+        let (color, _, _) = p.select_mode7_pixel(0x85, SpritePixel::TRANSPARENT, 0, false);
+        assert_eq!(color, PixelColor::Direct(direct_color(0x85, 0)));
+    }
+
+    #[test]
+    fn ppu_modes_2_4_5_6_render_bg1() {
+        for mode in [2u8, 4, 5, 6] {
+            let mut p = make_ppu();
+            p.force_blank = false;
+            p.brightness = 15;
+            p.tm = 0x01;
+            p.bg_mode = mode;
+            p.bg_sc[0].base = 0x2000;
+            p.cgram[2] = 0x1f;
+            p.vram[0] = 0xc0;
+            p.render_scanline(1);
+            assert_eq!(
+                p.back[2], 255,
+                "mode {mode} must render BG1 instead of fallback black"
+            );
+        }
+    }
+
+    #[test]
+    fn ppu_mode4_direct_color_replaces_cgram() {
+        let mut p = make_ppu();
+        p.force_blank = false;
+        p.brightness = 15;
+        p.tm = 0x01;
+        p.bg_mode = 4;
+        p.cgwsel = 1;
+        p.bg_sc[0].base = 0x2000;
+        p.cgram[2] = 0x00;
+        p.cgram[3] = 0x7c;
+        p.vram[0] = 0x80;
+        p.render_scanline(1);
+        assert_eq!(p.back[2], 33);
+        assert_eq!(p.back[0], 0);
+    }
+
+    #[test]
+    fn ppu_overscan_uses_240_vblank_and_exact_crop() {
+        let mut p = make_ppu();
+        p.write(0x33, 0x04);
+        p.begin_frame();
+        assert_eq!(p.vblank_start_line(), 240);
+
+        p.back.fill(0xaa);
+        p.render_scanline(1);
+        assert_eq!(p.back[0], 0xaa);
+        p.render_scanline(8);
+        assert_eq!(p.back[0], 0);
+        let last = (224 * 1024) - 1;
+        p.render_scanline(231);
+        assert_eq!(p.back[last], 0);
+        p.back[last] = 0xaa;
+        p.render_scanline(232);
+        assert_eq!(p.back[last], 0xaa);
+    }
+
+    #[test]
+    fn ppu_all_feature_combinations_render_without_fault_or_panic() {
+        let mut p = make_ppu();
+        p.force_blank = false;
+        for mode in 0u8..=7 {
+            p.write(0x05, mode);
+            for setini in 0u8..=255 {
+                p.write(0x33, setini);
+                p.write(0x30, setini | 1);
+                p.render_scanline(1);
+            }
+        }
+    }
+
+    #[test]
+    fn ppu_mode2_offset_per_tile_replaces_h_and_v() {
+        let mut p = make_ppu();
+        p.bg_sc[2].base = 0x3000;
+        p.bg_scroll[0].hofs = 3;
+        let hword = 0x2000u16 | 0x0010;
+        p.vram[0x3000] = hword as u8;
+        p.vram[0x3001] = (hword >> 8) as u8;
+        let vword = 0x2000u16 | 0x0020;
+        p.vram[0x3040] = vword as u8;
+        p.vram[0x3041] = (vword >> 8) as u8;
+
+        assert_eq!(p.offset_per_tile_coords(2, 0, 8, 0, false), (27, 32));
+    }
+
+    #[test]
+    fn ppu_mode4_offset_bit15_selects_vertical() {
+        let mut p = make_ppu();
+        p.bg_sc[2].base = 0x3000;
+        let word = 0xa020u16;
+        p.vram[0x3000] = word as u8;
+        p.vram[0x3001] = (word >> 8) as u8;
+
+        assert_eq!(p.offset_per_tile_coords(4, 0, 8, 5, false), (8, 37));
+    }
+
+    #[test]
+    fn ppu_mode7_scroll_uses_shared_mode7_latch() {
+        let mut p = make_ppu();
+        p.write(0x0d, 0x34);
+        p.write(0x0d, 0x12);
+        assert_eq!(p.m7_hofs as u16, 0x1234);
+        p.write(0x1b, 0x56);
+        assert_eq!(p.m7a as u16, 0x5612);
+    }
+
+    #[test]
+    fn ppu_pseudo_hires_projects_main_and_subscreen() {
+        let mut p = make_ppu();
+        p.force_blank = false;
+        p.brightness = 15;
+        p.bg_mode = 0;
+        p.tm = 0x01;
+        p.ts = 0;
+        p.setini = 0x08;
+        p.bg_sc[0].base = 0x2000;
+        p.cgram[0] = 0x00;
+        p.cgram[1] = 0x7c;
+        p.cgram[2] = 0x1f;
+        p.cgram[3] = 0x00;
+        p.vram[0] = 0x80;
+        p.render_scanline(1);
+
+        assert_eq!(p.back[0], 127);
+        assert_eq!(p.back[1], 0);
+        assert_eq!(p.back[2], 127);
     }
 
     // ── Force blank ──────────────────────────────────────────────────────────

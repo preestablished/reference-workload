@@ -9,5 +9,7 @@
 pub mod candidates;
 pub mod emit;
 pub mod filter;
+#[cfg(all(feature = "interactive", target_os = "linux"))]
+pub mod gamepad;
 pub mod record;
 pub mod session;
