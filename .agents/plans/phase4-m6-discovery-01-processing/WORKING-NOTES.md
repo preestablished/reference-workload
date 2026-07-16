@@ -181,3 +181,31 @@ recorded — a zsh failed-glob error echoed the private session path once
 No offsets or decoded values ever reached stdout; frame numbers only.
 discovery-01 remains pristine (session.yaml b3sum prefix 04c11d86bdc4f65c
 unchanged; searching happened in scratch/derived dirs and python).
+
+## Package 05 step 1 (2026-07-16) — draft complete; STOPPED at STOP #1
+
+- Draft authored under `$PR/bundle-draft/` (never `$PR/bundle`):
+  `feature-map.yaml` (11 features via `ramdiff emit`, ALL stability
+  `volatile` per the draft rule; grid/threshold discretize deferred to
+  finalization because grid's `room` ref must be `stable`),
+  `scoring-program.yaml` (5 monotone latched stages: capacity_upgrade /
+  equipment_upgrade / midboss_encountered / boss_encountered /
+  world1_cleared; temp goal+dead-penalty carry `DRAFT-NOT-EVIDENCE`
+  headers), `map-check.expect.yaml` (23 at_frame/equals assertions from
+  watch-log values; `never` clauses deferred to post-Run-C).
+- Structural dry-run: `refwork-featuremap validate` exit 0 on a throwaway
+  temp-stable copy (draft artifact itself keeps volatile; the all-volatile
+  draft correctly fails rule §1.3/3, which confirmed the validator's
+  stable-only enforcement en passant).
+- Draft `map-check` (direct binary, not the pipeline) over the real ROM +
+  full discovery-01 padlog: **exit 0, all 23 assertions hold.**
+- **Privacy deviation (recorded):** the `ramdiff emit` loop redirected
+  stdout but not stderr; emit prints per-feature confirmation to stderr —
+  all 11 offsets and the private map path appeared once in session
+  terminal output. Values live nowhere durable (no file/commit/bead), but
+  the session transcript saw them. Mitigation: all later value-printing
+  commands redirect both streams; flagged for the STOP #1 brief.
+- Execution stopped at package 05 step 2 (STOP-AND-COORDINATE #1) — the
+  Run C operator mini-session. Brief delivered in-session; see
+  findings.yaml `undiscoverable_for_stop1` +
+  `proposed_stable_for_runC_confirmation` for the item-3 field list.
