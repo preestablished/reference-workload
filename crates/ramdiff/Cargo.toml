@@ -15,7 +15,9 @@ path = "src/lib.rs"
 
 [features]
 # Interactive windowed mode — never enabled in CI (no display required).
-interactive = ["dep:minifb"]
+# `dep:gilrs` only activates on macOS (it is declared as a target-specific
+# dependency below); on Linux the feature pulls in minifb alone.
+interactive = ["dep:minifb", "dep:gilrs"]
 
 [dependencies]
 refwork-emu = { path = "../refwork-emu", features = ["introspect"] }
@@ -27,6 +29,10 @@ blake3 = "1"
 
 # Interactive-only dependencies (gated by the "interactive" feature).
 minifb = { version = "0.25", optional = true }
+
+# macOS has no evdev; gamepad input goes through gilrs (IOKit HID) instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+gilrs = { version = "0.11", optional = true }
 
 [dev-dependencies]
 # Nothing extra: we use the workspace xtask lib via std::process for build-rom

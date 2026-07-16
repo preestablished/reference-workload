@@ -209,7 +209,10 @@ pub struct InteractiveOpts {
     /// On resume, downgrade replay-vs-dump divergence from an error to a
     /// warning (the restored state may then not match the recorded session).
     pub skip_replay_verify: bool,
-    /// Explicit evdev gamepad node (Linux). `None` enables auto-detection.
+    /// Explicit evdev gamepad node (Linux only). On macOS an explicit path
+    /// warns and disables the gamepad for the session (keyboard-only, no
+    /// auto-detect fallback — same as Linux when an explicit node fails to
+    /// open). `None` auto-detects on both platforms.
     pub gamepad: Option<std::path::PathBuf>,
 }
 
@@ -534,10 +537,15 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     let mut frame = prior_log.len() as u64;
 
-    // Optional evdev gamepad (Linux): merged with the keyboard via OR.
+    // Optional gamepad (evdev on Linux, gilrs on macOS): merged with the
+    // keyboard via OR. Both backends expose the same surface.
     #[cfg(target_os = "linux")]
+    use crate::gamepad as pad_backend;
+    #[cfg(target_os = "macos")]
+    use crate::gamepad_macos as pad_backend;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut gamepad = match &opts.gamepad {
-        Some(path) => match crate::gamepad::Gamepad::open_path(path) {
+        Some(path) => match pad_backend::Gamepad::open_path(path) {
             Ok(g) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)
@@ -547,7 +555,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
                 None
             }
         },
-        None => match crate::gamepad::Gamepad::open_auto() {
+        None => match pad_backend::Gamepad::open_auto() {
             Ok(Some(g)) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)
@@ -567,7 +575,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         // Build pad from current key state, merged with the gamepad if any.
         #[allow(unused_mut)]
         let mut pad = build_pad(&window);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(g) = gamepad.as_mut() {
             pad |= g.poll();
         }

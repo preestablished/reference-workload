@@ -47,8 +47,9 @@
 //! | F5 | Dump WRAM (prompts for label) | — |
 //! | Esc | Quit | — |
 //!
-//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux and
-//! merged with the keyboard. F5 and Esc remain keyboard-only.
+//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux (evdev)
+//! and macOS (gilrs/IOKit HID; back switch on D) and merged with the
+//! keyboard. F5 and Esc remain keyboard-only.
 
 #![forbid(unsafe_code)]
 
@@ -101,7 +102,7 @@ fn usage() {
     println!("         [--interactive] [--resume] [--skip-replay-verify]");
     #[cfg(feature = "interactive")]
     println!("         [--output-log <file.padlog>]");
-    println!("         [--gamepad /dev/input/eventN]   (default: auto-detect)");
+    println!("         [--gamepad /dev/input/eventN]   (Linux; default: auto-detect)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
