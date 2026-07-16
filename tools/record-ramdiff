@@ -38,8 +38,19 @@ while [ -L "$SRC" ]; do
 done
 REPO_ROOT="$(cd "$(dirname "$SRC")/.." && pwd)"
 RAMDIFF="$REPO_ROOT/target/release/ramdiff"
-ROM_DIR="$HOME/m6-private/ROMs/SNES"
-SESSION_DIR="$HOME/m6-private/ramdiff/$SESSION_NAME"
+
+# The private root (ROMs + sessions) is resolved from a pointer file outside
+# every checkout; its location never appears in this repo (GATE-RECORD-ASK1).
+POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
+if [ ! -s "$POINTER" ]; then
+  echo "error: private-root pointer file missing: $POINTER" >&2
+  echo "       write the operator-approved private root into it (one absolute" >&2
+  echo "       path, no trailing slash) before running this tool." >&2
+  exit 1
+fi
+PRIVATE_ROOT="$(head -n1 "$POINTER")"
+ROM_DIR="$PRIVATE_ROOT/ROMs/SNES"
+SESSION_DIR="$PRIVATE_ROOT/ramdiff/$SESSION_NAME"
 
 [ -x "$RAMDIFF" ] || { echo "error: $RAMDIFF not built" >&2; exit 1; }
 
