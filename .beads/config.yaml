@@ -52,3 +52,12 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+# Explicit override (phase4-m6-discovery-01-processing package 02 step 2):
+# keep local JSONL auto-backup, but bd must NEVER git-push without the
+# operator push ask (GATE-RECORD-ASK1 / package 08).
+backup:
+  enabled: true
+  git-push: false
+dolt:
+  auto-push: false

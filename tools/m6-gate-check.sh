@@ -42,7 +42,16 @@ scorer_milestone() { # $1=M3|M4 -> echoes matching bd list line, if any
   # state this gate is looking for.
   (cd "$SCORER_REPO" && bd list --limit 0 --all 2>/dev/null) | grep -iw "$1" || true
 }
-if [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null; then
+scorer_db_alive() {
+  [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null \
+    && (cd "$SCORER_REPO" && bd list --limit 1 >/dev/null 2>&1)
+}
+# Documented-evidence fallback: the m6-host teardown lost both repos' embedded
+# Dolt DBs. When the scorer DB is absent, positive documented evidence — their
+# filed resolution's beads table marking M3 closed — is accepted; anything
+# less stays UNKNOWN/not-passed.
+SCORER_RESOLUTION="$SCORER_REPO/.agents/requests/phase4-m1-m4-first-boss-scoring/04-resolution.md"
+if scorer_db_alive; then
   m3_line=$(scorer_milestone M3)
   if [ -n "$m3_line" ] && printf '%s\n' "$m3_line" | grep -q '^✓'; then
     report PASS "scorer-M3" "$m3_line"
@@ -51,8 +60,11 @@ if [ -d "$SCORER_REPO/.beads" ] && command -v bd >/dev/null; then
   else
     report UNKNOWN "scorer-M3" "no M3-titled bead in state-scorer — verify in their packet; counts as not-passed"
   fi
+elif [ -f "$SCORER_RESOLUTION" ] \
+  && grep -F 'state-scorer-0gy' "$SCORER_RESOLUTION" | grep -qi 'closed'; then
+  report PASS "scorer-M3" "documented evidence (scorer DB lost): $SCORER_RESOLUTION marks state-scorer-0gy (M3) closed"
 else
-  report UNKNOWN "scorer-M3" "verify in state-scorer packet (no beads DB found) — counts as not-passed"
+  report UNKNOWN "scorer-M3" "verify in state-scorer packet (no beads DB, no documented closure evidence) — counts as not-passed"
 fi
 
 # 2–3. this repo's beads
@@ -67,9 +79,26 @@ done
 
 # 4. hand-play artifact — probe in preference order; report which branch.
 branch=NONE
-# Non-empty required: a stray `mkdir -p` or zero-byte file must not pass the
-# gate. Tighten further to a specific manifest/marker file once the
-# fast-follow freezes its bundle layout.
+# Marker files required, not bare non-empty directories: a stray `mkdir -p`
+# or zero-byte file must not pass the gate.
+#   corpus  : manifest.json AND captures/index.jsonl (both non-empty)
+#   session : session.yaml AND interactive.padlog (both non-empty)
+probe_corpus() {
+  for p in "$@"; do
+    if [ -s "$p/manifest.json" ] && [ -s "$p/captures/index.jsonl" ]; then
+      echo "$p"; return 0
+    fi
+  done
+  return 1
+}
+probe_session() {
+  for p in "$@"; do
+    if [ -s "$p/session.yaml" ] && [ -s "$p/interactive.padlog" ]; then
+      echo "$p"; return 0
+    fi
+  done
+  return 1
+}
 probe() {
   for p in "$@"; do
     if [ -d "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then echo "$p"; return 0; fi
@@ -77,11 +106,11 @@ probe() {
   done
   return 1
 }
-if loc=$(probe "${CORPUS_CANDIDATES[@]}"); then
+if loc=$(probe_corpus "${CORPUS_CANDIDATES[@]}"); then
   branch=full-corpus
 elif loc=$(probe "${FALLBACK_CANDIDATES[@]}"); then
   branch=first-room-fallback
-elif loc=$(probe "${RAW_SESSION_CANDIDATES[@]}"); then
+elif loc=$(probe_session "${RAW_SESSION_CANDIDATES[@]}"); then
   branch=raw-session
 fi
 if [ "$branch" = NONE ]; then
