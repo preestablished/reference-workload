@@ -209,3 +209,46 @@ unchanged; searching happened in scratch/derived dirs and python).
   Run C operator mini-session. Brief delivered in-session; see
   findings.yaml `undiscoverable_for_stop1` +
   `proposed_stable_for_runC_confirmation` for the item-3 field list.
+
+## Package 05 step 2 — STOP #1 items 2/3/4 agent-resolved (2026-07-16)
+
+Insight: STOP #1 items 2 (death) and 3 (reload/restored-state — the plan's
+own text allows "save/**continue**" reloads) do not actually require hand
+play. Scripted padlog extensions on the deterministic core reproduce both.
+
+- **Death (item 2):** truncating the padlog at frame 5500 (W1-S1, near the
+  known damage source) and holding right kills the player: health hits 0 at
+  6337, refills at 6511 (~170-frame instant checkpoint respawn — a lives
+  system; three die/respawn cycles in one script). From the all-latches-set
+  anchor 41511, a right+periodic-B tail produces two late deaths
+  (41995/43659) with reload-style respawns (42674/43948).
+  `$PR/ramdiff/scripted-death-01` records 9 labeled dumps (baseline,
+  pre-death ×2, dead ×3, respawn ×2, post-stability); zero faults.
+- **Dead-state semantics:** game_mode does NOT change on death (nor do the
+  alternates take a unique value — game-over-screen values collide with
+  transition values). The evidence-backed prune predicate is
+  `health == 0 AND game_mode == <in-level class value>`; boot-era
+  health zeros are excluded by the mode conjunction. Encoded in scoring
+  draft v2. `never`-clauses stay omitted (boot-era zeros would trip them).
+- **Restored-state confirmation (item 3):** all proposed-stable fields
+  compared across baseline / respawn-1 / respawn-2 / post: **the gate
+  caught two frauds** — the original upgrade_flags and boss_encounter
+  picks RESET on checkpoint reload (per-life state, not progress).
+  Re-search over restore-surviving candidates yielded clean replacements:
+  a persistent 0→1 equipment latch (fine bucket 41225, watch: single
+  change at 41208) and a persistent boss latch (watch: single change at
+  30242). Full 9-field restore table now ALL PASS
+  (`$PR/discovery/restore-confirmation.json`); re-watched both new picks
+  over discovery-01 (clean single-change stories); draft map/scoring/
+  expectations regenerated (v2) and the draft map-check re-passes 23/23.
+  This also resolved item 4 (upgrade-latch ambiguity): the restore gate
+  disambiguated the co-latched alternates mechanically.
+- Death-experiment scripts + logs live under `$PR/discovery/experiments/`.
+
+**Remaining STOP #1 asks (operator-only):** item 1 (credits/completion
+evidence — requires beating the game or an ASK1-sanctioned late-game save;
+fixture source is the operator's call) and item 5 (pushed-history rewrite
+decision for commit 5b35113). Stability upgrades PROVISIONAL→stable are
+now evidence-complete but the map cannot finalize without the credits goal
+feature (schema requires `goal`), so packages 05-finalization/06/07/08
+remain blocked on item 1.
