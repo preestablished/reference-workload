@@ -6,7 +6,8 @@
 //! ramdiff record --rom <file.rom> --script <run.padlog> --session <dir>
 //!                [--mark <frame>=<label>] [--dump-every N] [--frames N]
 //!                [--interactive]   (only when compiled with --features interactive)
-//!                [--gamepad /dev/input/eventN]   (interactive; default: auto-detect)
+//!                [--resume] [--skip-replay-verify]
+//!                [--gamepad /dev/input/eventN]   (interactive, Linux; default: auto-detect)
 //!
 //! ramdiff search --session <dir>
 //!                [--width u8|u16le]
@@ -47,9 +48,10 @@
 //! | F5 | Dump WRAM (prompts for label) | — |
 //! | Esc | Quit | — |
 //!
-//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux and
-//! merged with the keyboard; see `gamepad.rs` for the button mapping in
-//! both XInput and DirectInput switch positions. F5/Esc remain keyboard-only.
+//! A Logitech F310 (or compatible) gamepad is auto-detected on Linux (evdev;
+//! see `gamepad.rs` for the button mapping in both XInput and DirectInput
+//! switch positions) and macOS (gilrs/IOKit HID; back switch on D) and merged
+//! with the keyboard. F5 and Esc remain keyboard-only.
 
 #![forbid(unsafe_code)]
 
@@ -99,8 +101,10 @@ fn usage() {
     println!("  record --rom <file.rom> --script <run.padlog> --session <dir>");
     println!("         [--mark <frame>=<label>] [--dump-every N] [--frames N]");
     #[cfg(feature = "interactive")]
-    println!("         [--interactive] [--output-log <file.padlog>]");
-    println!("         [--gamepad /dev/input/eventN]   (default: auto-detect)");
+    println!("         [--interactive] [--resume] [--skip-replay-verify]");
+    #[cfg(feature = "interactive")]
+    println!("         [--output-log <file.padlog>]");
+    println!("         [--gamepad /dev/input/eventN]   (Linux; default: auto-detect)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -129,6 +133,8 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut dump_every: Option<u64> = None;
     let mut total_frames: Option<u64> = None;
     let mut interactive = false;
+    let mut resume = false;
+    let mut skip_replay_verify = false;
     let mut output_log: Option<std::path::PathBuf> = None;
     let mut gamepad: Option<std::path::PathBuf> = None;
 
@@ -171,6 +177,12 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             "--interactive" => {
                 interactive = true;
             }
+            "--resume" => {
+                resume = true;
+            }
+            "--skip-replay-verify" => {
+                skip_replay_verify = true;
+            }
             "--output-log" => {
                 i += 1;
                 output_log = Some(need_path("record", "--output-log", args, i)?);
@@ -189,14 +201,29 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let session_dir = session_dir.ok_or_else(|| "record: --session is required".to_owned())?;
 
     if interactive {
+        if skip_replay_verify && !resume {
+            return Err("record: --skip-replay-verify requires --resume".to_owned());
+        }
         let rom = rom.ok_or_else(|| "record --interactive: --rom is required".to_owned())?;
         let out_log = output_log.unwrap_or_else(|| session_dir.join("interactive.padlog"));
         return ramdiff::record::run_interactive(&InteractiveOpts {
             rom,
             session_dir,
             output_log: out_log,
+            resume,
+            skip_replay_verify,
             gamepad,
         });
+    }
+
+    if resume {
+        return Err("record: --resume requires --interactive".to_owned());
+    }
+    if skip_replay_verify {
+        return Err("record: --skip-replay-verify requires --interactive".to_owned());
+    }
+    if gamepad.is_some() {
+        return Err("record: --gamepad requires --interactive".to_owned());
     }
 
     let rom = rom.ok_or_else(|| "record: --rom is required".to_owned())?;

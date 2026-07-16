@@ -144,6 +144,12 @@ pub struct Session {
     pub dir: PathBuf,
     /// All recorded WRAM dumps, in insertion order.
     pub dumps: Vec<DumpMeta>,
+    /// Number of pad frames in `interactive.padlog` at the last save, if this
+    /// session was recorded interactively. Used at resume time to detect a
+    /// truncated or replaced log (absent in scripted sessions and in
+    /// `session.yaml` files written before this field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_frames: Option<u64>,
     /// Current candidate set (may be empty before the first search).
     #[serde(default)]
     pub candidates: CandidateSet,
@@ -155,6 +161,7 @@ impl Session {
         Session {
             dir: dir.into(),
             dumps: Vec::new(),
+            log_frames: None,
             candidates: CandidateSet::default(),
         }
     }
@@ -176,12 +183,18 @@ impl Session {
     }
 
     /// Persist `session.yaml` to `self.dir`.
+    ///
+    /// Written via a temp file + rename so an interrupted save can never
+    /// leave a half-written `session.yaml` behind.
     pub fn save(&self) -> Result<(), String> {
         let yaml_path = self.dir.join("session.yaml");
+        let tmp_path = self.dir.join("session.yaml.tmp");
         let text =
             serde_yaml::to_string(self).map_err(|e| format!("cannot serialize session: {}", e))?;
-        std::fs::write(&yaml_path, text)
-            .map_err(|e| format!("cannot write {}: {}", yaml_path.display(), e))?;
+        std::fs::write(&tmp_path, text)
+            .map_err(|e| format!("cannot write {}: {}", tmp_path.display(), e))?;
+        std::fs::rename(&tmp_path, &yaml_path)
+            .map_err(|e| format!("cannot rename {} into place: {}", tmp_path.display(), e))?;
         Ok(())
     }
 
@@ -195,6 +208,15 @@ impl Session {
         let meta = self
             .dump_by_label(label)
             .ok_or_else(|| format!("no dump with label {:?}", label))?;
+        self.load_dump_bytes_for(meta)
+    }
+
+    /// Load the raw WRAM bytes for a specific dump entry by its file path.
+    ///
+    /// Labels are not unique (and distinct labels can sanitize to the same
+    /// file name), so callers holding a `DumpMeta` must read through it
+    /// rather than going back via the label.
+    pub fn load_dump_bytes_for(&self, meta: &DumpMeta) -> Result<Vec<u8>, String> {
         let path = self.dir.join(&meta.file);
         let bytes = std::fs::read(&path)
             .map_err(|e| format!("cannot read dump {:?}: {}", path.display(), e))?;

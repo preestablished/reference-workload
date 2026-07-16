@@ -142,7 +142,7 @@ fn main() {
         core.blit_completed_frame(&mut fb);
         let fb_hash = hash64(&fb);
         let changed = d.force_blank != last_fb;
-        if d.frame <= 3 || d.frame % interval == 0 || changed || d.frame == frames {
+        if d.frame <= 3 || d.frame.is_multiple_of(interval) || changed || d.frame == frames {
             println!(
                 "f={} fblank={} bright={} bgmode={} tm={:#04x} ts={:#04x} tmw={:#04x} \
                  cgwsel={:#04x} cgadsub={:#04x} fixedColor={:#06x} cgram_nz={} vram_nz={} \

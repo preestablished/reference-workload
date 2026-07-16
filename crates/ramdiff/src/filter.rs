@@ -410,7 +410,7 @@ pub mod tests {
         assert!(
             session.candidates.offsets.contains(&0x0010),
             "frame counter offset 0x0010 must survive; got {:?}",
-            &session.candidates.offsets
+            session.candidates.offsets
         );
     }
 }

@@ -9,7 +9,7 @@
 //! - HDMA: per-scanline table-walk DMA; `execute_hdma` runs before each visible
 //!   line (called from `core_impl.rs` frame loop).
 //! - Auto-joypad stale reads: $4218/$4219 return the *previous* latch while
-//!   `auto_joy_busy` (lines 225-227). Simplification documented: games that
+//!   `auto_joy_busy` (the first three vblank lines). Simplification documented: games that
 //!   poll $4212 first (common idiom) are exact either way.
 //! - OPHCT real dot counter: `start_line` passes the current within-line dot
 //!   to `ppu.latch_hv_counters` so OPHCT reflects a real position.
@@ -107,11 +107,11 @@ pub struct SysBus {
     pub wmadd: u32,
     /// Current scanline (maintained by the frame scheduler).
     pub line: u16,
-    /// True during scanlines 225..=227 while auto-joypad read is "busy".
+    /// True during the first three vblank scanlines while auto-joypad is busy.
     pub auto_joy_busy: bool,
     /// Previous joypad latch (before auto-read started): returned by $4218/$4219
     /// while `auto_joy_busy`. Simplification: games that poll $4212 first are exact
-    /// either way; the new latch becomes visible when busy clears at line 228.
+    /// either way; the new latch becomes visible after the third vblank line.
     pub joy_prev: u16,
     /// Diagnostic flags accumulated during the current frame.
     pub frame_flags: crate::fault::FrameFlags,
@@ -426,13 +426,14 @@ impl SysBus {
         let _ = pad; // pad is set on the joypad by Core before calling start_line
         self.line = line;
 
+        let vblank_start = self.ppu.vblank_start_line();
         if line == 0 {
             // End of V-blank: clear NMI flag, begin new frame. (The PPU's
             // begin_frame/begin_vblank hooks are invoked by the Core frame
             // loop so SysBus stays unit-testable without a live PPU.)
             self.recompute_irq_target();
             self.nmi_flag = false;
-        } else if line == 225 {
+        } else if line == vblank_start {
             // V-blank start: set NMI flag.
             self.nmi_flag = true;
             // If NMITIMEN bit7 is set, raise NMI edge.
@@ -442,15 +443,15 @@ impl SysBus {
             // If auto-joypad enabled (NMITIMEN bit0):
             // Stale-read protocol (M2): snapshot the current latch into
             // joy_prev before performing the new auto-read. While busy
-            // (lines 225-227), $4218/$4219 return joy_prev (the previous
+            // (the first three vblank lines), $4218/$4219 return joy_prev (the previous
             // latch). The new latch becomes visible when busy clears at
-            // line 228. Games that poll $4212 bit0 first are fully exact.
+            // the third vblank line. Games that poll $4212 bit0 first are exact.
             if self.nmitimen & 0x01 != 0 {
                 self.joy_prev = self.joypad.joy1;
                 self.joypad.auto_read();
                 self.auto_joy_busy = true;
             }
-        } else if line == 228 {
+        } else if line == vblank_start + 3 {
             self.auto_joy_busy = false;
         }
     }
@@ -954,8 +955,7 @@ impl Bus for SysBus {
                         {
                             self.diag_rd_4212 += 1;
                         }
-                        // vblank flag: lines >= 225.
-                        let vblank = self.line >= 225;
+                        let vblank = self.line >= self.ppu.vblank_start_line();
                         // hblank: approximate — mclk within current line >= 274*4.
                         // We compute mclk within the current line from mclk_frame.
                         // APPROXIMATION: mclk_frame represents absolute mclks from
@@ -1005,9 +1005,9 @@ impl Bus for SysBus {
                     }
 
                     // $4218/$4219: JOY1 (little-endian).
-                    // Stale-read protocol (M2): while auto_joy_busy (lines
-                    // 225-227) return the previous latch (joy_prev); the new
-                    // latch becomes visible once busy clears at line 228.
+                    // Stale-read protocol (M2): while auto_joy_busy (the first
+                    // three vblank lines) return the previous latch (joy_prev);
+                    // the new latch becomes visible once busy clears.
                     // Games that poll $4212 bit0 first are fully correct.
                     0x4218 => {
                         let joy = if self.auto_joy_busy {
@@ -1408,6 +1408,29 @@ mod tests {
         let wram: &'static mut [u8; 0x20000] = Box::leak(Box::new([0u8; 0x20000]));
         let vram: &'static mut [u8; 0x10000] = Box::leak(Box::new([0u8; 0x10000]));
         SysBus::new(wram, make_test_cart(), Ppu::new(vram))
+    }
+
+    #[test]
+    fn overscan_moves_vblank_nmi_hvbjoy_and_autojoy_boundary() {
+        let mut bus = make_test_bus();
+        assert!(bus.ppu.write(0x33, 0x04).is_none());
+        bus.ppu.begin_frame();
+        bus.nmitimen = 0x81;
+
+        bus.start_line(225, 0);
+        assert!(!bus.nmi_flag);
+        assert!(!bus.nmi_pending);
+        assert!(!bus.auto_joy_busy);
+        assert_eq!(bus.read(0x004212) & 0x80, 0);
+
+        bus.start_line(240, 0);
+        assert!(bus.nmi_flag);
+        assert!(bus.nmi_pending);
+        assert!(bus.auto_joy_busy);
+        assert_ne!(bus.read(0x004212) & 0x80, 0);
+
+        bus.start_line(243, 0);
+        assert!(!bus.auto_joy_busy);
     }
 
     fn advance_apu_to_ipl_poll(bus: &mut SysBus) {

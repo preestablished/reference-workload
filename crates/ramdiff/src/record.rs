@@ -204,9 +204,209 @@ pub struct InteractiveOpts {
     pub session_dir: std::path::PathBuf,
     /// Path to the output `.padlog` file (written incrementally).
     pub output_log: std::path::PathBuf,
-    /// Explicit evdev gamepad node (Linux). `None` = auto-detect; the pad is
-    /// optional either way and merges with (never replaces) the keyboard.
+    /// Replay the existing output log to restore emulator state, then append.
+    pub resume: bool,
+    /// On resume, downgrade replay-vs-dump divergence from an error to a
+    /// warning (the restored state may then not match the recorded session).
+    pub skip_replay_verify: bool,
+    /// Explicit evdev gamepad node (Linux only). On macOS an explicit path
+    /// warns and disables the gamepad for the session (keyboard-only, no
+    /// auto-detect fallback — same as Linux when an explicit node fails to
+    /// open). `None` auto-detects on both platforms.
     pub gamepad: Option<std::path::PathBuf>,
+}
+
+#[cfg(any(feature = "interactive", test))]
+fn load_resume_log(path: &std::path::Path, resume: bool) -> Result<PadLog, String> {
+    if !resume || !path.exists() {
+        return Ok(PadLog::default());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read resume log {}: {}", path.display(), e))?;
+    refwork_script::parse(&text)
+        .map_err(|e| format!("cannot parse resume log {}: {}", path.display(), e))
+}
+
+/// Count pad lines in an on-disk padlog (anything beyond the header).
+///
+/// Only "is there recorded input" matters to callers, so RLE lines count as
+/// one; the exact frame count comes from parsing, not from here.
+#[cfg(any(feature = "interactive", test))]
+fn count_pad_lines(path: &std::path::Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read log {}: {}", path.display(), e))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "padlog v1")
+        .count())
+}
+
+/// A fresh (non-resume) interactive run must never start on top of an
+/// existing recorded session: truncating the padlog would destroy the
+/// recording, and appending dumps next to a rotated-away log would poison
+/// future resumes. Session-dir rotation is the wrapper's job.
+#[cfg(any(feature = "interactive", test))]
+fn ensure_fresh_session(session: &Session, log_path: &std::path::Path) -> Result<(), String> {
+    let pad_lines = count_pad_lines(log_path)?;
+    if pad_lines == 0 && session.dumps.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "session dir already contains a recorded session ({} logged pad lines, {} dumps).\n\
+         - to continue it:       re-run with --resume\n\
+         - to start over safely: use record-ramdiff (it rotates the whole session dir aside)\n\
+         \x20                        or pass a new --session directory\n\
+         Nothing was modified.",
+        pad_lines,
+        session.dumps.len()
+    ))
+}
+
+/// Validate that a resume log can contain the recorded session.
+///
+/// Dumps with `frame == 0` are the documented sentinel for platform-captured
+/// dumps registered by hand (session.rs module docs); they are not
+/// interactive checkpoints and impose no constraint on the log.
+#[cfg(any(feature = "interactive", test))]
+fn check_resume_integrity(
+    log_frames: usize,
+    log_exists: bool,
+    session_log_frames: Option<u64>,
+    dumps: &[DumpMeta],
+) -> Result<(), String> {
+    let max_dump = dumps
+        .iter()
+        .filter(|d| d.frame > 0)
+        .max_by_key(|d| d.frame);
+
+    if !log_exists {
+        if max_dump.is_some() || session_log_frames.unwrap_or(0) > 0 {
+            let recorded = match session_log_frames {
+                Some(m) => format!(" and a log of {} frames", m),
+                None => String::new(),
+            };
+            return Err(format!(
+                "cannot resume: interactive.padlog is missing but session.yaml records \
+                 {} dumps{}. The input log for this session is gone; its state cannot be \
+                 restored by replay. The WRAM dumps remain valid for `ramdiff search`.",
+                dumps.len(),
+                recorded
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(m) = session_log_frames {
+        if (log_frames as u64) < m {
+            return Err(format!(
+                "cannot resume: interactive.padlog holds {} frames but session.yaml recorded \
+                 {} frames at the last save. The log tail has been truncated or the file \
+                 replaced; resuming would silently restart from the wrong state.",
+                log_frames, m
+            ));
+        }
+    }
+
+    if let Some(d) = max_dump {
+        if d.frame >= log_frames as u64 {
+            return Err(format!(
+                "cannot resume: interactive.padlog holds {} frames but dump {:?} was recorded \
+                 at frame {}. The log no longer contains the recorded session (it was likely \
+                 truncated by an earlier run); resuming would silently restart from the wrong \
+                 state.\n\
+                 - the WRAM dumps and session.yaml are still valid for `ramdiff search`\n\
+                 - to start over, use record-ramdiff (it rotates this session dir aside) or \
+                 pass a new --session directory",
+                log_frames, d.label, d.frame
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Compare replayed WRAM against a recorded dump at its checkpoint frame.
+#[cfg(any(feature = "interactive", test))]
+fn verify_checkpoint(
+    frame: u64,
+    label: &str,
+    expected: &[u8],
+    actual: &[u8],
+) -> Result<(), String> {
+    if expected == actual {
+        return Ok(());
+    }
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "replay diverged from the recorded state at frame {} (dump {:?}): dump is {} bytes \
+             but WRAM is {} bytes",
+            frame,
+            label,
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut diff_count = 0usize;
+    let mut first_diff = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        if e != a {
+            if diff_count == 0 {
+                first_diff = i;
+            }
+            diff_count += 1;
+        }
+    }
+    Err(format!(
+        "replay diverged from the recorded state at frame {} (dump {:?}): {} of {} WRAM bytes \
+         differ (first at 0x{:05x}). The emulator's behavior has changed since this session \
+         was recorded; the restored state would not match what you played. Re-record the \
+         session with the current build, or pass --skip-replay-verify to resume anyway \
+         (state may be wrong).",
+        frame,
+        label,
+        diff_count,
+        expected.len(),
+        first_diff
+    ))
+}
+
+/// Open the interactive padlog: append when resuming an existing log,
+/// otherwise create it with the header.
+///
+/// The truncating branch is safe only because `ensure_fresh_session` has
+/// already proven the file is absent or header-only in fresh mode. The
+/// exclusive lock (released automatically at process exit) prevents two
+/// ramdiff processes from interleaving writes into one log.
+#[cfg(any(feature = "interactive", test))]
+fn open_interactive_log(path: &std::path::Path, resume: bool) -> Result<std::fs::File, String> {
+    use std::io::Write;
+
+    let append = resume && path.exists();
+    let mut open = std::fs::OpenOptions::new();
+    open.create(true);
+    if append {
+        open.append(true);
+    } else {
+        open.write(true).truncate(true);
+    }
+    let mut file = open
+        .open(path)
+        .map_err(|e| format!("cannot open log file {}: {}", path.display(), e))?;
+    file.try_lock().map_err(|e| {
+        format!(
+            "cannot lock log file {} (is another ramdiff running on this session?): {}",
+            path.display(),
+            e
+        )
+    })?;
+    if !append {
+        writeln!(file, "padlog v1").map_err(|e| format!("write error: {}", e))?;
+        file.flush().map_err(|e| format!("flush error: {}", e))?;
+    }
+    Ok(file)
 }
 
 #[cfg(feature = "interactive")]
@@ -221,6 +421,20 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     let mut session = Session::load(&opts.session_dir)?;
 
+    // Guards before anything is opened or replayed: a refused run must leave
+    // every session file untouched.
+    let prior_log = load_resume_log(&opts.output_log, opts.resume)?;
+    if opts.resume {
+        check_resume_integrity(
+            prior_log.len(),
+            opts.output_log.exists(),
+            session.log_frames,
+            &session.dumps,
+        )?;
+    } else {
+        ensure_fresh_session(&session, &opts.output_log)?;
+    }
+
     // Load ROM.
     let rom_bytes = std::fs::read(&opts.rom).map_err(|e| format!("cannot read ROM: {}", e))?;
     let cart = Cartridge::from_rom(rom_bytes, None).map_err(|e| format!("bad ROM: {:?}", e))?;
@@ -234,17 +448,73 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     let mut core =
         Core::new(cart, regions).map_err(|e| format!("core construction failed: {:?}", e))?;
 
-    // Open the output log file.  Write header once, then append per frame.
-    let mut log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&opts.output_log)
-        .map_err(|e| format!("cannot open log file: {}", e))?;
-    writeln!(log_file, "padlog v1").map_err(|e| format!("write error: {}", e))?;
-    log_file
-        .flush()
-        .map_err(|e| format!("flush error: {}", e))?;
+    // Resume is deterministic replay: validate and run every recorded input
+    // before opening the log for append. A replay fault or a divergence from
+    // a recorded dump leaves the log intact.
+    if !prior_log.is_empty() {
+        // Checkpoints: dumps whose WRAM the replay must reproduce at their
+        // recorded frames. Keyed by file with the max-frame entry winning:
+        // labels are not unique and distinct labels can sanitize to the same
+        // file name, and the .bin on disk holds only the latest dump written
+        // to that path. frame == 0 entries are platform captures, not
+        // checkpoints.
+        let mut by_file: BTreeMap<&str, &DumpMeta> = BTreeMap::new();
+        for d in session.dumps.iter().filter(|d| d.frame > 0) {
+            if let Some(prev) = by_file.get(d.file.as_str()) {
+                let (shadowed, kept) = if d.frame > prev.frame {
+                    (*prev, d)
+                } else {
+                    (d, *prev)
+                };
+                eprintln!(
+                    "interactive: note: dump {:?} (frame {}) shares file {:?} with a later \
+                     dump; it cannot be verified during replay",
+                    shadowed.label, shadowed.frame, shadowed.file
+                );
+                by_file.insert(kept.file.as_str(), kept);
+            } else {
+                by_file.insert(d.file.as_str(), d);
+            }
+        }
+        let checkpoints: BTreeMap<u64, &DumpMeta> =
+            by_file.values().map(|d| (d.frame, *d)).collect();
+
+        eprintln!(
+            "interactive: replaying {} frames to restore session state ({} checkpoints)",
+            prior_log.len(),
+            checkpoints.len()
+        );
+        for (index, &pad) in prior_log.frames.iter().enumerate() {
+            let flags = core.run_one_frame(pad);
+            if let Some(fault) = core.fault() {
+                return Err(format!(
+                    "cannot resume: replay fault at frame {} (flags={:?}): {:?}",
+                    index, flags, fault
+                ));
+            }
+            // A dump tagged frame F was taken right after the live loop ran
+            // pad index F, so compare here, after this frame.
+            if let Some(dump) = checkpoints.get(&(index as u64)) {
+                let expected = session.load_dump_bytes_for(dump)?;
+                match verify_checkpoint(index as u64, &dump.label, &expected, core.wram()) {
+                    Ok(()) => eprintln!(
+                        "interactive: replay checkpoint OK at frame {} ({:?})",
+                        index, dump.label
+                    ),
+                    Err(e) if opts.skip_replay_verify => {
+                        eprintln!("interactive: warning: {}", e);
+                    }
+                    Err(e) => return Err(format!("cannot resume: {}", e)),
+                }
+            }
+            if (index + 1).is_multiple_of(10_000) {
+                eprintln!("interactive: replayed {} frames", index + 1);
+            }
+        }
+        eprintln!("interactive: resumed at frame {}", prior_log.len());
+    }
+
+    let mut log_file = open_interactive_log(&opts.output_log, opts.resume)?;
 
     let mut window = Window::new(
         "ramdiff record [interactive] — F5=dump, Esc=quit",
@@ -265,32 +535,37 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // minifb expects u32 XRGB8888 in native endian.
     let mut fb_u32 = vec![0u32; FB_WIDTH * FB_HEIGHT];
 
-    let mut frame: u64 = 0;
+    let mut frame = prior_log.len() as u64;
 
-    // Optional evdev gamepad (Linux): merged with the keyboard via OR.
+    // Optional gamepad (evdev on Linux, gilrs on macOS): merged with the
+    // keyboard via OR. Both backends expose the same surface.
     #[cfg(target_os = "linux")]
+    use crate::gamepad as pad_backend;
+    #[cfg(target_os = "macos")]
+    use crate::gamepad_macos as pad_backend;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut gamepad = match &opts.gamepad {
-        Some(path) => match crate::gamepad::Gamepad::open_path(path) {
+        Some(path) => match pad_backend::Gamepad::open_path(path) {
             Ok(g) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)
             }
             Err(e) => {
-                eprintln!("interactive: {} — keyboard only", e);
+                eprintln!("interactive: {} - keyboard only", e);
                 None
             }
         },
-        None => match crate::gamepad::Gamepad::open_auto() {
+        None => match pad_backend::Gamepad::open_auto() {
             Ok(Some(g)) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)
             }
             Ok(None) => {
-                eprintln!("interactive: no gamepad detected — keyboard only");
+                eprintln!("interactive: no gamepad detected - keyboard only");
                 None
             }
             Err(e) => {
-                eprintln!("interactive: {} — keyboard only", e);
+                eprintln!("interactive: {} - keyboard only", e);
                 None
             }
         },
@@ -300,18 +575,21 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         // Build pad from current key state, merged with the gamepad if any.
         #[allow(unused_mut)]
         let mut pad = build_pad(&window);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(g) = gamepad.as_mut() {
             pad |= g.poll();
         }
 
         let flags = core.run_one_frame(pad);
         if let Some(fault) = core.fault() {
-            eprintln!(
+            // This frame's pad line was not written yet, so the log holds
+            // exactly `frame` frames.
+            session.log_frames = Some(frame);
+            session.save()?;
+            return Err(format!(
                 "interactive: fault at frame {} {:?}: {:?}",
                 frame, flags, fault
-            );
-            break;
+            ));
         }
 
         // Append pad word to log (one hex line, no RLE).
@@ -354,6 +632,8 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
                     file,
                     region: "wram".to_owned(),
                 });
+                // This frame's pad line is already written: frame + 1 total.
+                session.log_frames = Some(frame + 1);
                 session.save()?;
                 eprintln!("interactive: WRAM dumped at frame {} → {:?}", frame, label);
             }
@@ -362,6 +642,9 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         frame += 1;
     }
 
+    // `frame` was incremented past the last written line: it equals the
+    // total pad lines now in the log.
+    session.log_frames = Some(frame);
     session.save()?;
     Ok(())
 }
@@ -428,8 +711,7 @@ fn build_pad(window: &minifb::Window) -> u16 {
 
 /// Convert XRGB8888 framebuffer bytes to minifb's u32 slice.
 /// minifb expects each u32 as 0x00RRGGBB (native endian, X byte ignored).
-/// The emu stores each pixel as a little-endian 0x00RRGGBB u32, so the
-/// byte layout is [B, G, R, X].
+/// The emulator buffer stores little-endian 0x00RRGGBB as `[B, G, R, X]`.
 #[cfg(feature = "interactive")]
 fn xrgb_to_u32(src: &[u8], dst: &mut [u32], width: usize, height: usize) {
     for y in 0..height {
@@ -587,6 +869,220 @@ mod tests {
         let log = PadLog::from_frames(vec![]).unwrap();
         assert_eq!(get_pad(&log, 0), 0);
         assert_eq!(get_pad(&log, 99), 0);
+    }
+
+    #[test]
+    fn resume_log_is_loaded_only_when_requested() {
+        let temp = std::env::temp_dir().join(format!(
+            "ramdiff-resume-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&temp, "padlog v1\n0001\n2x0002\n").unwrap();
+
+        let fresh = load_resume_log(&temp, false).unwrap();
+        assert!(fresh.is_empty());
+        let resumed = load_resume_log(&temp, true).unwrap();
+        assert_eq!(resumed.frames, vec![1, 2, 2]);
+
+        std::fs::remove_file(temp).unwrap();
+    }
+
+    #[test]
+    fn resume_log_open_appends_without_rewriting_header() {
+        use std::io::Write;
+
+        let temp = std::env::temp_dir().join(format!(
+            "ramdiff-append-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&temp, "padlog v1\n0001\n").unwrap();
+
+        let mut file = open_interactive_log(&temp, true).unwrap();
+        writeln!(file, "0002").unwrap();
+        drop(file);
+
+        let parsed = refwork_script::parse(&std::fs::read_to_string(&temp).unwrap()).unwrap();
+        assert_eq!(parsed.frames, vec![1, 2]);
+        std::fs::remove_file(temp).unwrap();
+    }
+
+    fn dump(label: &str, frame: u64, file: &str) -> DumpMeta {
+        DumpMeta {
+            label: label.to_owned(),
+            frame,
+            file: file.to_owned(),
+            region: "wram".to_owned(),
+        }
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ramdiff-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
+
+    #[test]
+    fn fresh_session_refuses_existing_pad_lines() {
+        let log = temp_path("fresh-padlines");
+        std::fs::write(&log, "padlog v1\n0001\n").unwrap();
+        let session = Session::new(std::env::temp_dir());
+
+        let err = ensure_fresh_session(&session, &log).unwrap_err();
+        assert!(err.contains("--resume"), "err: {}", err);
+        // The refused run must not modify the file.
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "padlog v1\n0001\n"
+        );
+        std::fs::remove_file(log).unwrap();
+    }
+
+    #[test]
+    fn fresh_session_refuses_existing_dumps() {
+        let log = temp_path("fresh-dumps");
+        let _ = std::fs::remove_file(&log);
+        let mut session = Session::new(std::env::temp_dir());
+        session.add_dump(dump("boss", 100, "boss.bin"));
+
+        assert!(ensure_fresh_session(&session, &log).is_err());
+    }
+
+    #[test]
+    fn fresh_session_accepts_clean_dir() {
+        let log = temp_path("fresh-clean");
+        let session = Session::new(std::env::temp_dir());
+
+        // Missing file.
+        let _ = std::fs::remove_file(&log);
+        assert!(ensure_fresh_session(&session, &log).is_ok());
+
+        // Header-only file (aborted start).
+        std::fs::write(&log, "padlog v1\n").unwrap();
+        assert!(ensure_fresh_session(&session, &log).is_ok());
+        std::fs::remove_file(log).unwrap();
+    }
+
+    #[test]
+    fn resume_integrity_detects_truncated_log() {
+        // The real incident: dump at frame 77146, log rewritten to 8605 frames.
+        let dumps = vec![dump("1-4 boss defeated", 77146, "boss.bin")];
+        let err = check_resume_integrity(8605, true, None, &dumps).unwrap_err();
+        assert!(err.contains("77146"), "err: {}", err);
+        assert!(err.contains("8605"), "err: {}", err);
+        assert!(err.contains("1-4 boss defeated"), "err: {}", err);
+    }
+
+    #[test]
+    fn resume_integrity_frame_boundaries() {
+        let dumps = vec![dump("d", 77146, "d.bin")];
+        // Dump at frame F needs >= F + 1 logged frames.
+        assert!(check_resume_integrity(77147, true, None, &dumps).is_ok());
+        assert!(check_resume_integrity(77146, true, None, &dumps).is_err());
+    }
+
+    #[test]
+    fn resume_integrity_names_worst_dump() {
+        let dumps = vec![
+            dump("early", 100, "early.bin"),
+            dump("late", 5000, "late.bin"),
+            dump("mid", 2000, "mid.bin"),
+        ];
+        let err = check_resume_integrity(3000, true, None, &dumps).unwrap_err();
+        assert!(err.contains("\"late\""), "err: {}", err);
+    }
+
+    #[test]
+    fn resume_integrity_ignores_platform_capture_sentinel() {
+        // frame == 0 marks hand-registered platform captures.
+        let dumps = vec![dump("external", 0, "external.bin")];
+        assert!(check_resume_integrity(0, true, None, &dumps).is_ok());
+        assert!(check_resume_integrity(10, true, None, &dumps).is_ok());
+
+        // A real dump alongside the sentinel still governs.
+        let dumps = vec![dump("external", 0, "external.bin"), dump("real", 50, "real.bin")];
+        assert!(check_resume_integrity(51, true, None, &dumps).is_ok());
+        assert!(check_resume_integrity(50, true, None, &dumps).is_err());
+    }
+
+    #[test]
+    fn resume_integrity_empty_session_is_ok() {
+        assert!(check_resume_integrity(0, false, None, &[]).is_ok());
+        assert!(check_resume_integrity(1000, true, None, &[]).is_ok());
+    }
+
+    #[test]
+    fn resume_integrity_missing_log_with_dumps() {
+        let dumps = vec![dump("boss", 100, "boss.bin")];
+        let err = check_resume_integrity(0, false, None, &dumps).unwrap_err();
+        assert!(err.contains("missing"), "err: {}", err);
+        assert!(!err.contains("truncated"), "err: {}", err);
+    }
+
+    #[test]
+    fn resume_integrity_uses_recorded_frame_count() {
+        // Tail truncation past the last dump: no dump violated, but the
+        // session recorded more frames than the log now holds.
+        let dumps = vec![dump("d", 100, "d.bin")];
+        assert!(check_resume_integrity(900, true, Some(1000), &dumps).is_err());
+        assert!(check_resume_integrity(1000, true, Some(1000), &dumps).is_ok());
+    }
+
+    #[test]
+    fn verify_checkpoint_matches_and_diverges() {
+        let a = vec![0u8; 64];
+        assert!(verify_checkpoint(7, "ok", &a, &a).is_ok());
+
+        let mut b = a.clone();
+        b[9] = 0xff;
+        let err = verify_checkpoint(7, "bad", &a, &b).unwrap_err();
+        assert!(err.contains("frame 7"), "err: {}", err);
+        assert!(err.contains("\"bad\""), "err: {}", err);
+        assert!(err.contains("1 of 64"), "err: {}", err);
+        assert!(err.contains("0x00009"), "err: {}", err);
+
+        let short = vec![0u8; 32];
+        assert!(verify_checkpoint(7, "len", &a, &short).is_err());
+    }
+
+    #[test]
+    fn open_interactive_log_creates_fresh_with_header() {
+        let log = temp_path("open-fresh");
+        let _ = std::fs::remove_file(&log);
+        let file = open_interactive_log(&log, false).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "padlog v1\n");
+
+        // Resume on a missing file also starts fresh with a header.
+        std::fs::remove_file(&log).unwrap();
+        let file = open_interactive_log(&log, true).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "padlog v1\n");
+        std::fs::remove_file(log).unwrap();
+    }
+
+    #[test]
+    fn open_interactive_log_rejects_second_locker() {
+        let log = temp_path("open-lock");
+        let _ = std::fs::remove_file(&log);
+        let first = open_interactive_log(&log, false).unwrap();
+        let second = open_interactive_log(&log, true);
+        assert!(second.is_err(), "second open must fail while locked");
+        drop(first);
+        std::fs::remove_file(log).unwrap();
+    }
+
+    #[cfg(feature = "interactive")]
+    #[test]
+    fn interactive_framebuffer_conversion_preserves_rgb_channels() {
+        let src = [0x33, 0x22, 0x11, 0x00, 0xcc, 0xbb, 0xaa, 0x00];
+        let mut dst = [0u32; 2];
+        xrgb_to_u32(&src, &mut dst, 2, 1);
+        assert_eq!(dst, [0x0011_2233, 0x00aa_bbcc]);
     }
 
     #[test]
