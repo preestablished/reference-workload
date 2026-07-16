@@ -397,6 +397,29 @@ impl Apu {
         self.spc_ports[idx as usize & 3] = value;
     }
 
+    // ---- Host-frontend audio capture (feature "audio" only) ----
+    //
+    // Delegates to the DSP (`self.dsp` is already `pub`, so callers could
+    // reach through it directly, but a passthrough here matches this
+    // struct's existing layering — everything else on `Apu` that exposes
+    // DSP behavior goes through a method, not a bare field reach-through).
+
+    /// Move up to `out.len() / 2` pending stereo pairs into `out`
+    /// (interleaved L,R). Returns the number of `i16` values written,
+    /// always even. See [`dsp::Dsp::drain_audio`] for the interleaving and
+    /// overflow policy.
+    #[cfg(feature = "audio")]
+    pub fn drain_audio(&mut self, out: &mut [i16]) -> usize {
+        self.dsp.drain_audio(out)
+    }
+
+    /// Count of stereo pairs discarded by capture-ring overflow
+    /// (overwrite-oldest) since construction. Never decreases.
+    #[cfg(feature = "audio")]
+    pub fn audio_dropped_pairs(&self) -> u64 {
+        self.dsp.audio_dropped_pairs()
+    }
+
     #[inline]
     fn should_run_ipl_hle(&self) -> bool {
         !self.cpu.corpus_mode
@@ -1067,5 +1090,99 @@ mod tests {
         }
         // Minimal assertion: the IPL ROM startup ran and PC advanced.
         assert!(apu.cpu.pc != 0xFFC0, "IPL ROM should advance PC");
+    }
+
+    // ---- Audio capture wiring (feature "audio" only) ----
+    //
+    // refwork-emu has no `Core`-constructing tests and no synthetic-ROM
+    // fixture (the ROM builder lives in xtask, which depends on this
+    // crate), so these pin the tap at the `Apu` level instead, following
+    // the `advance_master_cycles_no_panic` precedent above: construct an
+    // `Apu` directly and advance it. `Core::take_audio_samples` is a
+    // trivial delegation chain (`Core` -> `SysBus::apu` -> `Apu::drain_audio`
+    // -> `Dsp::drain_audio`) exercised end-to-end by ramdiff (package 02).
+    #[cfg(feature = "audio")]
+    mod audio_tests {
+        use super::*;
+
+        /// Master cycles to advance in the tests below. A fresh `Apu` never
+        /// receives a host `$CC` handshake write, so `step()` stays in the
+        /// IPL HLE `WaitCommand` busy-poll (`step_ipl_hle`, a fixed 7 SPC
+        /// cycles/step, never halts) for the whole span — DSP stepping
+        /// proceeds steadily and this duration is well below the capture
+        /// ring's 4096-pair capacity.
+        const TEST_MASTER_CYCLES: u64 = 200_000;
+
+        /// Expected drained pair count from the documented clock model,
+        /// computed with the same integer arithmetic `advance_master_cycles`
+        /// uses (SPC_NUM/SPC_DEN accumulator, one DSP sample per
+        /// `DSP_CLOCKS_PER_SAMPLE` SPC cycles). `advance_master_cycles` can
+        /// run a few SPC cycles past the exact target before it notices
+        /// `spc_ran >= spc_to_run` (bounded by one step's cycle count), so
+        /// callers allow a small explicit tolerance rather than exact
+        /// equality — this is the "accumulator remainder" the fixed 7-cycle
+        /// HLE step size can shift a sample count by.
+        fn expected_pairs(master_cycles: u64) -> u64 {
+            (master_cycles * SPC_NUM / SPC_DEN) / DSP_CLOCKS_PER_SAMPLE
+        }
+
+        /// Explicit small tolerance (in pairs) around `expected_pairs`,
+        /// covering the accumulator-remainder overshoot described above.
+        const TOLERANCE_PAIRS: u64 = 4;
+
+        #[test]
+        fn audio_tap_wired_into_apu_stepping() {
+            let mut apu = Apu::new();
+            apu.advance_master_cycles(TEST_MASTER_CYCLES);
+
+            let mut out = [0i16; 4096];
+            let n = apu.drain_audio(&mut out);
+            assert_eq!(n % 2, 0, "drain_audio must always write an even count");
+            let pairs = (n / 2) as u64;
+
+            let expected = expected_pairs(TEST_MASTER_CYCLES);
+            let diff = pairs.abs_diff(expected);
+            assert!(
+                diff <= TOLERANCE_PAIRS,
+                "drained {pairs} pairs, expected ~{expected} (+/- {TOLERANCE_PAIRS}) \
+                 for {TEST_MASTER_CYCLES} master cycles"
+            );
+            assert!(pairs > 0, "expected some pairs to have been produced");
+            assert_eq!(
+                apu.audio_dropped_pairs(),
+                0,
+                "ring should not overflow for this test's small sample count"
+            );
+        }
+
+        #[test]
+        fn audio_tap_deterministic_across_independent_apus() {
+            let mut apu1 = Apu::new();
+            let mut apu2 = Apu::new();
+
+            // Identical cycle sequence advanced on both.
+            for chunk in [50_000u64, 30_000, 70_000, 50_000] {
+                apu1.advance_master_cycles(chunk);
+                apu2.advance_master_cycles(chunk);
+            }
+
+            let mut out1 = [0i16; 8192];
+            let mut out2 = [0i16; 8192];
+            let n1 = apu1.drain_audio(&mut out1);
+            let n2 = apu2.drain_audio(&mut out2);
+
+            assert_eq!(
+                n1, n2,
+                "two independently constructed Apus should drain the same \
+                 pair count for an identical cycle sequence"
+            );
+            assert_eq!(
+                &out1[..n1],
+                &out2[..n2],
+                "two independently constructed Apus should produce identical \
+                 sample streams for an identical cycle sequence"
+            );
+            assert!(n1 > 0, "expected some pairs to have been produced");
+        }
     }
 }

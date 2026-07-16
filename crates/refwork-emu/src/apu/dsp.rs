@@ -271,6 +271,14 @@ impl Voice {
 /// Fixed-size: we pre-allocate for the maximum.
 pub const ECHO_BUF_MAX: usize = 7680;
 
+// ─── Audio capture ring (feature "audio" only) ────────────────────────────────
+
+/// Capacity of the host-facing audio capture ring, in stereo pairs. 4096
+/// pairs (~128 ms at 32 kHz) is comfortably above the ~532 pairs/frame a
+/// 60 fps drain sees (357,368 master cycles/frame × 1024/21477 ÷ 32 ≈ 532.5).
+#[cfg(feature = "audio")]
+const AUDIO_RING_CAP: usize = 4096;
+
 // ─── Main DSP struct ──────────────────────────────────────────────────────────
 
 /// The 8-voice DSP. Clocked by `Apu::advance` at 1 sample per 32 SPC cycles.
@@ -312,6 +320,24 @@ pub struct Dsp {
     #[cfg(feature = "introspect")]
     pub last_out_r: i16,
 
+    /// Host-facing audio capture ring (feature "audio" only): interleaved
+    /// stereo i16 pairs (L0,R0,L1,R1,...), stored as an inline fixed-size
+    /// array matching the by-value buffer style used elsewhere in this
+    /// struct (`echo_buf_l`/`echo_buf_r` above) — no heap `Vec`, no
+    /// per-frame allocation (D8). `AUDIO_RING_CAP` pairs of capacity;
+    /// `audio_ring_head`/`audio_ring_len` track the valid region.
+    /// Overflow policy: overwrite the oldest pair and count it in
+    /// `audio_dropped_pairs`, so lanes that build with the feature on but
+    /// never drain (e.g. non-interactive replay) stay bounded in memory.
+    #[cfg(feature = "audio")]
+    audio_ring: [i16; AUDIO_RING_CAP * 2],
+    #[cfg(feature = "audio")]
+    audio_ring_head: usize,
+    #[cfg(feature = "audio")]
+    audio_ring_len: usize,
+    #[cfg(feature = "audio")]
+    audio_dropped_pairs: u64,
+
     /// Global sample counter since last KON (for deterministic initial state).
     pub sample_count: u64,
 
@@ -347,9 +373,66 @@ impl Dsp {
             last_out_l: 0,
             #[cfg(feature = "introspect")]
             last_out_r: 0,
+            #[cfg(feature = "audio")]
+            audio_ring: [0i16; AUDIO_RING_CAP * 2],
+            #[cfg(feature = "audio")]
+            audio_ring_head: 0,
+            #[cfg(feature = "audio")]
+            audio_ring_len: 0,
+            #[cfg(feature = "audio")]
+            audio_dropped_pairs: 0,
             sample_count: 0,
             endx: 0,
         }
+    }
+
+    // ─── Audio capture (feature "audio" only) ────────────────────────────────
+
+    /// Push one computed stereo pair into the capture ring. Overflow policy:
+    /// overwrite the oldest pair and count it in `audio_dropped_pairs`.
+    #[cfg(feature = "audio")]
+    fn push_audio_pair(&mut self, l: i16, r: i16) {
+        if self.audio_ring_len == AUDIO_RING_CAP {
+            // Full: overwrite the oldest pair in place and advance head.
+            let idx = self.audio_ring_head;
+            self.audio_ring[idx * 2] = l;
+            self.audio_ring[idx * 2 + 1] = r;
+            self.audio_ring_head = (self.audio_ring_head + 1) % AUDIO_RING_CAP;
+            self.audio_dropped_pairs = self.audio_dropped_pairs.wrapping_add(1);
+        } else {
+            let idx = (self.audio_ring_head + self.audio_ring_len) % AUDIO_RING_CAP;
+            self.audio_ring[idx * 2] = l;
+            self.audio_ring[idx * 2 + 1] = r;
+            self.audio_ring_len += 1;
+        }
+    }
+
+    /// Move up to `out.len() / 2` pending stereo pairs into `out`
+    /// (interleaved L,R — `out[0]` is the oldest pending left sample,
+    /// `out[1]` its right partner, and so on). Returns the number of `i16`
+    /// values written, always even. Samples beyond what fits in `out` (or
+    /// beyond what has been produced since the last drain) remain queued for
+    /// the next call; samples already lost to ring overflow are counted in
+    /// [`Dsp::audio_dropped_pairs`] and cannot be recovered.
+    #[cfg(feature = "audio")]
+    pub fn drain_audio(&mut self, out: &mut [i16]) -> usize {
+        let want = out.len() / 2;
+        let n = want.min(self.audio_ring_len);
+        for i in 0..n {
+            let idx = (self.audio_ring_head + i) % AUDIO_RING_CAP;
+            out[2 * i] = self.audio_ring[idx * 2];
+            out[2 * i + 1] = self.audio_ring[idx * 2 + 1];
+        }
+        self.audio_ring_head = (self.audio_ring_head + n) % AUDIO_RING_CAP;
+        self.audio_ring_len -= n;
+        n * 2
+    }
+
+    /// Count of stereo pairs discarded by ring overflow (overwrite-oldest)
+    /// since construction. Never decreases.
+    #[cfg(feature = "audio")]
+    pub fn audio_dropped_pairs(&self) -> u64 {
+        self.audio_dropped_pairs
     }
 
     // ─── Register access ──────────────────────────────────────────────────────
@@ -1167,18 +1250,32 @@ impl Dsp {
         let out_l = main_l.clamp(-32768, 32767) as i16;
         let out_r = main_r.clamp(-32768, 32767) as i16;
 
-        // Apply master volume (output is discarded for actual audio but we
-        // update observable state).
+        // Apply master volume: this is the final stereo sample for this tick.
+        // With no feature enabled it is computed and discarded (matches
+        // hardware timing, nothing observes the value). Under `introspect`
+        // it is mirrored to `last_out_l`/`last_out_r`; under `audio` it is
+        // pushed to the host capture ring below.
         let mvl = self.mvol_l() as i32;
         let mvr = self.mvol_r() as i32;
-        let _final_l = ((out_l as i32 * mvl) >> 7).clamp(-32768, 32767) as i16;
-        let _final_r = ((out_r as i32 * mvr) >> 7).clamp(-32768, 32767) as i16;
+        #[cfg_attr(
+            not(any(feature = "introspect", feature = "audio")),
+            allow(unused_variables)
+        )]
+        let final_l = ((out_l as i32 * mvl) >> 7).clamp(-32768, 32767) as i16;
+        #[cfg_attr(
+            not(any(feature = "introspect", feature = "audio")),
+            allow(unused_variables)
+        )]
+        let final_r = ((out_r as i32 * mvr) >> 7).clamp(-32768, 32767) as i16;
 
         #[cfg(feature = "introspect")]
         {
-            self.last_out_l = _final_l;
-            self.last_out_r = _final_r;
+            self.last_out_l = final_l;
+            self.last_out_r = final_r;
         }
+
+        #[cfg(feature = "audio")]
+        self.push_audio_pair(final_l, final_r);
 
         // Write echo feedback into echo buffer (if echo write not disabled).
         if !echo_write_disable {
@@ -1445,5 +1542,85 @@ mod tests {
         // With no active voices, should not panic and ENDX should be 0.
         dsp.step_sample(&mut aram);
         assert_eq!(dsp.endx, 0);
+    }
+
+    // ---- Audio capture ring (feature "audio" only) ----
+
+    #[cfg(feature = "audio")]
+    mod audio_ring_tests {
+        use super::*;
+
+        #[test]
+        fn fill_drain_round_trip() {
+            let mut dsp = Dsp::new();
+            for i in 0..10i16 {
+                dsp.push_audio_pair(i, -i);
+            }
+            let mut out = [0i16; 20];
+            let n = dsp.drain_audio(&mut out);
+            assert_eq!(n, 20, "10 pairs drained should write 20 i16 values");
+            for i in 0..10i16 {
+                assert_eq!(out[(i as usize) * 2], i, "L sample {i} mismatch");
+                assert_eq!(out[(i as usize) * 2 + 1], -i, "R sample {i} mismatch");
+            }
+            // Ring is now empty.
+            let mut out2 = [0i16; 4];
+            assert_eq!(dsp.drain_audio(&mut out2), 0);
+        }
+
+        #[test]
+        fn interleaving_is_l_then_r() {
+            let mut dsp = Dsp::new();
+            dsp.push_audio_pair(111, 222);
+            let mut out = [0i16; 2];
+            assert_eq!(dsp.drain_audio(&mut out), 2);
+            assert_eq!(out, [111, 222], "expected L then R interleaving");
+        }
+
+        #[test]
+        fn partial_drain_leaves_remainder_queued() {
+            let mut dsp = Dsp::new();
+            for i in 0..6i16 {
+                dsp.push_audio_pair(i, i);
+            }
+            let mut out = [0i16; 4]; // room for 2 pairs only
+            let n = dsp.drain_audio(&mut out);
+            assert_eq!(n, 4);
+            assert_eq!(out, [0, 0, 1, 1]);
+
+            // Remaining 4 pairs (2,3,4,5) still queued.
+            let mut out2 = [0i16; 8];
+            let n2 = dsp.drain_audio(&mut out2);
+            assert_eq!(n2, 8);
+            assert_eq!(out2, [2, 2, 3, 3, 4, 4, 5, 5]);
+        }
+
+        #[test]
+        fn overflow_overwrites_oldest_and_counts_drops() {
+            let mut dsp = Dsp::new();
+            // Push one more pair than capacity: the oldest (pair 0) is
+            // overwritten and dropped.
+            for i in 0..(AUDIO_RING_CAP as i32 + 1) {
+                dsp.push_audio_pair(i as i16, i as i16);
+            }
+            assert_eq!(dsp.audio_dropped_pairs(), 1, "exactly one pair dropped");
+
+            let mut out = [0i16; 2];
+            assert_eq!(dsp.drain_audio(&mut out), 2);
+            // Oldest surviving pair is index 1 (index 0 was overwritten).
+            assert_eq!(out, [1, 1], "oldest pair should have been dropped");
+        }
+
+        #[test]
+        fn odd_length_out_slice_writes_even_count() {
+            let mut dsp = Dsp::new();
+            for i in 0..5i16 {
+                dsp.push_audio_pair(i, i);
+            }
+            let mut out = [0i16; 5]; // odd length: room for 2 pairs, 1 spare i16
+            let n = dsp.drain_audio(&mut out);
+            assert_eq!(n, 4, "odd-length out slice must still write an even count");
+            assert_eq!(n % 2, 0);
+        }
     }
 }

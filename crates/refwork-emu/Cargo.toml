@@ -12,6 +12,10 @@ license.workspace = true
 # Test-only direct state access (debug_peek, cpu/bus exports for the
 # single-step CPU test runner in xtask). Compiled out of the guest binary.
 introspect = []
+# Host-frontend audio sample capture (ring buffer + drain API). Compiled out
+# of the guest binary and every hashed/perf lane: with the feature off, the
+# build is byte- and icount-identical to before.
+audio = []
 
 [[example]]
 name = "rom_diag"

@@ -46,6 +46,16 @@ pub const WRAM_INIT_BYTE: u8 = 0x55;
 /// harness (API.md §3.6) and recorded in determinism reports.
 pub const EMU_VERSION: &str = "refwork-emu 0.1.0";
 
+/// Nominal sample rate, in Hz, of the stream drained by
+/// [`Core::take_audio_samples`]. Derived from the DSP clock model
+/// (`apu::DSP_CLOCKS_PER_SAMPLE = 32` SPC700 cycles/sample, `apu::SPC_NUM`
+/// / `apu::SPC_DEN` ≈ 1.024 MHz nominal SPC700 rate): one DSP sample every
+/// 32 SPC cycles at ~1.024 MHz gives ~32,000 Hz. The model's true rate is
+/// ≈32,000.4 Hz (0.0013% off this constant, inaudible); frontends must use
+/// this constant rather than hardcoding 32000 independently.
+#[cfg(feature = "audio")]
+pub const AUDIO_SAMPLE_RATE_HZ: u32 = 32_000;
+
 // Test-only exports for the single-step CPU test runner (`xtask cpu-tests`),
 // the SPC700 single-step runner (`xtask spc-tests`), and golden-trace tooling.
 // Never part of the guest build.

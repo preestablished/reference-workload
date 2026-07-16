@@ -279,6 +279,30 @@ impl Core {
         self.bus.wram
     }
 
+    /// Drain stereo i16 samples (interleaved L,R) synthesized since the last
+    /// call. Native rate: 32000 Hz nominal (1 sample / 32 SPC cycles,
+    /// [`crate::AUDIO_SAMPLE_RATE_HZ`], derived from `apu::DSP_CLOCKS_PER_SAMPLE`);
+    /// ~532 pairs per 60 fps frame. Returns the number of `i16` values
+    /// written to `out`, always even; samples beyond `out`'s capacity (or
+    /// beyond what has been produced) remain queued for the next call.
+    /// Capture-only — this is a host-frontend affordance and never affects
+    /// emulation, frame hashes, or determinism (the S-DSP stream is already
+    /// computed every frame; this only taps the value that used to be
+    /// discarded).
+    #[cfg(feature = "audio")]
+    pub fn take_audio_samples(&mut self, out: &mut [i16]) -> usize {
+        self.bus.apu.drain_audio(out)
+    }
+
+    /// Count of stereo pairs discarded by capture-ring overflow
+    /// (overwrite-oldest, e.g. because the host frontend fell behind or
+    /// never drains) since construction. Never decreases. Intended for a
+    /// frontend's shutdown diagnostics.
+    #[cfg(feature = "audio")]
+    pub fn audio_dropped_pairs(&self) -> u64 {
+        self.bus.apu.audio_dropped_pairs()
+    }
+
     /// TEST-ONLY: side-effect-free bus read for `ramdiff` and golden-trace
     /// tests. Returns 0 for unmapped/side-effectful addresses (I/O space is
     /// defined to peek as 0 — tools cannot distinguish that from a real zero
