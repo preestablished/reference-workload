@@ -77,3 +77,40 @@ Each stamp carries "ratified 2026-07-12" + the ratification-doc path.
 Verification: `grep -c 'ratified 2026-07-12' API.md` → 3. If a future
 session finds them absent again, the docs tree was overwritten — re-apply
 from the ratification doc, which remains authoritative.
+
+### Commit-gate note (applies to every commit this plan makes)
+
+The user-level pre-commit hook runs `cargo test --workspace`, which cannot
+build on this Mac: the guest-sdk sibling's `detguest-sdk` uses
+`libc::SOCK_CLOEXEC`, absent on apple targets (pre-existing; guest-sdk local
+== origin/main, no upstream fix). Commits use the hook's documented
+`--no-verify` bypass, with the change surface verified directly instead
+(`bash -n`, live runs, redaction scans). Follow-up candidate: a macOS
+`FD_CLOEXEC` fix in guest-sdk (own repo, own review).
+
+## Package 03 (2026-07-16) — PASSED
+
+- Idle/movement analysis: 44 all-zero-pad idle runs (≥60 frames); chosen
+  window W1-S1. `idle-a`=6500, `idle-b`=6560 (both inside idle run
+  6468–6737); `move-b`=7040 (end of sustained right-hold 6868–7045).
+- Grid marks (47): capacity-pickup 12400–12900/50, midboss 19500–23000/250,
+  boss 30250–37000/500, upgrade 40000–41500/250. Private files:
+  `$PR/discovery/{idle-runs,move-frames,grid-marks}.txt`.
+- `$PR/discovery/frame-plan.yaml`: 13 feature entries (dual-width rows for
+  health/max_health/upgrade_flags/boss_flags), 2 recorded gaps
+  (credits_flag, game_mode dead value → STOP #1).
+- `derived-01` session: single replay pass, 50/50 dumps, zero faults.
+- `tools/m6-discovery-analyze2.sh` added (plan-driven; original tool
+  untouched). `bash -n` clean; `--self-test` (synthetic planted-byte vs the
+  real binary) PASSES; dry run produced candidate counts for all 13
+  features → `$PR/discovery/analysis2-report.txt`.
+- `discovery-01/session.yaml` pristine (`candidates.offsets: []`;
+  b3sum prefix 04c11d86bdc4f65c recorded for future comparison).
+- **Privacy deviation (fixed):** the analyzer's first version echoed the
+  report path (under the private root) to stderr → it appeared in terminal
+  output once. Tool corrected to never echo the report path. The occurrence
+  was in this session's transcript only — no file/commit/bead carries it.
+- Dry-run counts are wide for game_mode/area_id/room_id/upgrade_flags
+  (4.5k–9k) — expected: package 04 narrows with grid pairs and exclusion
+  sets. health (57–91), player_x/y (358), boss_flags (108–176),
+  max_health (175–252) are already tractable.
