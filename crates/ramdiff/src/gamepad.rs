@@ -19,8 +19,11 @@
 //!
 //! The trigger fold is unconditional on Linux (unlike the macOS gilrs
 //! backend, where it's gated on mapping source — see `gamepad_macos.rs`):
-//! evdev key codes are a layout-fixed kernel ABI, not a resolved SDL mapping,
-//! so 294/295/312/313 always mean "lower trigger" and never something else.
+//! evdev key codes are a layout-fixed kernel ABI, not a resolved SDL
+//! mapping, so on the F310 these codes always mean "lower trigger". (Like
+//! the rest of this table, that is F310-specific: 294/295 are positional
+//! `BTN_BASE`/`BTN_BASE2`, and a different DirectInput pad could put other
+//! buttons there — this module has always targeted the F310 layout.)
 //! The SNES pad has no lower triggers, so LB+LT → L and RB+RT → R is
 //! strictly more usable and cannot conflict with another button.
 //!

@@ -104,7 +104,7 @@ case "$(uname -s)" in
     ;;
 esac
 
-# In-window controls: F5 = WRAM dump, M = mute/unmute audio, Esc = quit.
+echo "controls: F5 = WRAM dump, M = mute/unmute audio, Esc = quit" >&2
 
 mkdir -p "$SESSION_DIR"
 resume_args=()

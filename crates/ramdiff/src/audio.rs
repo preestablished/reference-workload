@@ -35,9 +35,13 @@
 //!   with an empty queue would mean continuous underrun crackle. Instead the
 //!   queue is primed with [`LOW_WATERMARK_MS`] of silence at open, and every
 //!   `push` slews the resample ratio by up to [`MAX_RATE_SLEW`] (±0.5%,
-//!   inaudible) toward keeping the queue at that depth. The producer-side
-//!   watermark ([`apply_watermark`]) stays as a hard backstop for cases rate
-//!   control cannot absorb (window occlusion, debugger pauses).
+//!   inaudible) toward that depth. Proportional-only control settles a bit
+//!   below target under steady drift (~2/3 of it at the expected ~0.17%) —
+//!   still an ample cushion. A fully drained queue (stalled frame loop,
+//!   e.g. the blocking F5 dump prompt) is re-primed in one step rather than
+//!   recovered through the slow slew. The producer-side watermark
+//!   ([`apply_watermark`]) stays as a hard backstop for producer bursts the
+//!   loop cannot absorb.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,16 +136,28 @@ impl AudioSink {
         };
 
         // Closed-loop rate control: read the current depth (cheap lock, no
-        // work under it) and slew the resample ratio toward keeping the
-        // queue at the target depth. Below target -> emit slightly more
-        // output per input; above -> slightly less. See the module doc.
-        let depth = {
-            let queue = device
+        // resampling under it) and slew the resample ratio toward the target
+        // depth. Below target -> emit slightly more output per input; above
+        // -> slightly less. See the module doc. A fully drained queue (the
+        // live loop stalled, e.g. blocked on the F5 dump prompt while the
+        // device kept consuming) is re-primed with silence in one step: the
+        // ±0.5% slew authority would otherwise take many seconds to rebuild
+        // the cushion, crackling the whole way.
+        let (depth, reprimed) = {
+            let mut queue = device
                 .queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            queue.len()
+            let reprimed = ensure_primed(&mut queue, device.depth_target);
+            (queue.len(), reprimed)
         };
+        if reprimed {
+            eprintln!(
+                "interactive: audio queue drained (stalled frame loop?) — re-primed with \
+                 {}ms of silence",
+                LOW_WATERMARK_MS
+            );
+        }
         let target = device.depth_target as f64;
         let error = (target - depth as f64) / target; // >0 when queue is low
         let scale = 1.0 - error.clamp(-1.0, 1.0) * MAX_RATE_SLEW;
@@ -203,6 +219,12 @@ fn try_open() -> Result<AudioSink, String> {
     if channels < 2 {
         return Err(format!("device has {channels} channel(s), need at least 2"));
     }
+    if device_rate < 1000 {
+        // Also guards the rate-control arithmetic: a (physically implausible)
+        // rate below 10 Hz would make the watermarks/depth target 0, and a
+        // zero depth target would poison the slew math with NaN.
+        return Err(format!("implausible device sample rate {device_rate} Hz"));
+    }
 
     // Watermarks are in QUEUE units (stereo-pair interleaved — the queue
     // never stores device-channel frames), rounded down to whole pairs so a
@@ -218,7 +240,10 @@ fn try_open() -> Result<AudioSink, String> {
         QUEUE_CHANNELS,
     ));
     // Headroom above high: extend runs before trim in push(), so the queue
-    // transiently exceeds `high` by up to one resampled push chunk.
+    // transiently exceeds `high` by up to one resampled push chunk. At very
+    // high device rates a stall-recovery chunk can exceed this once and
+    // regrow the deque under the lock — harmless: it happens at most once
+    // (capacity sticks) and the callback side uses try_lock, never blocking.
     let mut initial: VecDeque<i16> = VecDeque::with_capacity(high_watermark + 8192);
     // Prime with the target depth of silence: gives the closed loop a
     // cushion so startup jitter doesn't underrun before control converges.
@@ -370,6 +395,17 @@ fn ms_to_sample_count(ms: u32, rate_hz: u32, channels: usize) -> usize {
 /// pairs or a watermark trim would permanently swap L/R alignment.
 fn even_floor(n: usize) -> usize {
     n & !1
+}
+
+/// Re-prime a fully drained queue with `target` samples of silence (the
+/// one-step recovery for a stalled producer; see the module doc). Returns
+/// whether priming happened. Pure logic, testable without a device.
+fn ensure_primed(queue: &mut VecDeque<i16>, target: usize) -> bool {
+    if !queue.is_empty() {
+        return false;
+    }
+    queue.extend(std::iter::repeat_n(0i16, target));
+    true
 }
 
 /// Producer-side watermark policy: if `queue` holds more than `high`
@@ -669,6 +705,21 @@ mod tests {
         // 250ms @ 48kHz stereo = 48000 * 2 * 0.25 = 24000 samples.
         assert_eq!(ms_to_sample_count(250, 48_000, 2), 24_000);
         assert_eq!(ms_to_sample_count(100, 48_000, 2), 9_600);
+    }
+
+    #[test]
+    fn ensure_primed_refills_only_an_empty_queue() {
+        let mut queue: VecDeque<i16> = VecDeque::new();
+        assert!(ensure_primed(&mut queue, 8));
+        assert_eq!(queue.len(), 8);
+        assert!(queue.iter().all(|&s| s == 0));
+        // Non-empty: untouched, reports false.
+        assert!(!ensure_primed(&mut queue, 8));
+        assert_eq!(queue.len(), 8);
+        queue.clear();
+        queue.push_back(7);
+        assert!(!ensure_primed(&mut queue, 8));
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]
