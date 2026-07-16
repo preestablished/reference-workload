@@ -114,16 +114,16 @@ that branch or base SHA before citing it as RW-0 synthetic evidence.
 
 > PLACEHOLDER FILE — offsets shown here are NOT validated game addresses.
 
-No operator ROM, first-room padlog, lab `m2-run.json`, lab `map-check` report,
-golden framebuffer hashes, or real aarch64 operator-game double-run artifacts
-are present in this checkout. The phase-2 bring-up log also leaves the M2
-operator-game provenance block empty.
+At the original 2026-06-21 audit, no operator ROM, first-room padlog, lab
+`m2-run.json`, lab `map-check` report, golden framebuffer hashes, or real
+aarch64 operator-game double-run artifacts were present in this checkout. The
+2026-07-07 and 2026-07-11 extensions below supersede that original gate state.
 
 ### Waiver Status
 
 | Field | Value |
 |---|---|
-| Status | BLOCKED: no operator-approved waiver is currently recorded. |
+| Status | Historical 2026-06-21 state; superseded by direct evidence and operator confirmation recorded below. No waiver was used. |
 | Checked date | 2026-06-21 |
 | Checked by | Codex during `/ralph` |
 | Bead owner | Matt Spurlin (`refwork-d7t.1` owner) |
@@ -140,8 +140,8 @@ operator-game provenance block empty.
 |---|---|
 | `m2-floor-evidence.md` exists and maps acceptance clauses | This file. |
 | M2 engine packages and `refwork-verify` are present and build | Workspace clippy/test gates passed; `refwork-verify` integration tests passed. |
-| Host-side first-room script and feature-map offset evidence, or explicit waiver | BLOCKED for operator-game M2 acceptance: no lab artifacts and no operator-approved waiver are recorded. Placeholder feature map remains a stop condition for package 05/06. |
-| x86_64 and aarch64 deterministic hash evidence | Synthetic-only evidence: local x86_64 10k hash and nightly run `27900976973` matching 100k-frame x86_64/aarch64 hashes on the synthetic ROM. Operator-game host-side 100k x86_64/aarch64 evidence is not recorded here and remains BLOCKED unless replaced by lab artifacts or a durable operator-approved waiver. |
+| Host-side first-room script and feature-map offset evidence, or explicit waiver | SATISFIED by the 2026-07-07 host-side first-room evidence and `m5-suite-evidence.md` pointers below; no waiver used. |
+| x86_64 and aarch64 deterministic hash evidence | SATISFIED by synthetic nightly equality plus the 2026-07-11 operator-game native x86_64/aarch64 100k equality record below. |
 | `determinism-proto` source recorded and buildable | Sibling `../control-plane` provenance and successful build command above. |
 | No game content committed | This note records only revisions, command results, hashes, and artifact pointers. |
 
@@ -235,3 +235,60 @@ first-room evidence now exists on the real ROM:
 build-vs-vendor confirmation-or-waiver, and the aarch64 operator-game
 run-or-defer decision. (The synthetic cross-arch floor is current — see
 the table above; only the operator-game real-aarch64 leg is undecided.)
+
+## 2026-07-11 Final M2 Floor Closeout
+
+### Native operator-game x86_64/aarch64 equality
+
+The retained, operator-approved first-room padlog and the single approved ROM
+were run through the host-side release verifier for 100,000 requested frames on
+the Intel reference host and on the physical aarch64 Spark. This is native
+emulator evidence; it does not use KVM or claim ARM hypervisor support.
+
+```sh
+refwork-verify double-run --rom <operator-rom> \
+  --script <private-first-room.padlog> --frames 100000 \
+  --report <private-report.json>
+```
+
+| Field | x86_64 Intel | aarch64 Spark |
+|---|---|---|
+| Result | PASS, internally deterministic | PASS, internally deterministic |
+| Frames requested | 100,000 | 100,000 |
+| Final chain | `bead3862a94514a0590f370c37b023eb3cf011b9d94e13283234976058f556a8` | `bead3862a94514a0590f370c37b023eb3cf011b9d94e13283234976058f556a8` |
+| First divergence | none | none |
+| Private report BLAKE3 | `3469a7c2fff1ac422e283207652f3f6fb98349eca76e7aab20567b723cd780cb` | `3469a7c2fff1ac422e283207652f3f6fb98349eca76e7aab20567b723cd780cb` |
+| Rust compiler | `rustc 1.97.0 (2d8144b78 2026-07-07)` | `rustc 1.92.0 (ded5c06cf 2025-12-08)` |
+
+Shared provenance:
+
+- UTC completion audit: `2026-07-11T23:38:15Z`;
+- reference-workload: `4eb8a3a99197ae9e937c544ed0e4d320ee9da546`;
+- control-plane: `66f0f9fd8e0e7bb39fb3331be20c549cde96b2e8`;
+- determinism-hypervisor proto source: `6e348e5961b8ba81d91b7bdd4f79af102b809649`;
+- guest-sdk sibling: `0fcddf455db6a386aa52d12560b1db74fc6cf4b1`;
+- operator ROM BLAKE3: `96cdaa2380b593e1f3377fc5bf23a16a74e0e277a08ce988ea532b5a91c8c194`;
+- first-room padlog BLAKE3: `e2565db2d40dfac0a398f15605835cac7fb8b96cf8a1ac24b183c89103fbb65c`.
+
+The report bytes and final chains are identical across architectures despite
+different native compilers. No ROM bytes, input semantics, decoded state,
+framebuffer pixels, or private retrieval paths are recorded here.
+
+### Build-versus-vendor confirmation
+
+On 2026-07-11, Matt (operator and bead owner) reviewed
+`.agents/decisions/2026-07-02-kernel-agent-artifact-split.md`, stated that it
+"seems fine," and asked whether there were any concerns with accepting it for
+`refwork-d7t.1`. The audit found no blocking concern, so this is the durable
+operator confirmation that the decision is the M2 build-versus-vendor record:
+
+- kernel: vendored hash-pinned guest-sdk artifact with provenance build key;
+- agent and harness: built from pinned sibling revisions;
+- `xtask image build`: enforces both pin paths;
+- the documented `--agent-bin` test/escape hatch is non-default and does not
+  alter the accepted production policy.
+
+### Final status
+
+All `refwork-d7t.1` acceptance clauses are satisfied by direct evidence; no
+waiver or aarch64 deferral was used. The bead may close.

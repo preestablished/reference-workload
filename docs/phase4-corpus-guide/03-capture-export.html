@@ -20,10 +20,9 @@
 
       <section class="warning">
         <p>
-          This is the main missing producer step. Reference-workload currently
-          has validators and helper generators for the corpus contract. The real
-          capture exporter must come from the Phase 3 in-VM capture path or be
-          added as a private producer that emits the shape below.
+          Run this command only after operator approval, private intake, and
+          worker provenance checks. All output is private game-derived data and
+          must remain outside source checkouts.
         </p>
       </section>
 
@@ -45,6 +44,20 @@
         refs and hashes. Do not inline raw bytes in <code>index.jsonl</code>.
       </p>
 
+      <h2>Supported Export Command</h2>
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-capture-export \
+  --endpoint "$WORKER_ENDPOINT" --snapshot "$READY_SNAPSHOT_BLAKE3" \
+  --padlog "$PRIVATE_TRAJECTORY_PADLOG" --map "$PRIVATE_FEATURE_MAP" \
+  --layout "$PRIVATE_LAYOUT" --bundle "$PRIVATE_BUNDLE" \
+  --count 1000 --cadence 1 --hard-icount-cap "$BOUNDED_RUN_CAP" \
+  --source-ref "$OPAQUE_SOURCE_REF" --production</code></pre>
+      <p>
+        The exporter restores once, schedules the approved padlog, and uses
+        sequential frame-budget <code>Run</code> calls with capture enabled.
+        Feature bytes and the compressed framebuffer therefore come from the
+        same pause boundary. A positive instruction cap is mandatory.
+      </p>
+
       <h2>Capture Row Contract</h2>
       <pre><code>{
   "schema_version": 1,
@@ -56,19 +69,21 @@
   "feature_bytes": {
     "ref": "artifact:&lt;opaque-private-ref&gt;",
     "len": 4096,
-    "blake3": "blake3:&lt;hex&gt;"
+    "blake3": "blake3:&lt;feature-artifact-hex&gt;"
   },
   "decoded_order": ["room_id", "area_id", "player_x"],
   "decoded&#95;values": [1, 0, 144],
   "framebuffer": {
     "ref": "artifact:&lt;opaque-private-ref&gt;",
+    "len": 65536,
     "encoding": "fb_lz4",
     "width": 256,
     "height": 224,
     "stride": 1024,
     "pixel_format": "xrgb8888",
     "uncompressed_len": 229376,
-    "blake3": "blake3:&lt;hex&gt;"
+    "blake3": "blake3:&lt;compressed-artifact-hex&gt;",
+    "uncompressed_blake3": "blake3:&lt;decoded-pixel-hex&gt;"
   }
 }</code></pre>
 
@@ -83,6 +98,51 @@
         <li>Record framebuffer metadata for the primary corpus.</li>
         <li>Write private artifact refs and hashes, not inline byte arrays.</li>
       </ul>
+
+      <h2>Durability And Resume</h2>
+      <p>
+        Each artifact is written to a new temporary file, synced, and renamed
+        before its JSONL row is appended and synced. On restart, the exporter
+        rejects duplicate ids or changed layout/source provenance, restores the
+        same snapshot, fast-forwards to the existing row count, and appends.
+        It never truncates or overwrites an existing corpus.
+      </p>
+
+      <h2>Artifact And Freeze Verification</h2>
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-artifact-check \
+  --bundle "$PRIVATE_BUNDLE" --report "$EXTERNAL_ARTIFACT_REPORT"
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --bundle "$PRIVATE_BUNDLE" --set-payload-root
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --bundle "$PRIVATE_BUNDLE" --out "$EXTERNAL_FREEZE_MANIFEST"
+cargo run --locked -p refwork-verify -- phase4-checksum-manifest \
+  --verify "$EXTERNAL_FREEZE_MANIFEST" --bundle "$RETRIEVED_BUNDLE"</code></pre>
+      <p>
+        <code>framebuffer.blake3</code> always hashes stored LZ4 bytes;
+        <code>uncompressed_blake3</code> hashes the 229,376 decoded XRGB8888
+        bytes. The artifact checker rejects absolute/traversing refs, symlinks,
+        duplicate refs, corruption, geometry drift, and either hash mismatch.
+        The external freeze manifest recursively covers the finalized bundle;
+        verification is read-only and rejects missing, extra, or changed files.
+      </p>
+
+      <h2>Derive A Context Fixture</h2>
+      <pre><code>cargo run --locked -p refwork-verify -- phase4-context-export \
+  --corpus "$FROZEN_CORPUS" --out "$PRIVATE_CONTEXT_DIR" \
+  --capture-id "$SELECTED_PRIVATE_CAPTURE_ID" \
+  --context-artifact-id "$OPAQUE_CONTEXT_ID" \
+  --access-requirement "$APPROVED_ACCESS_ROLE" --retention "$RETENTION" \
+  --pad-table-hash "$CONSOLE16_TABLE_HASH" \
+  [--recent-input "$APPROVED_RECENT_INPUT_PADLOG"]
+cargo run --locked -p refwork-verify -- phase4-context-check \
+  --bundle "$PRIVATE_CONTEXT_DIR" \
+  --report "$PRIVATE_CONTEXT_DIR/validation/phase4-context-check.json"</code></pre>
+      <p>
+        Context export first verifies the source artifacts, then copies only
+        selected artifacts and preserves decoded order, values, and provenance.
+        Omit <code>--recent-input</code> when the operator did not approve a
+        retained tail; the manifest records it as unavailable.
+      </p>
 
       <h2>Useful Local Validation While Exporting</h2>
       <p>

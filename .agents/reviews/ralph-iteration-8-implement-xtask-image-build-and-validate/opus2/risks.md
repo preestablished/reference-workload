@@ -1,0 +1,6 @@
+# Risks
+
+- `determinism.last_green` is absent from the generated manifest (`xtask/src/image.rs:447`) and `validate_manifest` does not inspect the `determinism` block. API §4 says the xtask gate checks `determinism.last_green` presence (`/home/infra-admin/.agents/projects/determinism/docs/reference-workload/API.md:582`). This may be intentionally deferred by later beads (`refwork-d7t.9` and the green-stamp work), but it means `image validate` currently accepts an image that the API says control-plane must refuse for scheduling.
+- `build_image` verifies that lock files exist, but it does not verify the lock file hashes before consuming their placeholder payloads (`xtask/src/image.rs:104`). The committed `xtask/tests/image_inputs.rs` covers this for the source tree, but the command itself can build from a tampered input directory and then self-consistently hash the generated artifacts.
+- `validate_expected_regions_toml` is a local string parser (`xtask/src/image.rs:717`) instead of TOML parsing. It is adequate for the current generated input, but future TOML formatting changes can create false accepts or false rejects.
+- I did not run `xtask image build` because the review instructions allowed writing artifacts only under this review directory; that command writes `dist/` and `target/image-work/`. I validated the static harness build separately.
