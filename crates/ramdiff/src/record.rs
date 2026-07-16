@@ -214,6 +214,10 @@ pub struct InteractiveOpts {
     /// auto-detect fallback — same as Linux when an explicit node fails to
     /// open). `None` auto-detects on both platforms.
     pub gamepad: Option<std::path::PathBuf>,
+    /// `--pad-debug`: verbose per-event gamepad diagnostics on stderr (pad
+    /// identity/mapping at open, then every button/hat event during
+    /// polling). Interactive-only; see `gamepad.rs` and `gamepad_macos.rs`.
+    pub pad_debug: bool,
 }
 
 #[cfg(any(feature = "interactive", test))]
@@ -545,7 +549,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     use crate::gamepad_macos as pad_backend;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut gamepad = match &opts.gamepad {
-        Some(path) => match pad_backend::Gamepad::open_path(path) {
+        Some(path) => match pad_backend::Gamepad::open_path(path, opts.pad_debug) {
             Ok(g) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)
@@ -555,7 +559,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
                 None
             }
         },
-        None => match pad_backend::Gamepad::open_auto() {
+        None => match pad_backend::Gamepad::open_auto(opts.pad_debug) {
             Ok(Some(g)) => {
                 eprintln!("interactive: gamepad {}", g.description);
                 Some(g)

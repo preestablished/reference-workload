@@ -8,6 +8,7 @@
 //!                [--interactive]   (only when compiled with --features interactive)
 //!                [--resume] [--skip-replay-verify]
 //!                [--gamepad /dev/input/eventN]   (interactive, Linux; default: auto-detect)
+//!                [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)
 //!
 //! ramdiff search --session <dir>
 //!                [--width u8|u16le]
@@ -52,6 +53,21 @@
 //! see `gamepad.rs` for the button mapping in both XInput and DirectInput
 //! switch positions) and macOS (gilrs/IOKit HID; back switch on D) and merged
 //! with the keyboard. F5 and Esc remain keyboard-only.
+//!
+//! LB/RB map to L/R on both backends. On Linux the lower triggers (LT/RT —
+//! DirectInput codes 294/295, XInput `BTN_TL2`/`BTN_TR2` 312/313) also fold
+//! into L/R unconditionally, since evdev codes are a layout-fixed kernel ABI.
+//! On macOS the same fold (`Button::LeftTrigger2`/`RightTrigger2`) applies
+//! only when gilrs resolved the pad through the SDL mapping database
+//! (`mapping_source() == MappingSource::SdlMappings`); on an unmatched pad
+//! those slots are the pad's physical Back/Start buttons, so folding them
+//! there would misroute those buttons instead of fixing L/R. Run with
+//! `--pad-debug` to see the pad's name, UUID, mapping source, and every
+//! button/axis event on stderr; if the mapping source is not `SdlMappings`,
+//! set an exact-UUID SDL mapping via the standard `SDL_GAMECONTROLLERCONFIG`
+//! environment variable (gilrs honors it automatically at `Gilrs::new()` —
+//! no code change needed). See `gamepad.rs` and `gamepad_macos.rs` for
+//! details.
 
 #![forbid(unsafe_code)]
 
@@ -105,6 +121,7 @@ fn usage() {
     #[cfg(feature = "interactive")]
     println!("         [--output-log <file.padlog>]");
     println!("         [--gamepad /dev/input/eventN]   (Linux; default: auto-detect)");
+    println!("         [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -137,6 +154,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut skip_replay_verify = false;
     let mut output_log: Option<std::path::PathBuf> = None;
     let mut gamepad: Option<std::path::PathBuf> = None;
+    let mut pad_debug = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -191,6 +209,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
                 i += 1;
                 gamepad = Some(need_path("record", "--gamepad", args, i)?);
             }
+            "--pad-debug" => {
+                pad_debug = true;
+            }
             other => {
                 return Err(format!("record: unknown option {:?}", other));
             }
@@ -213,6 +234,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             resume,
             skip_replay_verify,
             gamepad,
+            pad_debug,
         });
     }
 
@@ -224,6 +246,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     }
     if gamepad.is_some() {
         return Err("record: --gamepad requires --interactive".to_owned());
+    }
+    if pad_debug {
+        return Err("record: --pad-debug requires --interactive".to_owned());
     }
 
     let rom = rom.ok_or_else(|| "record: --rom is required".to_owned())?;
@@ -553,5 +578,45 @@ fn parse_discretize_str(s: &str) -> Result<refwork_featuremap::Discretize, Strin
             "unknown discretize {:?}, expected identity|none|bits",
             other
         )),
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--pad-debug` is interactive-only, mirroring `--gamepad`'s existing
+    /// validation. Neither `--rom` nor a real session dir is needed: the
+    /// `--interactive` check runs before either is required.
+    #[test]
+    fn pad_debug_requires_interactive() {
+        let args = vec![
+            "--session".to_owned(),
+            "/tmp/ramdiff-pad-debug-test-not-interactive".to_owned(),
+            "--pad-debug".to_owned(),
+        ];
+        let err = cmd_record(&args).unwrap_err();
+        assert!(
+            err.contains("--pad-debug requires --interactive"),
+            "err: {}",
+            err
+        );
+    }
+
+    /// Smoke-parse: with `--interactive` present, `--pad-debug` must be
+    /// recognized (not rejected as an unknown option) and control must
+    /// reach the `--rom is required` check beyond it.
+    #[test]
+    fn pad_debug_parses_under_interactive() {
+        let args = vec![
+            "--session".to_owned(),
+            "/tmp/ramdiff-pad-debug-test-interactive".to_owned(),
+            "--interactive".to_owned(),
+            "--pad-debug".to_owned(),
+        ];
+        let err = cmd_record(&args).unwrap_err();
+        assert!(err.contains("--rom is required"), "err: {}", err);
     }
 }
