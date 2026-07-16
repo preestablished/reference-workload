@@ -114,3 +114,70 @@ build on this Mac: the guest-sdk sibling's `detguest-sdk` uses
   (4.5k–9k) — expected: package 04 narrows with grid pairs and exclusion
   sets. health (57–91), player_x/y (358), boss_flags (108–176),
   max_health (175–252) are already tractable.
+
+## Package 04 (2026-07-16) — PASSED (all stability marks PROVISIONAL)
+
+Method: three more derived replay passes (derived-02: extra idle pairs +
+the padlog's single vertical-only climb window; derived-03: idle pairs in
+W1-S2/boss/W2-S1/tail; derived-04: fine 25–50-frame marks around every
+event) plus a `--dump-every 75` series (603 dumps) for full-trajectory
+story checks, then per-candidate exploration in a private python helper
+(`$PR/discovery/explore.py`, verified to reproduce ramdiff search counts
+exactly: boss 1/1, area 11/11). Final per-entry `ramdiff watch`
+confirmation ran for every pick (11 logs under `$PR/discovery/`,
+zero faults). Stdout carried counts/frames only throughout.
+
+Confirmed feature set (offsets in `$PR/discovery/findings.yaml` +
+`picks.json`; alternates recorded per feature):
+
+| feature | width | watch story (frames public-safe) |
+|---|---|---|
+| game_mode | u8 | 3-class context value; 7 changes, only at menu/hub/stage class transitions (3441/3459/4437/38461/39347 + 2 menu-era); constant through fights, results, pauses |
+| room_id | u16le | current-stage id; exactly 5 changes at the 5 stage loads (4901/14068/23610/28985/39804); hubs hold last value |
+| area_id | u8 | world index; exactly 1 change at 38031; persists |
+| player_x | u16le | 851 nondecreasing changes across the 906-frame right run; frozen in 7/8 idle runs; knockback wiggle at 6572+ |
+| player_y | u16le | vert-window responsive; quiet on flat runs (parallel-array layout — not adjacent to x) |
+| health | u8 | adjacent to max_health; drop at damage anchor (~5375); 24 changes total |
+| max_health | u8 | single +1 at 12526 (capacity pickup), persists to end |
+| upgrade_flags | bitflags8 | single 0→1 at 41250, persists |
+| midboss_encounter | u8 | single change at 19714 (fight start), persists |
+| boss_encounter | u8 | single change at 30222 (fight start), persists |
+| stage_clear | u8 | single change at 37504 (W1-S4 clear/results), persists |
+
+Semantics deltas vs the demo-map sketch (recorded for package 05):
+
+- **No boss-defeat bitmask exists.** Exhaustive except-one scans over both
+  boss windows found persistent one-shot latches only at fight-START
+  moments, plus a stage-clear latch at results time. The monotone
+  milestones this game provides are: midboss_encounter, boss_encounter,
+  stage_clear (≙ world-1 complete), area_id flip, plus stage loads via
+  room_id and the upgrade/max-health latches. Encounter/clear latches are
+  multi-bit value changes → scoring predicates should use eq-post-value,
+  not bit_set (except upgrade_flags, a clean 0→1 bit).
+- room_id is stage-grade (no per-door screen id survived narrowing with a
+  cleaner story); hubs retain the previous stage value.
+- game_mode does NOT track pause (no candidate changed at any of the 10
+  Start presses) — pause exclusion can't come from mode; idle/pause
+  windows are quiet for all chosen features anyway.
+- The nch=10 game_mode alternates (richer sub-states) are recorded in
+  picks.json for STOP #1: Run C must show the chosen mode takes a distinct
+  dead/game-over value, else promote an alternate.
+
+STOP #1 briefing inputs (also in findings.yaml):
+
+- Undiscoverable here: credits_flag; game_mode dead value.
+- Proposed stable (PROVISIONAL, evidence class 1 — cross-context
+  persistence within the trajectory; discovery-01 contains no restore, so
+  SESSION-DAY-RUNBOOK §3's restored-state re-dump happens in Run C):
+  game_mode, room_id, area_id, health, max_health, upgrade_flags,
+  midboss_encounter, boss_encounter, stage_clear. player_x/y proposed
+  volatile.
+- Ambiguity notes: upgrade latch has 4 same-bucket co-latched alternates;
+  area_id/stage_clear/boss_encounter each have 1–2 same-era alternates.
+
+Privacy notes: two transient stdout leaks this package, both harmless and
+recorded — a zsh failed-glob error echoed the private session path once
+(derived-04 first attempt), and `basename`-derived scans print nothing.
+No offsets or decoded values ever reached stdout; frame numbers only.
+discovery-01 remains pristine (session.yaml b3sum prefix 04c11d86bdc4f65c
+unchanged; searching happened in scratch/derived dirs and python).
