@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # Interactive windowed mode — never enabled in CI (no display required).
 # `dep:gilrs` only activates on macOS (it is declared as a target-specific
 # dependency below); on Linux the feature pulls in minifb alone.
-interactive = ["dep:minifb", "dep:gilrs"]
+interactive = ["dep:minifb", "dep:gilrs", "dep:cpal", "refwork-emu/audio"]
 
 [dependencies]
 refwork-emu = { path = "../refwork-emu", features = ["introspect"] }
@@ -29,6 +29,7 @@ blake3 = "1"
 
 # Interactive-only dependencies (gated by the "interactive" feature).
 minifb = { version = "0.25", optional = true }
+cpal = { version = "0.15", optional = true }
 
 # macOS has no evdev; gamepad input goes through gilrs (IOKit HID) instead.
 [target.'cfg(target_os = "macos")'.dependencies]

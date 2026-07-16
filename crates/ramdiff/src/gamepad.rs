@@ -8,7 +8,11 @@
 //! - **XInput mode** (switch on "X", kernel `xpad` driver): `BTN_SOUTH`(304)=A,
 //!   `BTN_EAST`(305)=B, `BTN_NORTH`(307)=X, `BTN_WEST`(308)=Y, `BTN_TL`(310)=L,
 //!   `BTN_TR`(311)=R, `BTN_SELECT`(314)=Select, `BTN_START`(315)=Start.
-//!   `BTN_TL2`(312)/`BTN_TR2`(313) (the lower triggers) also fold into L/R.
+//!   `BTN_TL2`(312)/`BTN_TR2`(313) (the lower triggers) also fold into L/R —
+//!   though the stock `xpad` driver reports triggers as `ABS_Z`/`ABS_RZ`
+//!   axes, so these key codes only occur with the driver's
+//!   `triggers_to_buttons` module parameter (harmless dead mapping
+//!   otherwise; L/R work via 310/311 regardless).
 //! - **DirectInput mode** (switch on "D", generic HID driver): the
 //!   `BTN_JOYSTICK` range — 288=X, 289=A, 290=B, 291=Y, 292=L(LB), 293=R(RB),
 //!   296=Select(Back), 297=Start. Codes 294(LT)/295(RT) also fold into L/R.

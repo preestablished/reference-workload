@@ -9,6 +9,7 @@
 //!                [--resume] [--skip-replay-verify]
 //!                [--gamepad /dev/input/eventN]   (interactive, Linux; default: auto-detect)
 //!                [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)
+//!                [--no-audio]   (interactive; skip audio playback entirely)
 //!
 //! ramdiff search --session <dir>
 //!                [--width u8|u16le]
@@ -47,7 +48,19 @@
 //! | Enter | Start | 10 |
 //! | Right Shift | Select | 11 |
 //! | F5 | Dump WRAM (prompts for label) | — |
+//! | M | Toggle audio mute | — |
 //! | Esc | Quit | — |
+//!
+//! # Audio playback
+//!
+//! The core's stereo S-DSP stream is drained once per live frame and played
+//! through the default output device via `cpal` (CoreAudio on macOS, ALSA on
+//! Linux). `M` toggles mute — the window title gains a `[muted]` suffix
+//! while muted — purely host-side: it never touches the pad word, the
+//! padlog, or emulator state. `--no-audio` skips opening a device entirely.
+//! A missing or failing audio device degrades to silent playback with a
+//! single stderr note, exactly like a missing gamepad degrades to
+//! keyboard-only.
 //!
 //! A Logitech F310 (or compatible) gamepad is auto-detected on Linux (evdev;
 //! see `gamepad.rs` for the button mapping in both XInput and DirectInput
@@ -120,8 +133,12 @@ fn usage() {
     println!("         [--interactive] [--resume] [--skip-replay-verify]");
     #[cfg(feature = "interactive")]
     println!("         [--output-log <file.padlog>]");
+    #[cfg(feature = "interactive")]
     println!("         [--gamepad /dev/input/eventN]   (Linux; default: auto-detect)");
+    #[cfg(feature = "interactive")]
     println!("         [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)");
+    #[cfg(feature = "interactive")]
+    println!("         [--no-audio]   (interactive; skip audio playback entirely)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -155,6 +172,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut output_log: Option<std::path::PathBuf> = None;
     let mut gamepad: Option<std::path::PathBuf> = None;
     let mut pad_debug = false;
+    let mut no_audio = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -212,6 +230,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             "--pad-debug" => {
                 pad_debug = true;
             }
+            "--no-audio" => {
+                no_audio = true;
+            }
             other => {
                 return Err(format!("record: unknown option {:?}", other));
             }
@@ -235,6 +256,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             skip_replay_verify,
             gamepad,
             pad_debug,
+            no_audio,
         });
     }
 
@@ -249,6 +271,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     }
     if pad_debug {
         return Err("record: --pad-debug requires --interactive".to_owned());
+    }
+    if no_audio {
+        return Err("record: --no-audio requires --interactive".to_owned());
     }
 
     let rom = rom.ok_or_else(|| "record: --rom is required".to_owned())?;

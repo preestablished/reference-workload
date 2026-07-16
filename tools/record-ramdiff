@@ -97,8 +97,14 @@ case "$(uname -s)" in
     # ramdiff auto-detects HID gamepads via gilrs/IOKit; plug in before
     # launch (pads connected mid-session are not picked up).
     echo "gamepad: F310 back switch on D; plug in before launching." >&2
+    # If L/R (or any button) land wrong: run ramdiff with --pad-debug to see
+    # the pad's UUID and mapping source, then export an exact-UUID SDL
+    # mapping line via SDL_GAMECONTROLLERCONFIG before launching this
+    # wrapper — the env var passes through exec below and gilrs honors it.
     ;;
 esac
+
+# In-window controls: F5 = WRAM dump, M = mute/unmute audio, Esc = quit.
 
 mkdir -p "$SESSION_DIR"
 resume_args=()

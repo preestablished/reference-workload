@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "interactive")]
+pub mod audio;
 pub mod candidates;
 pub mod emit;
 pub mod filter;

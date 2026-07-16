@@ -28,6 +28,15 @@
 //! | RShift | Select | 11 |
 //!
 //! Hotkey `F5`: prompt for a label in the terminal, then dump WRAM.
+//! Hotkey `M`: toggle audio mute (host-side only; never touches the pad word,
+//! the padlog, or emulator state).
+//!
+//! Audio: the core's stereo S-DSP stream (`Core::take_audio_samples`) is
+//! drained once per live frame and played through the default output device
+//! via `cpal` (see `audio.rs`). A missing or failing audio device degrades
+//! to silent playback with a single stderr note, exactly like a missing
+//! gamepad degrades to keyboard-only. `--no-audio` skips opening a device
+//! entirely.
 //!
 //! The input log is appended incrementally — one `HHHH\n` line per frame,
 //! flushed per frame, so a killed session loses only the current frame.
@@ -218,6 +227,9 @@ pub struct InteractiveOpts {
     /// identity/mapping at open, then every button/hat event during
     /// polling). Interactive-only; see `gamepad.rs` and `gamepad_macos.rs`.
     pub pad_debug: bool,
+    /// `--no-audio`: skip opening an audio sink entirely (no playback, no
+    /// device probing). Interactive-only; see `audio.rs`.
+    pub no_audio: bool,
 }
 
 #[cfg(any(feature = "interactive", test))]
@@ -520,8 +532,34 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     let mut log_file = open_interactive_log(&opts.output_log, opts.resume)?;
 
+    // Audio: construct only after replay has finished (replay must never be
+    // audible) and before the live loop starts. `--no-audio` skips device
+    // construction entirely — `AudioSink::disabled()` is the same
+    // never-fails no-op sink a real device error would degrade to.
+    let mut audio_sink = if opts.no_audio {
+        crate::audio::AudioSink::disabled()
+    } else {
+        crate::audio::AudioSink::open()
+    };
+    // The replay above ran the core at full speed with no realtime pacing,
+    // so any audio it produced has no relationship to wall-clock playback.
+    // Drain and discard it so a resumed session does not play a stale burst
+    // at startup; a single drain call only moves one buffer's worth, so
+    // loop until the ring reports empty.
+    let mut audio_scratch = [0i16; 4096];
+    loop {
+        if core.take_audio_samples(&mut audio_scratch) == 0 {
+            break;
+        }
+    }
+    // Baseline for the shutdown summary: a resumed session legitimately
+    // overflows the ring during replay (nothing drains it during that
+    // phase), so only the delta accrued during the *live* loop is reported.
+    let audio_dropped_baseline = core.audio_dropped_pairs();
+
+    const BASE_TITLE: &str = "ramdiff record [interactive] — F5=dump, M=mute, Esc=quit";
     let mut window = Window::new(
-        "ramdiff record [interactive] — F5=dump, Esc=quit",
+        BASE_TITLE,
         FB_WIDTH,
         FB_HEIGHT,
         WindowOptions {
@@ -531,8 +569,14 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     )
     .map_err(|e| format!("cannot open window: {}", e))?;
 
-    // ~60 fps: 16ms per frame.
-    window.limit_update_rate(Some(std::time::Duration::from_millis(16)));
+    // ~60 fps target: minifb's previous 16ms limit is a 62.5fps ceiling,
+    // which on a fast host produces ~33,280 stereo pairs/s against the
+    // 32,000/s the audio sink consumes — a systematic +4% surplus that
+    // would force a watermark trim (an audible ~150ms skip) every few
+    // seconds. 16,667us tracks the emulator's ~60.0988fps NTSC rate to
+    // within ~0.16%, so the watermark backstop (see `audio.rs`) fires
+    // rarely (window occlusion, debugger pauses) instead of periodically.
+    window.limit_update_rate(Some(std::time::Duration::from_micros(16_667)));
 
     // Boxed: a quarter-MiB by value blows the default test-thread stack.
     let mut fb_xrgb: Box<[u8; refwork_emu::FB_BYTES]> = Box::new([0u8; refwork_emu::FB_BYTES]);
@@ -585,6 +629,19 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         }
 
         let flags = core.run_one_frame(pad);
+
+        // Drain this frame's synthesized audio and hand it to the sink.
+        // Looped: the scratch buffer is smaller than a full frame's worth
+        // could theoretically be if the sink fell behind, so keep draining
+        // until the ring reports empty.
+        loop {
+            let n = core.take_audio_samples(&mut audio_scratch);
+            if n == 0 {
+                break;
+            }
+            audio_sink.push(&audio_scratch[..n]);
+        }
+
         if let Some(fault) = core.fault() {
             // This frame's pad line was not written yet, so the log holds
             // exactly `frame` frames.
@@ -643,6 +700,18 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
             }
         }
 
+        // M hotkey: toggle audio mute. Host-side only — never touches the
+        // pad word, the padlog, or the core.
+        if window.is_key_pressed(Key::M, minifb::KeyRepeat::No) {
+            let now_muted = !audio_sink.muted();
+            audio_sink.set_muted(now_muted);
+            if now_muted {
+                window.set_title(&format!("{} [muted]", BASE_TITLE));
+            } else {
+                window.set_title(BASE_TITLE);
+            }
+        }
+
         frame += 1;
     }
 
@@ -650,6 +719,21 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // total pad lines now in the log.
     session.log_frames = Some(frame);
     session.save()?;
+
+    // Shutdown diagnostic: both counters reflect only the live loop (the
+    // audio baseline was captured after replay, before any live frame ran).
+    let watermark_drops = audio_sink.watermark_drops();
+    let dropped_pairs = core
+        .audio_dropped_pairs()
+        .saturating_sub(audio_dropped_baseline);
+    if watermark_drops > 0 || dropped_pairs > 0 {
+        eprintln!(
+            "interactive: audio: {} watermark trim(s), {} pair(s) dropped by ring overflow \
+             during this session",
+            watermark_drops, dropped_pairs
+        );
+    }
+
     Ok(())
 }
 
