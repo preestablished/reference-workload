@@ -1623,4 +1623,252 @@ mod tests {
             assert_eq!(n % 2, 0);
         }
     }
+
+    // ---- S-DSP fidelity audit (audio-path correctness vs real hardware) ----
+    //
+    // These tests assert *hardware-documented* S-DSP behaviour (fullsnes /
+    // anomie's dsp.txt; algorithms cross-checked against hardware-verified
+    // reference decoders). They were added while auditing the "loud music
+    // sounds crunchy" symptom. A failing test here documents a fidelity
+    // divergence in the production code above — the fix belongs in the DSP,
+    // not in the test.
+    mod fidelity_tests {
+        use super::*;
+
+        /// Hardware-reference BRR nybble decode.
+        ///
+        /// Real hardware works in a *halved* domain:
+        ///   half = (nybble << shift) >> 1          (shift 13..15: (nyb>>3)<<11)
+        ///   filter 1: + old1*15/16     (full-scale coefficient)
+        ///   filter 2: + old1*61/32 - old2*15/16
+        ///   filter 3: + old1*115/64 - old2*13/16
+        ///   then clamp the halved value to 16 bits, double it, and WRAP
+        ///   (not clamp) the doubled result into 16 bits. Stored samples are
+        ///   therefore always even, and overflow past +/-0x4000 wraps.
+        ///
+        /// Below is the full-scale integer formulation of the documented
+        /// algorithm (exact per fullsnes filter formulas; +/- 1-2 LSB of
+        /// truncation slack vs the halved-domain order of operations, which
+        /// the comparison tolerance absorbs).
+        fn hw_ref_decode(nyb: i32, shift: u8, filter: u8, old1: i16, old2: i16) -> i16 {
+            let s0: i32 = if shift > 12 {
+                // Invalid shift: (nybble >> 3) << 11 in the halved domain
+                // => full-scale -4096 for negative nybbles, 0 otherwise.
+                if nyb < 0 {
+                    -4096
+                } else {
+                    0
+                }
+            } else {
+                ((nyb << shift) >> 1) << 1
+            };
+            let o1 = old1 as i32;
+            let o2 = old2 as i32;
+            let f: i32 = match filter {
+                0 => s0,
+                1 => s0 + o1 + ((-o1) >> 4),
+                2 => s0 + o1 * 2 + ((-o1 * 3) >> 5) - o2 + (o2 >> 4),
+                _ => s0 + o1 * 2 + ((-o1 * 13) >> 6) - o2 + ((o2 * 3) >> 4),
+            };
+            // 16-bit clamp in the halved domain = clamp full-scale to
+            // [-65536, 65534], then the double-and-wrap truncates to i16.
+            let c = f.clamp(-65536, 65534);
+            (c as i16) & !1
+        }
+
+        /// The production BRR decoder must match the hardware reference for
+        /// all filter modes, shifts (including the invalid >12 range), and
+        /// representative filter history values (including the wrap regime
+        /// past +/-0x4000).
+        #[test]
+        #[ignore = "documents divergence D2/D5; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
+        fn fidelity_brr_filter_coefficients_match_hardware() {
+            let history: [(i16, i16); 11] = [
+                (0, 0),
+                (100, 50),
+                (-100, -50),
+                (1000, -1000),
+                (-1000, 1000),
+                (8000, 6000),
+                (-8000, -6000),
+                (20000, 18000),
+                (-20000, -18000),
+                (28000, -28000),
+                (-28000, 28000),
+            ];
+            // Track the worst divergence per filter mode for diagnostics.
+            let mut worst = [(0i32, (0i32, 0u8, 0i16, 0i16, 0i32, 0i32)); 4];
+            for filter in 0..4u8 {
+                for shift in 0..=13u8 {
+                    for nyb in -8..=7i32 {
+                        for &(o1, o2) in &history {
+                            let hw = hw_ref_decode(nyb, shift, filter, o1, o2) as i32;
+                            let got = Dsp::decode_brr_nybble(nyb, shift, filter, o1, o2) as i32;
+                            let d = (hw - got).abs();
+                            if d > worst[filter as usize].0 {
+                                worst[filter as usize] =
+                                    (d, (nyb, shift, o1, o2, hw, got));
+                            }
+                        }
+                    }
+                }
+            }
+            for (filter, (d, (nyb, shift, o1, o2, hw, got))) in worst.iter().enumerate() {
+                assert!(
+                    *d <= 64,
+                    "BRR filter {filter} diverges from hardware: worst |diff| = {d} at \
+                     (nybble={nyb}, shift={shift}, old1={o1}, old2={o2}): hw={hw}, code={got}"
+                );
+            }
+        }
+
+        /// Gaussian coefficient assignment. At fractional position 0 the
+        /// interpolation point sits exactly on the *second-newest* sample.
+        /// Hardware tap weights (oldest s0 .. newest s3), frac = i:
+        ///   s0: GAUSS[255-i]   s1: GAUSS[511-i]
+        ///   s2: GAUSS[256+i]   s3: GAUSS[i]
+        /// so at i = 0 the newest sample has weight GAUSS[0] = 0 and the
+        /// second-newest has near-maximum weight GAUSS[256].
+        #[test]
+        #[ignore = "documents divergence D4; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
+        fn fidelity_gauss_tap_coefficient_assignment() {
+            // buf_pos = 0 => newest sample lives at index 15.
+            let mut newest = [0i16; BRR_BUF_LEN];
+            newest[15] = 16000;
+            let newest_only = Dsp::gaussian_interp(&newest, 0, 0);
+            assert!(
+                newest_only.abs() <= 16,
+                "newest tap must have ~zero weight at frac=0 (GAUSS[0]=0), got {newest_only}"
+            );
+
+            let mut second = [0i16; BRR_BUF_LEN];
+            second[14] = 16000;
+            let second_only = Dsp::gaussian_interp(&second, 0, 0);
+            assert!(
+                second_only > 4000,
+                "second-newest tap must carry weight GAUSS[256] (~full) at frac=0, got {second_only}"
+            );
+        }
+
+        /// The published hardware GAUSS table starts at 0, peaks at
+        /// $519 = 1305, and every 4-tap kernel
+        ///   GAUSS[255-i] + GAUSS[511-i] + GAUSS[256+i] + GAUSS[i]
+        /// sums to ~2048 (matching the >>11 normalization; a few indices
+        /// overflow to 2049, the documented hardware overflow quirk).
+        #[test]
+        #[ignore = "documents divergence D3; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
+        fn fidelity_gauss_table_matches_published_values() {
+            assert_eq!(GAUSS[0], 0);
+            assert_eq!(
+                GAUSS[511], 1305,
+                "published table max is $519 = 1305, got {}",
+                GAUSS[511]
+            );
+            for i in 0..256usize {
+                let k = GAUSS[255 - i] as i32
+                    + GAUSS[511 - i] as i32
+                    + GAUSS[256 + i] as i32
+                    + GAUSS[i] as i32;
+                assert!(
+                    (2032..=2064).contains(&k),
+                    "4-tap kernel at frac={i} sums to {k}, expected ~2048 \
+                     (unity gain through the >>11 normalization)"
+                );
+            }
+        }
+
+        /// End-to-end smoothness: a filter-0 BRR triangle wave (PCM step of
+        /// 256/sample) played at pitch $1000 through a fixed max GAIN
+        /// envelope must come out of the Gaussian interpolator *smooth* —
+        /// the 4-tap kernel is a low-pass with ~unity gain, so consecutive
+        /// output deltas are bounded by a few hundred. Large jumps mean the
+        /// interpolation is discontinuous (the "crunchy audio" defect).
+        #[cfg(feature = "audio")]
+        #[test]
+        #[ignore = "documents divergence D1; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
+        fn fidelity_pure_tone_renders_smoothly() {
+            let mut dsp = Dsp::new();
+            let mut aram = [0u8; 0x10000];
+
+            // Sample directory entry 0 at DIR=$01 -> $0100: start = $0200,
+            // loop = $0200.
+            aram[0x0100] = 0x00;
+            aram[0x0101] = 0x02;
+            aram[0x0102] = 0x00;
+            aram[0x0103] = 0x02;
+
+            // Two BRR blocks at $0200 encoding a 32-sample triangle,
+            // filter 0 (raw PCM), shift 8 => sample = nybble * 256.
+            let tri_up: [i8; 16] = [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7];
+            let tri_dn: [i8; 16] = [7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6, -7, -8];
+            let write_block =
+                |aram: &mut [u8; 0x10000], addr: usize, header: u8, nyb: &[i8; 16]| {
+                    aram[addr] = header;
+                    for i in 0..8 {
+                        let hi = (nyb[i * 2] as u8) & 0xF;
+                        let lo = (nyb[i * 2 + 1] as u8) & 0xF;
+                        aram[addr + 1 + i] = (hi << 4) | lo;
+                    }
+                };
+            write_block(&mut aram, 0x0200, 0x80, &tri_up); // shift=8, filter=0
+            write_block(&mut aram, 0x0209, 0x83, &tri_dn); // + LOOP + END
+
+            // Voice 0: full volume, pitch $1000 (1:1 rate), GAIN direct max,
+            // no noise / echo / pmon. FLG $20 disables echo buffer writes.
+            dsp.write_reg(0x00, 0x7F); // VOL_L
+            dsp.write_reg(0x01, 0x7F); // VOL_R
+            dsp.write_reg(0x02, 0x00); // PITCH lo
+            dsp.write_reg(0x03, 0x10); // PITCH hi => $1000
+            dsp.write_reg(0x04, 0x00); // SRCN 0
+            dsp.write_reg(0x05, 0x00); // ADSR1: ADSR off => GAIN mode
+            dsp.write_reg(0x07, 0x7F); // GAIN direct max => env = $7F0
+            dsp.write_reg(0x0C, 0x7F); // MVOL_L
+            dsp.write_reg(0x1C, 0x7F); // MVOL_R
+            dsp.write_reg(0x5D, 0x01); // DIR = $0100
+            dsp.write_reg(0x6C, 0x20); // FLG: echo write disable only
+            dsp.write_reg(0x4C, 0x01); // KON voice 0
+
+            let mut left = Vec::with_capacity(2048);
+            let mut frame = [0i16; 2];
+            for _ in 0..2048 {
+                dsp.step_sample(&mut aram);
+                let n = dsp.drain_audio(&mut frame);
+                assert_eq!(n, 2, "expected exactly one stereo pair per step");
+                left.push(frame[0]);
+            }
+
+            // Skip warmup (KON delay + first loop pass); analyze steady state.
+            let body = &left[64..64 + 1024];
+
+            // (i) Non-zero output.
+            let peak = body.iter().map(|s| (*s as i32).abs()).max().unwrap();
+            assert!(peak > 500, "voice should be audible, peak = {peak}");
+
+            // (iii) 32-sample periodicity (sanity: the loop is playing).
+            for i in 0..(1024 - 32) {
+                assert_eq!(
+                    body[i],
+                    body[i + 32],
+                    "output not 32-periodic at body index {i}"
+                );
+            }
+
+            // (ii) Smoothness. Source PCM step is 256/sample; the Gaussian
+            // kernel has ~unity gain, and envelope/volume scale by ~0.976
+            // combined, so hardware-correct consecutive deltas stay in the
+            // low hundreds. 600 is a generous bound; beyond it the
+            // interpolator is emitting discontinuities.
+            let max_delta = body
+                .windows(2)
+                .map(|w| (w[1] as i32 - w[0] as i32).abs())
+                .max()
+                .unwrap();
+            assert!(
+                max_delta <= 600,
+                "gaussian-interpolated triangle must be smooth: max |delta| = {max_delta}, \
+                 peak = {peak}, first 40 steady-state samples = {:?}",
+                &body[..40]
+            );
+        }
+    }
 }

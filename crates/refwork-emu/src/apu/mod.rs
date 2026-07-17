@@ -1092,6 +1092,90 @@ mod tests {
         assert!(apu.cpu.pc != 0xFFC0, "IPL ROM should advance PC");
     }
 
+    // ---- Overshoot-leak diagnosis (bug-demonstration tests) ----
+    //
+    // `advance_master_cycles` drains whole SPC cycles from the integer
+    // accumulator, then steps whole instructions until `spc_ran >=
+    // spc_to_run`. The final instruction can push `spc_ran` past
+    // `spc_to_run`; that excess is never subtracted from the next call's
+    // budget, yet it still clocks the timers and the DSP sample
+    // accumulator. One big call overshoots at most once (bounded by one
+    // instruction), but many tiny calls (the `$2140-$2143` catch-up
+    // pattern in bus.rs) overshoot once *per drained call*, inflating the
+    // effective SPC/DSP rate by up to instruction_cycles / spc_to_run.
+    //
+    // These tests measure that leak directly. They intentionally PASS
+    // against the current (buggy) behavior so the defect is pinned with
+    // exact numbers; once the overshoot is carried back into the
+    // accumulator, flip the assertions to the "correct clocking" variants
+    // noted inline.
+
+    /// SPC cycles actually delivered to the timers/DSP by
+    /// `advance_master_cycles`, reconstructed from the DSP sample counter
+    /// plus the sub-sample remainder.
+    fn spc_cycles_delivered(apu: &Apu) -> u64 {
+        apu.dsp.sample_count * DSP_CLOCKS_PER_SAMPLE + apu.dsp_cycle_accum
+    }
+
+    /// Exact SPC-cycle budget the accumulator model authorized across all
+    /// `advance_master_cycles` calls totalling `total_master` cycles:
+    /// sum(spc_to_run) == (total_master * SPC_NUM - final_accum) / SPC_DEN.
+    fn spc_cycles_budgeted(apu: &Apu, total_master: u64) -> u64 {
+        (total_master * SPC_NUM - apu.spc_accum) / SPC_DEN
+    }
+
+    #[test]
+    fn advance_master_cycles_single_call_overshoot_is_bounded() {
+        // One big call may overshoot the budget by at most one
+        // instruction's worth of cycles (the IPL HLE WaitCommand step is a
+        // fixed 7 SPC cycles, so at most 6 excess cycles here).
+        const FRAME_MCLK: u64 = 357_368; // one NTSC frame
+        let mut apu = Apu::new();
+        apu.advance_master_cycles(FRAME_MCLK);
+
+        let delivered = spc_cycles_delivered(&apu);
+        let budget = spc_cycles_budgeted(&apu, FRAME_MCLK);
+        assert!(
+            delivered >= budget && delivered - budget <= 6,
+            "single-call overshoot must be bounded by one instruction: \
+             delivered={delivered} budget={budget}"
+        );
+    }
+
+    #[test]
+    fn advance_master_cycles_chunked_overshoots_spc_budget() {
+        // Same total master cycles, delivered in 30-cycle chunks (the
+        // scale of a per-CPU-access `apu_catch_up`). Every chunk drains
+        // 1-2 SPC cycles of budget but runs one whole 7-cycle HLE step,
+        // so the excess accumulates once per call.
+        const FRAME_MCLK: u64 = 357_368;
+        const CHUNK: u64 = 30;
+
+        let mut apu = Apu::new();
+        let mut advanced = 0u64;
+        while advanced < FRAME_MCLK {
+            let c = CHUNK.min(FRAME_MCLK - advanced);
+            apu.advance_master_cycles(c);
+            advanced += c;
+        }
+
+        let delivered = spc_cycles_delivered(&apu);
+        let budget = spc_cycles_budgeted(&apu, FRAME_MCLK);
+        println!(
+            "chunked overshoot: budget={budget} SPC cycles, delivered={delivered} \
+             ({:.3}x), excess={}",
+            delivered as f64 / budget as f64,
+            delivered - budget
+        );
+        // Correct clocking: delivered - budget <= 6 (one instruction, as in
+        // the single-call test). Current behavior: ~4.9x the budget.
+        assert!(
+            delivered > budget * 4,
+            "expected the per-call overshoot leak to inflate delivered SPC \
+             cycles well past the budget: delivered={delivered} budget={budget}"
+        );
+    }
+
     // ---- Audio capture wiring (feature "audio" only) ----
     //
     // refwork-emu has no `Core`-constructing tests and no synthetic-ROM
@@ -1183,6 +1267,108 @@ mod tests {
                  sample streams for an identical cycle sequence"
             );
             assert!(n1 > 0, "expected some pairs to have been produced");
+        }
+
+        // ---- Overshoot-leak sample-count tests (bug demonstration) ----
+        //
+        // Companions to the SPC-budget tests in the parent module: measure
+        // the same instruction-granularity overshoot leak at the level the
+        // symptom was observed — drained stereo pairs.
+
+        /// Drain everything currently queued, returning pairs drained.
+        fn drain_all_pairs(apu: &mut Apu) -> u64 {
+            let mut buf = [0i16; 4096];
+            let mut pairs = 0u64;
+            loop {
+                let n = apu.drain_audio(&mut buf);
+                pairs += (n / 2) as u64;
+                if n < buf.len() {
+                    return pairs;
+                }
+            }
+        }
+
+        /// Total pairs produced since construction: drained now plus any
+        /// lost to capture-ring overflow (counted, not recoverable).
+        fn total_pairs_produced(apu: &mut Apu) -> u64 {
+            drain_all_pairs(apu) + apu.audio_dropped_pairs()
+        }
+
+        /// Advance `total` master cycles in `chunk`-sized calls, draining
+        /// between calls so the ring never overflows. Returns pairs.
+        fn advance_chunked_counting_pairs(apu: &mut Apu, total: u64, chunk: u64) -> u64 {
+            let mut advanced = 0u64;
+            let mut pairs = 0u64;
+            let mut buf = [0i16; 4096];
+            while advanced < total {
+                let c = chunk.min(total - advanced);
+                apu.advance_master_cycles(c);
+                advanced += c;
+                let n = apu.drain_audio(&mut buf);
+                pairs += (n / 2) as u64;
+            }
+            pairs + drain_all_pairs(apu) + apu.audio_dropped_pairs()
+        }
+
+        #[test]
+        fn sample_count_depends_on_advance_chunk_size() {
+            // Identical Apus, identical total master cycles; only the call
+            // granularity differs. With correct clocking the two pair
+            // counts would differ by at most 1; the overshoot leak makes
+            // the chunked one ~4.9x larger.
+            const FRAME_MCLK: u64 = 357_368; // one NTSC frame
+
+            let mut single = Apu::new();
+            single.advance_master_cycles(FRAME_MCLK);
+            let single_pairs = total_pairs_produced(&mut single);
+
+            let mut chunked = Apu::new();
+            let chunked_pairs = advance_chunked_counting_pairs(&mut chunked, FRAME_MCLK, 30);
+
+            println!(
+                "one frame ({FRAME_MCLK} mclk): single-call={single_pairs} pairs, \
+                 30-cycle chunks={chunked_pairs} pairs ({:.3}x)",
+                chunked_pairs as f64 / single_pairs as f64
+            );
+            // Correct clocking: chunked_pairs.abs_diff(single_pairs) <= 1.
+            assert!(
+                chunked_pairs > single_pairs * 2,
+                "chunk-size dependence demonstrates the overshoot leak: \
+                 single={single_pairs} chunked={chunked_pairs}"
+            );
+        }
+
+        #[test]
+        fn sample_rate_one_second_single_vs_chunked() {
+            // One second of master cycles must produce ~32,000 pairs
+            // regardless of call granularity. 21,477,000 master cycles is
+            // exactly 1,024,000 SPC cycles under SPC_NUM/SPC_DEN, i.e.
+            // exactly 32,000 DSP samples.
+            const ONE_SECOND_MCLK: u64 = 21_477_000;
+
+            let mut single = Apu::new();
+            single.advance_master_cycles(ONE_SECOND_MCLK);
+            let single_pairs = total_pairs_produced(&mut single);
+
+            let mut chunked = Apu::new();
+            let chunked_pairs =
+                advance_chunked_counting_pairs(&mut chunked, ONE_SECOND_MCLK, 30);
+
+            println!(
+                "one second ({ONE_SECOND_MCLK} mclk): single-call={single_pairs} pairs, \
+                 30-cycle chunks={chunked_pairs} pairs ({:.3}x)",
+                chunked_pairs as f64 / single_pairs as f64
+            );
+            assert_eq!(
+                single_pairs, 32_000,
+                "single-call rate should be exactly 32 kHz for one second"
+            );
+            // Correct clocking: chunked_pairs.abs_diff(32_000) <= 1.
+            assert!(
+                chunked_pairs > 150_000,
+                "expected the overshoot leak to inflate the chunked rate to \
+                 ~156k pairs/s; got {chunked_pairs}"
+            );
         }
     }
 }
