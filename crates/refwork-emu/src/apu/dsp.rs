@@ -55,59 +55,63 @@
 
 // ─── Gaussian interpolation table ────────────────────────────────────────────
 //
-// The hardware uses a 512-entry table of i16 Gaussian-windowed sinc coefficients
-// for 4-tap interpolation. Public hardware documentation publishes this table
-// exactly; it is reproduced here verbatim.
+// The hardware uses a 512-entry table of i16 Gaussian-windowed sinc
+// coefficients for 4-tap interpolation (D3: transcribed verbatim from the
+// published S-DSP table; the previous table in this file was not the
+// hardware table — see the fixed-D3 note below).
 //
-// Four consecutive table entries are used per sample. The fractional part of
-// the pitch counter (bits [11:0] of the 12-bit sub-sample position, 0–$FFF)
-// is scaled to a 0–511 index `pos` and the four taps are at indices:
-//   0*512 + pos, 1*512 + pos, 2*512 + pos (reversed), 3*512 + pos (reversed)
-// Actually the hardware uses a single 512-entry table with the 4 taps at:
-//   tbl[511 - pos]  (oldest sample)
-//   tbl[pos]
-//   tbl[511 - pos]  (symmetric; see note)
-//   tbl[pos]
-// The authoritative layout per public hardware docs is a 512-entry table used
-// as described below — each half-table is symmetric, so only 256 unique values.
-// We transcribe all 512 entries for fidelity.
+// The fractional part of the pitch counter (bits 11:4 of the 12-bit
+// sub-sample position, giving `frac` in 0..=255) selects four taps from the
+// four samples `s0..s3` (oldest..newest) via (D4-fixed assignment):
+//   s0: GAUSS[255 - frac]
+//   s1: GAUSS[511 - frac]   (dominant tap at frac=0: the table's near-max)
+//   s2: GAUSS[256 + frac]
+//   s3: GAUSS[frac]         (near-zero at frac=0: GAUSS[0] == 0)
+// Every 4-tap kernel (the four values above, for a given `frac`) sums to
+// ~2048 (unity gain after the `>>11` normalization); this is what the
+// `fidelity_gauss_table_matches_published_values` test checks.
 
 /// 512-entry Gaussian interpolation table (i16 coefficients).
 ///
 /// Indexed as `GAUSS[i]` for i in 0..512. For a fractional offset `f`
-/// (0..=0xFFF), `pos = f >> 4` (giving 0..=255 as the table index within
-/// each half), and the four taps use positions arranged as two symmetric
-/// 256-entry halves within the 512-entry table.
+/// (0..=0xFFF), `frac = (f >> 4) & 0xFF` (0..=255) selects the four taps
+/// per the layout documented above.
 ///
 /// The checksum (sum of all 512 entries, wrapping i32) is pinned by a unit
 /// test below to catch any transcription errors.
 pub const GAUSS: [i16; 512] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
-    2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10,
-    10, 11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 15, 16, 16, 17, 17, 18, 19, 19, 20, 20, 21, 21,
-    22, 23, 23, 24, 24, 25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 36, 36, 37, 38, 39,
-    40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 58, 59, 60, 61, 62, 64, 65,
-    66, 67, 69, 70, 71, 73, 74, 76, 77, 78, 80, 81, 83, 84, 86, 87, 89, 90, 92, 94, 95, 97, 99,
-    100, 102, 104, 106, 107, 109, 111, 113, 115, 117, 118, 120, 122, 124, 126, 128, 130, 132, 134,
-    137, 139, 141, 143, 145, 147, 150, 152, 154, 156, 159, 161, 163, 166, 168, 171, 173, 175, 178,
-    180, 183, 186, 188, 191, 193, 196, 199, 201, 204, 207, 210, 212, 215, 218, 221, 224, 227, 230,
-    233, 236, 239, 242, 245, 248, 251, 254, 257, 260, 263, 267, 270, 273, 276, 280, 283, 286, 290,
-    293, 297, 300, 304, 307, 311, 314, 318, 321, 325, 328, 332, 336, 339, 343, 347, 351, 354, 358,
-    362, 366, 370, 374, 378, 381, 385, 389, 393, 397, 401, 405, 410, 414, 418, 422, 426, 430, 435,
-    439, 443, 447, 452, 456, 460, 465, 469, 474, 478, 483, 487, 492, 496, 501, 505, 510, 515, 519,
-    524, 529, 533, 538, 543, 547, 552, 557, 562, 566, 571, 576, 581, 586, 591, 596, 601, 606, 611,
-    616, 621, 626, 631, 636, 641, 646, 651, 656, 661, 666, 671, 676, 681, 686, 692, 697, 702, 707,
-    712, 717, 723, 728, 733, 738, 744, 749, 754, 759, 765, 770, 775, 781, 786, 791, 797, 802, 808,
-    813, 818, 824, 829, 835, 840, 846, 851, 857, 862, 868, 873, 879, 884, 890, 895, 901, 906, 912,
-    917, 923, 929, 934, 940, 945, 951, 957, 962, 968, 974, 979, 985, 991, 996, 1002, 1008, 1013,
-    1019, 1025, 1030, 1036, 1042, 1047, 1053, 1059, 1065, 1070, 1076, 1082, 1088, 1094, 1099, 1105,
-    1111, 1117, 1123, 1129, 1134, 1140, 1146, 1152, 1158, 1164, 1170, 1176, 1182, 1188, 1194, 1199,
-    1205, 1211, 1217, 1223, 1229, 1235, 1241, 1248, 1254, 1260, 1266, 1272, 1278, 1284, 1290, 1296,
-    1303, 1309, 1315, 1321, 1327, 1333, 1339, 1346, 1352, 1358, 1364, 1370, 1377, 1383, 1389, 1395,
-    1401, 1408, 1414, 1420, 1426, 1433, 1439, 1445, 1452, 1458, 1464, 1471, 1477, 1483, 1490, 1496,
-    1502, 1509, 1515, 1521, 1528, 1534, 1541, 1547, 1553, 1560, 1566, 1573, 1579, 1585, 1592, 1598,
-    1605, 1611, 1618, 1624, 1630, 1637, 1643, 1650, 1656, 1663, 1669, 1676, 1682, 1689, 1695, 1702,
-    1708, 1715, 1721, 1728, 1734, 1741, 1747, 1754, 1760, 1767, 1773, 1780, 1786, 1793, 1799,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
+    2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5,
+    6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10,
+    11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 15, 16, 16, 17, 17,
+    18, 19, 19, 20, 20, 21, 21, 22, 23, 23, 24, 24, 25, 26, 27, 27,
+    28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 36, 36, 37, 38, 39, 40,
+    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+    58, 59, 60, 61, 62, 64, 65, 66, 67, 69, 70, 71, 73, 74, 76, 77,
+    78, 80, 81, 83, 84, 86, 87, 89, 90, 92, 94, 95, 97, 99, 100, 102,
+    104, 106, 107, 109, 111, 113, 115, 117, 118, 120, 122, 124, 126, 128, 130, 132,
+    134, 137, 139, 141, 143, 145, 147, 150, 152, 154, 156, 159, 161, 163, 166, 168,
+    171, 173, 175, 178, 180, 183, 186, 188, 191, 193, 196, 199, 201, 204, 207, 210,
+    212, 215, 218, 221, 224, 227, 230, 233, 236, 239, 242, 245, 248, 251, 254, 257,
+    260, 263, 267, 270, 273, 276, 280, 283, 286, 290, 293, 297, 300, 304, 307, 311,
+    314, 318, 321, 325, 328, 332, 336, 339, 343, 347, 351, 354, 358, 362, 366, 370,
+    374, 378, 381, 385, 389, 393, 397, 401, 405, 410, 414, 418, 422, 426, 430, 434,
+    439, 443, 447, 451, 456, 460, 464, 469, 473, 477, 482, 486, 491, 495, 499, 504,
+    508, 513, 517, 522, 527, 531, 536, 540, 545, 550, 554, 559, 563, 568, 573, 577,
+    582, 587, 592, 596, 601, 606, 611, 615, 620, 625, 630, 635, 640, 644, 649, 654,
+    659, 664, 669, 674, 678, 683, 688, 693, 698, 703, 708, 713, 718, 723, 728, 732,
+    737, 742, 747, 752, 757, 762, 767, 772, 777, 782, 787, 792, 797, 802, 806, 811,
+    816, 821, 826, 831, 836, 841, 846, 851, 855, 860, 865, 870, 875, 880, 884, 889,
+    894, 899, 904, 908, 913, 918, 923, 927, 932, 937, 941, 946, 951, 955, 960, 965,
+    969, 974, 978, 983, 988, 992, 997, 1001, 1005, 1010, 1014, 1019, 1023, 1027, 1032, 1036,
+    1040, 1045, 1049, 1053, 1057, 1061, 1066, 1070, 1074, 1078, 1082, 1086, 1090, 1094, 1098, 1102,
+    1106, 1109, 1113, 1117, 1121, 1125, 1128, 1132, 1136, 1139, 1143, 1146, 1150, 1153, 1157, 1160,
+    1164, 1167, 1170, 1174, 1177, 1180, 1183, 1186, 1190, 1193, 1196, 1199, 1202, 1205, 1207, 1210,
+    1213, 1216, 1219, 1221, 1224, 1227, 1229, 1232, 1234, 1237, 1239, 1241, 1244, 1246, 1248, 1251,
+    1253, 1255, 1257, 1259, 1261, 1263, 1265, 1267, 1269, 1270, 1272, 1274, 1275, 1277, 1279, 1280,
+    1282, 1283, 1284, 1286, 1287, 1288, 1290, 1291, 1292, 1293, 1294, 1295, 1296, 1297, 1297, 1298,
+    1299, 1300, 1300, 1301, 1302, 1302, 1303, 1303, 1303, 1304, 1304, 1304, 1304, 1304, 1305, 1305,
 ];
 
 // ─── Envelope rate table ──────────────────────────────────────────────────────
@@ -179,10 +183,12 @@ pub enum EnvPhase {
 
 // ─── BRR decode buffer ────────────────────────────────────────────────────────
 
-/// Size of the BRR decode ring buffer per voice (16 samples: 1 BRR block
-/// worth of decoded PCM). We keep the last 16 decoded samples for the
-/// 4-tap gaussian interpolation look-behind.
-pub const BRR_BUF_LEN: usize = 16;
+/// Size of the BRR decode ring buffer per voice (32 samples: the current
+/// *and* previous BRR block, 16 samples each). D1: a single 16-sample block
+/// isn't enough — the 4-tap gaussian interpolator's 3-sample look-behind
+/// must be able to read across a block boundary into the tail of the
+/// previously decoded block, not just within the block currently playing.
+pub const BRR_BUF_LEN: usize = 32;
 
 // ─── Per-voice state ──────────────────────────────────────────────────────────
 
@@ -197,12 +203,17 @@ pub struct Voice {
     // ── BRR playback ──
     /// Byte address in ARAM of the *next* BRR block to decode.
     pub brr_addr: u16,
-    /// Index of the last byte read within the current 9-byte BRR block
-    /// (0 = header; 1–8 = data). When this reaches 8 after the last
-    /// nybble-pair, we move to the next block.
+    /// Current playback position within the currently-decoded 16-sample BRR
+    /// block (0..=15). Advanced by one for each whole-sample pitch-counter
+    /// carry; when it would reach 16, it wraps to 0 and the next block is
+    /// decoded (D1: this is also the tap-selection input to
+    /// [`Dsp::gaussian_interp`], so the interpolator tracks playback
+    /// position instead of freezing at the block's start).
     pub brr_block_offset: u8,
-    /// Decoded PCM ring buffer: 16 samples of i16. New samples are appended
-    /// at `buf_pos` modulo 16.
+    /// Decoded PCM ring buffer: the current and previous 16-sample BRR
+    /// blocks (32 samples total). New samples are appended at `buf_pos`
+    /// modulo `BRR_BUF_LEN`; the previous block's tail survives the
+    /// boundary so gaussian interpolation can look behind it (D1).
     pub buf: [i16; BRR_BUF_LEN],
     /// Next write index in `buf` (mod BRR_BUF_LEN).
     pub buf_pos: u8,
@@ -565,67 +576,78 @@ impl Dsp {
 
     /// Decode one BRR nybble into a 16-bit PCM sample.
     ///
-    /// Algorithm (from public hardware documentation):
+    /// Algorithm (FIX1-corrected, transliterated verbatim from blargg's
+    /// `SPC_DSP::decode_brr` — snes9x `apu/bapu/dsp/SPC_DSP.cpp`,
+    /// hardware-verified reference; see the pinned vector table in
+    /// `fidelity_brr_filter_coefficients_match_hardware` below, which is
+    /// the arbiter for this function). The key hardware detail: the filter
+    /// is applied while `s` is still in the *halved* domain — it is only
+    /// doubled at the very end, after the 16-bit clamp. An earlier version
+    /// of this function doubled `s` before filtering and reformulated the
+    /// filter coefficients for the full-scale domain; that reordering is
+    /// *not* bit-exact with hardware because the intermediate right-shifts
+    /// truncate differently in each domain (e.g. filter 2, nybble 0,
+    /// shift 0, old1=old2=-100 must decode to exactly -100 on hardware).
     ///
-    /// 1. Extract 4-bit signed nybble, shift up by `shift` (1–12) clamped to
-    ///    0..=12.
-    /// 2. Apply filter:
-    ///    - mode 0: raw
-    ///    - mode 1: s += old1 * 15/16  (i.e., old1 + old1*(-1/16))
-    ///    - mode 2: s += old1 * 2 - old2 * 15/16
-    ///    - mode 3: s += old1 * 13/8 - old2 * 3/4 (approximately)
-    /// 3. Clamp to i16 range.
-    ///
-    /// The fractional multiplications use the integer approximations from the
-    /// documented hardware reference (powers-of-2 right-shifts):
-    ///   - old1 * 15/16  ≈  old1 - (old1 >> 4)
-    ///   - old1 * 2      =  old1 << 1
-    ///   - old2 * 15/16  ≈  old2 - (old2 >> 4)
-    ///   - old1 * 13/8   =  old1 + old1 + (old1 >> 1) + (old1 >> 3)
-    ///   - old2 * 3/4    =  (old2 >> 1) + (old2 >> 2)
+    /// 1. Extract the 4-bit signed nybble and shift it into the halved
+    ///    domain: `(nybble << shift) >> 1` for valid shifts (0..=12).
+    ///    Shifts 13..=15 are the documented invalid-shift case: hardware
+    ///    masks the halved value to `nybble & !0x7FF`, which collapses to
+    ///    `-2048` for a negative nybble and `0` otherwise (still in the
+    ///    halved domain — doubled at step 3 like everything else).
+    /// 2. Apply the filter directly to the halved `s`, hardware forms.
+    ///    `p1` is the FULL-SCALE previous sample (`old1`, not halved);
+    ///    `p2` is the previous-previous sample HALVED (`old2 >> 1`) — this
+    ///    asymmetry (p1 full-scale, p2 halved) is exactly what the
+    ///    hardware does, not a simplification:
+    ///    - mode 0: raw (`s` unchanged)
+    ///    - mode 1: `s += (p1 >> 1) + ((-p1) >> 5)`
+    ///    - mode 2: `s += p1; s -= p2; s += (p2 >> 4); s += ((p1*-3) >> 6)`
+    ///    - mode 3: `s += p1; s -= p2; s += ((p1*-13) >> 7); s += ((p2*3) >> 4)`
+    /// 3. D5: clamp the halved-domain accumulator to `i16` range
+    ///    (`[-32768, 32767]`), THEN double (`* 2`) with 16-bit wraparound
+    ///    (a wrap, not a saturate — values whose double would exceed the
+    ///    `i16` range wrap around). The doubled result is always even by
+    ///    construction, matching hardware's even-sample invariant.
     fn decode_brr_nybble(raw4: i32, shift: u8, filter: u8, old1: i16, old2: i16) -> i16 {
-        // 1. Shift the nybble. shift is clamped to 0..=12 by callers.
-        // The hardware saturates: shift > 12 produces extreme values → clamp.
-        let shifted: i32 = if shift > 12 {
-            // Overflow / garbage shift: propagate sign of nybble maximally.
-            if raw4 < 0 {
-                -0x8000i32
-            } else {
-                0
-            }
+        // 1. Shift into the halved domain. shift > 12 is the documented
+        // invalid-shift case, masked (not shifted) in the halved domain.
+        let mut s: i32 = if shift <= 12 {
+            (raw4 << shift) >> 1
         } else {
-            raw4 << shift
+            raw4 & !0x7FF
         };
 
-        // 2. Apply filter.
-        let s = shifted;
-        let filtered: i32 = match filter {
-            0 => s,
+        // 2. Apply filter directly in the halved domain (hardware forms;
+        // p1 full-scale, p2 halved — see doc comment above).
+        let p1 = old1 as i32;
+        let p2 = (old2 as i32) >> 1;
+        match filter {
+            0 => {}
             1 => {
-                let f = old1 as i32;
-                s + f + (-(f >> 4))
+                s += p1 >> 1;
+                s += (-p1) >> 5;
             }
             2 => {
-                let f1 = old1 as i32;
-                let f2 = old2 as i32;
-                s + (f1 << 1) + (-(f1 + (f1 >> 4))) + (-(f2 - (f2 >> 4)))
+                s += p1;
+                s -= p2;
+                s += p2 >> 4;
+                s += (p1 * -3) >> 6;
             }
             _ => {
                 // 3
-                let f1 = old1 as i32;
-                let f2 = old2 as i32;
-                s + (f1 << 1) + f1 + (f1 >> 1) + (f1 >> 3) - f2 - (f2 >> 1) - (f2 >> 2)
+                s += p1;
+                s -= p2;
+                s += (p1 * -13) >> 7;
+                s += (p2 * 3) >> 4;
             }
-        };
+        }
 
-        // 3. Clamp to i16. The hardware sign-extends the result into 16 bits,
-        // then saturates (NOT wraps) if it overflows. Per public reference:
-        // the hardware does a clip to -32768..+32767 treating it as a 16-bit
-        // signed value that first wraps, then the game reads 16-bit. We
-        // implement the documented saturation clamp.
-        let clamped = filtered.clamp(-32768, 32767);
-        // Zero bits 0 (hardware does this: sample >> 1 << 1, keeping it even).
-        (clamped as i16) & !1
+        // 3. D5: clamp the halved-domain accumulator to i16 range, then
+        // double with 16-bit wraparound (matches `CLAMP16(s); s = (int16_t)
+        // (s * 2);` in the hardware reference exactly).
+        let clamped = s.clamp(-32768, 32767);
+        (clamped * 2) as i16
     }
 
     /// Decode 4 nybbles (one half-block = 4 PCM samples) from `brr_data` at
@@ -721,41 +743,49 @@ impl Dsp {
     // ─── Gaussian interpolation ───────────────────────────────────────────────
 
     /// Perform 4-tap Gaussian interpolation on the voice's decoded sample
-    /// buffer at the current pitch_counter fractional position.
+    /// buffer at the current playback position.
     ///
-    /// The fractional part of the pitch counter (bits 11:0 = 12 bits, 0–$FFF)
-    /// is scaled to a table index `pos` = frac >> 4 (0–255 in the lower half).
+    /// `block_offset` (D1) is the voice's current sample position within
+    /// the *currently playing* 16-sample BRR block (0..=15) — this is what
+    /// makes the interpolator track playback instead of freezing at the
+    /// block's first four samples for all 16 output ticks. The newest tap
+    /// is at ring-buffer index `(buf_pos - 16 + block_offset) & 31`: since
+    /// a block decode writes 16 fresh samples starting at the pre-decode
+    /// `buf_pos` and then advances `buf_pos` by 16, `buf_pos - 16` is the
+    /// start of the block currently playing, and adding `block_offset`
+    /// lands on the sample at the current playback position within it. The
+    /// three taps behind it (`newest-1..newest-3`, wrapping mod 32) reach
+    /// back into the *previous* block once `block_offset` is small, which
+    /// is exactly why `BRR_BUF_LEN` is 32 (current + previous block) rather
+    /// than 16 — a 16-entry ring can't supply look-behind across a block
+    /// boundary. On KON the ring is zeroed and `buf_pos`/`block_offset`
+    /// both start at 0, so the very first block's look-behind reads zeros
+    /// rather than stale/garbage data.
     ///
-    /// Four sample indices (into the ring buffer): current - 3, -2, -1, 0.
-    /// Four table indices: gauss[(511-pos)], gauss[(255-pos)], gauss[pos],
-    ///                     gauss[(511-pos)] wait — actual layout documented:
+    /// The fractional part of the pitch counter (bits 11:4, 0..=255) selects
+    /// the four GAUSS taps (D4-fixed assignment; oldest..newest = s0..s3):
+    ///   s0: GAUSS[255 - frac]
+    ///   s1: GAUSS[511 - frac]   (dominant tap at frac=0)
+    ///   s2: GAUSS[256 + frac]
+    ///   s3: GAUSS[frac]         (near-zero at frac=0)
     ///
-    /// The hardware uses GAUSS indices as follows for fractional part `i`:
-    ///   pos = i >> 4            (0..=255)
-    ///   G[0] = GAUSS[511 - pos]   (oldest; maps the 512 entry table 256..511)
-    ///   G[1] = GAUSS[255 - pos]   (maps 0..255 in reverse)
-    ///   G[2] = GAUSS[pos]         (maps 0..255)
-    ///   G[3] = GAUSS[511 - pos]   wait, not quite — see below.
-    ///
-    /// Authoritative per public reference: the GAUSS table is 512 entries;
-    /// the 4 taps use indices computed from the 12-bit fractional part:
-    ///   i = frac >> 4         (0..=255)
-    ///   G0 = GAUSS[255 - i]
-    ///   G1 = GAUSS[511 - i]
-    ///   G2 = GAUSS[i]
-    ///   G3 = GAUSS[256 + i]
-    /// (samples from oldest to newest are s[-3]..s[0])
-    fn gaussian_interp(buf: &[i16; BRR_BUF_LEN], buf_pos: u8, pitch_counter: u16) -> i32 {
-        // Fractional position within decoded samples.
+    /// D10: hardware accumulates each tap's product individually shifted
+    /// right by 11 (not the raw products summed then shifted once), wraps
+    /// the running total to 16 bits after the first three taps — the
+    /// documented interpolation-overflow quirk — then adds the fourth tap
+    /// before the final clamp and even-only mask.
+    fn gaussian_interp(buf: &[i16; BRR_BUF_LEN], buf_pos: u8, block_offset: u8, pitch_counter: u16) -> i32 {
         let frac = ((pitch_counter >> 4) & 0xFF) as usize;
 
-        // 4-tap positions: relative to the next sample to be written = buf_pos.
-        // buf_pos is the *next write* position; so most recent = buf_pos - 1.
         let len = BRR_BUF_LEN;
-        let i3 = (buf_pos as usize).wrapping_sub(1) & (len - 1);
-        let i2 = (buf_pos as usize).wrapping_sub(2) & (len - 1);
-        let i1 = (buf_pos as usize).wrapping_sub(3) & (len - 1);
-        let i0 = (buf_pos as usize).wrapping_sub(4) & (len - 1);
+        let newest = (buf_pos as usize)
+            .wrapping_sub(16)
+            .wrapping_add(block_offset as usize)
+            & (len - 1);
+        let i3 = newest;
+        let i2 = newest.wrapping_sub(1) & (len - 1);
+        let i1 = newest.wrapping_sub(2) & (len - 1);
+        let i0 = newest.wrapping_sub(3) & (len - 1);
 
         let s0 = buf[i0] as i32; // oldest
         let s1 = buf[i1] as i32;
@@ -764,12 +794,18 @@ impl Dsp {
 
         let g0 = GAUSS[255 - frac] as i32;
         let g1 = GAUSS[511 - frac] as i32;
-        let g2 = GAUSS[frac] as i32;
-        let g3 = GAUSS[256 + frac] as i32;
+        let g2 = GAUSS[256 + frac] as i32;
+        let g3 = GAUSS[frac] as i32;
 
-        // Sum = (g0*s0 + g1*s1 + g2*s2 + g3*s3) >> 11, clamped to i16.
-        let sum = g0 * s0 + g1 * s1 + g2 * s2 + g3 * s3;
-        (sum >> 11).clamp(-32768, 32767)
+        // D10: per-tap >>11, 16-bit wrap after the first three taps, then
+        // add the fourth before the final clamp + even mask.
+        let mut out: i32 = (g0 * s0) >> 11;
+        out += (g1 * s1) >> 11;
+        out += (g2 * s2) >> 11;
+        out = out as i16 as i32;
+        out += (g3 * s3) >> 11;
+
+        out.clamp(-32768, 32767) & !1
     }
 
     // ─── Envelope step ────────────────────────────────────────────────────────
@@ -835,7 +871,9 @@ impl Dsp {
                 }
             }
             EnvPhase::Decay => {
-                let rate = ((adsr1 >> 3) & 0x07) as usize * 2 + 16;
+                // D8: decay rate (DR) is ADSR1 bits 6:4, not 5:3 — the old
+                // shift mixed the low attack-rate bit into the decay rate.
+                let rate = ((adsr1 >> 4) & 0x07) as usize * 2 + 16;
                 let period = RATE_TABLE[rate.min(31)];
                 if period == 0 || {
                     voice.env_tick = voice.env_tick.wrapping_add(1);
@@ -926,13 +964,18 @@ impl Dsp {
 
     // ─── Noise LFSR ───────────────────────────────────────────────────────────
 
-    /// Advance the 15-bit noise LFSR by one step.
-    /// Feedback: bit 14 XOR bit 13 → new bit 14 (shift left, OR feedback into bit 0,
-    /// then mask to 15 bits). Actually the SPC700 noise LFSR has documented
-    /// polynomial x^15 + x^14 + 1 (taps at bits 14 and 13).
+    /// Advance the 15-bit noise LFSR by one step (D6).
+    ///
+    /// Hardware form: `new = (lfsr >> 1) | (((lfsr ^ (lfsr >> 1)) & 1) << 14)`
+    /// — a *right*-shift LFSR with the feedback bit (XOR of bit 0 and the
+    /// new bit 1, i.e. the two bits about to be shifted past each other)
+    /// injected into bit 14. `lfsr >> 1` is at most 14 bits and the
+    /// feedback term is either 0 or bit 14, so the result is always within
+    /// 15 bits without needing an explicit mask — the `& 0x7FFF` below is
+    /// defense-in-depth, not load-bearing.
     fn step_noise(&mut self) {
-        let feedback = ((self.noise_lfsr >> 14) ^ (self.noise_lfsr >> 13)) & 1;
-        self.noise_lfsr = ((self.noise_lfsr << 1) | feedback) & 0x7FFF;
+        let feedback = ((self.noise_lfsr ^ (self.noise_lfsr >> 1)) & 1) << 14;
+        self.noise_lfsr = ((self.noise_lfsr >> 1) | feedback) & 0x7FFF;
     }
 
     // ─── Echo processing ──────────────────────────────────────────────────────
@@ -1138,8 +1181,10 @@ impl Dsp {
                         if self.voices[v].end_flag {
                             if self.voices[v].loop_flag {
                                 self.voices[v].brr_addr = self.voices[v].loop_addr;
-                                self.voices[v].brr_old1 = 0;
-                                self.voices[v].brr_old2 = 0;
+                                // D7: do NOT reset brr_old1/brr_old2 here.
+                                // Hardware carries the BRR filter history
+                                // across the loop seam; zeroing it produced
+                                // an audible click once per loop iteration.
                                 self.regs[0x7C] |= 1u8 << v;
                                 self.endx |= 1u8 << v;
                             } else {
@@ -1171,16 +1216,16 @@ impl Dsp {
 
             // Get sample via noise or Gaussian interpolation.
             let raw_sample: i32 = if (non_mask & (1u8 << v)) != 0 {
-                // Noise: use LFSR output (bit 0, mapped to 15-bit full-scale).
-                if self.noise_lfsr & 1 != 0 {
-                    -0x4000i32
-                } else {
-                    0x4000i32
-                }
+                // D6: the noise sample is the 15-bit LFSR value shifted
+                // into the 16-bit domain (matching how BRR/gaussian
+                // samples are stored: full-scale, even values). Do NOT
+                // shift back down afterward — that halves the noise level.
+                ((self.noise_lfsr << 1) as i16) as i32
             } else {
                 Self::gaussian_interp(
                     &self.voices[v].buf,
                     self.voices[v].buf_pos,
+                    self.voices[v].brr_block_offset,
                     self.voices[v].pitch_counter,
                 )
             };
@@ -1193,8 +1238,10 @@ impl Dsp {
 
             // Apply envelope.
             // sample * envelope / 2048: Q-format multiply, result in range ~[-32768,32767].
-            let env_sample =
-                ((raw_sample * self.voices[v].envelope as i32) >> 11).clamp(-32768, 32767) as i16;
+            // D10: mask the LSB (hardware voice output is always even).
+            let env_sample = (((raw_sample * self.voices[v].envelope as i32) >> 11)
+                .clamp(-32768, 32767) as i16)
+                & !1;
 
             // Update OUTX (output before main volume): sample >> 8.
             self.voices[v].outx = (env_sample >> 8) as i8;
@@ -1206,13 +1253,22 @@ impl Dsp {
                 let vl = self.voice_vol_l(v) as i32;
                 let vr = self.voice_vol_r(v) as i32;
                 let s = env_sample as i32;
-                main_l += (s * vl) >> 7;
-                main_r += (s * vr) >> 7;
+                let contrib_l = (s * vl) >> 7;
+                let contrib_r = (s * vr) >> 7;
+                // D10: clamp the main accumulator to 16 bits after *each*
+                // voice add (hardware clamps here, not once at the end).
+                main_l = (main_l + contrib_l).clamp(-32768, 32767);
+                main_r = (main_r + contrib_r).clamp(-32768, 32767);
 
                 // Echo input accumulation (if voice has echo enabled).
+                // FIX3: clamp the echo accumulator to 16 bits after *each*
+                // voice add, exactly like the main accumulator above —
+                // hardware clamps both `t_main_out` and `t_echo_out` per
+                // add in `voice_output` (blargg SPC_DSP.cpp), not once at
+                // the end.
                 if (eon_mask & (1u8 << v)) != 0 {
-                    echo_in_l += (s * vl) >> 7;
-                    echo_in_r += (s * vr) >> 7;
+                    echo_in_l = (echo_in_l + contrib_l).clamp(-32768, 32767);
+                    echo_in_r = (echo_in_r + contrib_r).clamp(-32768, 32767);
                 }
             }
         }
@@ -1238,35 +1294,45 @@ impl Dsp {
 
         self.fir_pos = (self.fir_pos + 1) & 7;
 
-        // Echo volume mix into main output.
+        // D10: MVOL applies to the voice sum (`main_l`/`main_r`) only.
+        // EVOL applies to the FIR-filtered echo read (`fir_l`/`fir_r`) and
+        // is added to the mix *after* the MVOL multiply — previously echo
+        // was folded into `main_l`/`main_r` before the MVOL scale, so it
+        // was double-scaled (once by EVOL, again by MVOL). Each term is
+        // narrowed to i16 after its own `>>7` (matching hardware, which
+        // truncates each scaled term individually before summing), then
+        // the sum is clamped to 16 bits.
+        let mvl = self.mvol_l() as i32;
+        let mvr = self.mvol_r() as i32;
+        let voice_scaled_l = ((main_l * mvl) >> 7) as i16 as i32;
+        let voice_scaled_r = ((main_r * mvr) >> 7) as i16 as i32;
+
         let evl = self.evol_l() as i32;
         let evr = self.evol_r() as i32;
-        if !mute {
-            main_l += (fir_l as i32 * evl) >> 7;
-            main_r += (fir_r as i32 * evr) >> 7;
-        }
-
-        // Clamp main output.
-        let out_l = main_l.clamp(-32768, 32767) as i16;
-        let out_r = main_r.clamp(-32768, 32767) as i16;
+        let (echo_scaled_l, echo_scaled_r) = if mute {
+            (0, 0)
+        } else {
+            (
+                ((fir_l as i32 * evl) >> 7) as i16 as i32,
+                ((fir_r as i32 * evr) >> 7) as i16 as i32,
+            )
+        };
 
         // Apply master volume: this is the final stereo sample for this tick.
         // With no feature enabled it is computed and discarded (matches
         // hardware timing, nothing observes the value). Under `introspect`
         // it is mirrored to `last_out_l`/`last_out_r`; under `audio` it is
         // pushed to the host capture ring below.
-        let mvl = self.mvol_l() as i32;
-        let mvr = self.mvol_r() as i32;
         #[cfg_attr(
             not(any(feature = "introspect", feature = "audio")),
             allow(unused_variables)
         )]
-        let final_l = ((out_l as i32 * mvl) >> 7).clamp(-32768, 32767) as i16;
+        let final_l = (voice_scaled_l + echo_scaled_l).clamp(-32768, 32767) as i16;
         #[cfg_attr(
             not(any(feature = "introspect", feature = "audio")),
             allow(unused_variables)
         )]
-        let final_r = ((out_r as i32 * mvr) >> 7).clamp(-32768, 32767) as i16;
+        let final_r = (voice_scaled_r + echo_scaled_r).clamp(-32768, 32767) as i16;
 
         #[cfg(feature = "introspect")]
         {
@@ -1278,10 +1344,15 @@ impl Dsp {
         self.push_audio_pair(final_l, final_r);
 
         // Write echo feedback into echo buffer (if echo write not disabled).
+        // D9: `clamp16(echo_in + ((fir * efb) >> 7))` — only the feedback
+        // term (fir * efb) is scaled by >>7; the old code divided the whole
+        // sum by 128, leaving echo nearly silent. D10: mask the LSB.
         if !echo_write_disable {
             let efb = self.efb() as i32;
-            let new_echo_l = ((echo_in_l + (fir_l as i32 * efb)) >> 7).clamp(-32768, 32767) as i16;
-            let new_echo_r = ((echo_in_r + (fir_r as i32 * efb)) >> 7).clamp(-32768, 32767) as i16;
+            let new_echo_l =
+                ((echo_in_l + ((fir_l as i32 * efb) >> 7)).clamp(-32768, 32767) as i16) & !1;
+            let new_echo_r =
+                ((echo_in_r + ((fir_r as i32 * efb) >> 7)).clamp(-32768, 32767) as i16) & !1;
 
             self.echo_buf_l[ep % echo_buf_size] = new_echo_l;
             self.echo_buf_r[ep % echo_buf_size] = new_echo_r;
@@ -1318,11 +1389,14 @@ mod tests {
     fn gauss_table_checksum() {
         let sum: i32 = GAUSS.iter().map(|&x| x as i32).sum();
         // The expected checksum for the Gaussian table transcribed above.
-        // Computed as: sum of all 512 i16 entries = 290589.
+        // D3: re-pinned to 262146 for the correct published S-DSP table
+        // (the old pin, 290589, pinned a wrong/fabricated table whose
+        // 4-tap kernels summed to 1.1-1.4x unity gain instead of ~1x).
+        // Computed as: sum of all 512 i16 entries = 262146.
         // This value pins the table; any transcription error changes it.
         assert!(sum > 0, "Gaussian table sum should be positive");
         assert_eq!(
-            sum, 290589,
+            sum, 262146,
             "Gaussian table sum mismatch — transcription error"
         );
     }
@@ -1367,20 +1441,24 @@ mod tests {
         assert_eq!(result2, -8, "raw filter mode 0, nybble=-8, shift=0");
     }
 
-    /// Test BRR shift overflow (shift > 12): saturates.
+    /// Test BRR shift overflow (shift > 12): invalid-shift rule (D5).
     #[test]
     fn brr_shift_overflow_saturates() {
-        // shift = 13 with positive nybble → saturates to 0 (garbage shift rule).
+        // shift = 13 with positive nybble → 0 (garbage shift rule).
         let result = Dsp::decode_brr_nybble(7, 13, 0, 0, 0);
         assert_eq!(result & !1, result, "must be even");
         // result should be 0 since nybble > 0 and shift > 12 → 0.
         assert_eq!(result, 0, "positive nybble with overflow shift → 0");
 
-        // Negative nybble → max negative.
+        // Negative nybble → -4096 (D5: the invalid-shift case is evaluated
+        // in the hardware's halved domain and doubled back, not saturated
+        // to -32768 — this value was updated from the old -32768 pin when
+        // D5 landed; see hw_ref_decode in fidelity_tests for the reference
+        // derivation).
         let result2 = Dsp::decode_brr_nybble(-8, 13, 0, 0, 0);
         assert_eq!(
-            result2, -32768,
-            "negative nybble with overflow shift → -32768"
+            result2, -4096,
+            "negative nybble with overflow shift → -4096"
         );
     }
 
@@ -1408,6 +1486,72 @@ mod tests {
         // Check that some samples are non-zero.
         let non_zero = voice.buf.iter().any(|&s| s != 0);
         assert!(non_zero, "decoded block should have non-zero samples");
+    }
+
+    /// D7: BRR filter history (`old1`/`old2`) must carry across the loop
+    /// seam, not reset to 0. Play a single self-looping BRR block through
+    /// filter mode 1 (history-dependent) for two full iterations: since
+    /// the source nybbles are identical every iteration, the *decoded*
+    /// samples are identical between iterations only if `old1`/`old2`
+    /// reset every loop (the old bug); with history correctly carried
+    /// over, the second iteration starts from whatever `old1`/`old2`
+    /// evolved to at the end of the first and so decodes differently.
+    #[test]
+    fn brr_loop_seam_preserves_filter_history() {
+        let mut dsp = Dsp::new();
+        let mut aram = [0u8; 0x10000];
+
+        // Sample directory entry 0 at DIR=$01 -> $0100: start = loop = $0200
+        // (a single block that loops on itself).
+        aram[0x0100] = 0x00;
+        aram[0x0101] = 0x02;
+        aram[0x0102] = 0x00;
+        aram[0x0103] = 0x02;
+
+        // BRR block at $0200: shift=8, filter=1 (history-dependent), loop
+        // + end bits set. Data: varied nonzero nybbles.
+        aram[0x0200] = (8 << 4) | (1 << 2) | 0b11;
+        let data: [u8; 8] = [0x71, 0x35, 0x62, 0x14, 0x53, 0x27, 0x46, 0x18];
+        aram[0x0201..0x0209].copy_from_slice(&data);
+
+        dsp.write_reg(0x00, 0x7F); // VOL_L
+        dsp.write_reg(0x01, 0x7F); // VOL_R
+        dsp.write_reg(0x02, 0x00); // PITCH lo
+        dsp.write_reg(0x03, 0x10); // PITCH hi => $1000 (exactly 1 sample/tick)
+        dsp.write_reg(0x04, 0x00); // SRCN 0
+        dsp.write_reg(0x05, 0x00); // ADSR1: ADSR off => GAIN mode
+        dsp.write_reg(0x07, 0x7F); // GAIN direct max
+        dsp.write_reg(0x5D, 0x01); // DIR = $0100
+        dsp.write_reg(0x6C, 0x20); // FLG: echo write disable only
+        dsp.write_reg(0x4C, 0x01); // KON voice 0
+
+        // KON delay (5 ticks, first decode on tick 5) + 16 ticks to finish
+        // the first block + trigger the loop-back decode. Run generously
+        // past that so both 16-sample blocks are fully in `buf`.
+        for _ in 0..40 {
+            dsp.step_sample(&mut aram);
+        }
+
+        // FIX4: three decodes occur by tick 40, not exactly two — the
+        // initial decode plus two loop-back decodes (each 16-sample block
+        // is consumed one sample per tick, and this single-block loop
+        // triggers a fresh decode every 16 ticks after the KON delay).
+        // buf_pos wraps every 16-sample write into the 32-entry ring, so
+        // by the third decode buf[0..16) holds the *third* iteration
+        // (having wrapped back around and overwritten the first), while
+        // buf[16..32) still holds the second. The `first`/`second` names
+        // below are positional (which half of the ring), not iteration
+        // ordinals; the assertion only needs consecutive iterations to
+        // differ, which still holds.
+        let voice = &dsp.voices[0];
+        let first: Vec<i16> = voice.buf[0..16].to_vec();
+        let second: Vec<i16> = voice.buf[16..32].to_vec();
+
+        assert_ne!(
+            first, second,
+            "second loop iteration must decode differently from the first \
+             (filter history carried across the loop seam), got {first:?} == {second:?}"
+        );
     }
 
     // ---- Envelope steps ----
@@ -1466,6 +1610,37 @@ mod tests {
         );
     }
 
+    /// D8: decay rate (DR) is ADSR1 bits 6:4. Two ADSR1 bytes that share
+    /// bits 6:4 but differ in the attack-rate field (bits 3:0) must decay
+    /// identically; the old `(adsr1 >> 3) & 0x07` shift mixed the low
+    /// attack-rate bit into the decay rate, so this would previously have
+    /// diverged.
+    #[test]
+    fn adsr_decay_rate_uses_bits_6_4_not_5_3() {
+        let mut voice_a = Voice::new();
+        voice_a.env_phase = EnvPhase::Decay;
+        voice_a.envelope = 0x7FF;
+        let adsr1_a = 0b0101_0000u8; // DR (bits 6:4) = 0b101 = 5, AR = 0b0000
+
+        let mut voice_b = Voice::new();
+        voice_b.env_phase = EnvPhase::Decay;
+        voice_b.envelope = 0x7FF;
+        let adsr1_b = 0b0101_1111u8; // same DR = 5, AR = 0b1111 (differs)
+
+        let adsr2 = 0x00; // SL = 0 -> low sustain level, decay keeps stepping
+
+        for _ in 0..2000 {
+            Dsp::step_envelope(&mut voice_a, adsr1_a, adsr2, 0);
+            Dsp::step_envelope(&mut voice_b, adsr1_b, adsr2, 0);
+        }
+
+        assert_eq!(
+            voice_a.envelope, voice_b.envelope,
+            "decay must depend only on ADSR1 bits 6:4, not the attack-rate bits 3:0"
+        );
+        assert_eq!(voice_a.env_phase, voice_b.env_phase);
+    }
+
     // ---- Echo FIR ----
 
     #[test]
@@ -1490,6 +1665,66 @@ mod tests {
         assert!(
             (-32768..=32767).contains(&result),
             "FIR output must be clamped to i16 range"
+        );
+    }
+
+    /// D9: the echo buffer write is `clamp16(echo_in + ((fir * efb) >> 7))`
+    /// — only the feedback term is divided by 128, not the whole sum. The
+    /// old `(echo_in + fir*efb) >> 7` made echo ~128x too quiet. Drive a
+    /// loud voice with echo routing enabled (EFB = 0 to isolate the
+    /// `echo_in` term) and check the echo buffer byte written into ARAM
+    /// is loud, not attenuated by ~1/128.
+    #[test]
+    fn echo_level_is_not_attenuated_by_128() {
+        let mut dsp = Dsp::new();
+        let mut aram = [0u8; 0x10000];
+
+        // Sample directory entry 0 at DIR=$01 -> $0100: start = loop = $0200
+        // (a single self-looping block, filter 0, max positive amplitude).
+        aram[0x0100] = 0x00;
+        aram[0x0101] = 0x02;
+        aram[0x0102] = 0x00;
+        aram[0x0103] = 0x02;
+        aram[0x0200] = (12 << 4) | 0b11; // shift=12, filter=0, loop+end
+        for i in 0..8 {
+            aram[0x0201 + i] = 0x77; // both nybbles = +7 (max positive)
+        }
+
+        dsp.write_reg(0x00, 0x7F); // VOL_L
+        dsp.write_reg(0x01, 0x7F); // VOL_R
+        dsp.write_reg(0x02, 0x00); // PITCH lo
+        dsp.write_reg(0x03, 0x10); // PITCH hi => $1000
+        dsp.write_reg(0x04, 0x00); // SRCN 0
+        dsp.write_reg(0x05, 0x00); // ADSR1: ADSR off => GAIN mode
+        dsp.write_reg(0x07, 0x7F); // GAIN direct max
+        dsp.write_reg(0x5D, 0x01); // DIR = $0100
+        dsp.write_reg(0x4D, 0x01); // EON: route voice 0 to echo
+        dsp.write_reg(0x6D, 0x00); // ESA = 0 -> echo base $0000
+        dsp.write_reg(0x7D, 0x01); // EDL = 1 -> echo buffer usable
+        dsp.write_reg(0x0D, 0x00); // EFB = 0 (isolate the echo_in term)
+        dsp.write_reg(0x6C, 0x00); // FLG: not muted, echo write enabled
+        dsp.write_reg(0x4C, 0x01); // KON voice 0
+
+        // Warm up well past the KON delay and BRR/gaussian ring fill so
+        // the voice is at full, steady-state amplitude, then check the
+        // echo write from the very next tick.
+        for _ in 0..80 {
+            dsp.step_sample(&mut aram);
+        }
+        let ep_before = dsp.echo_pos as usize;
+        dsp.step_sample(&mut aram);
+
+        let echo_base = (dsp.esa() as usize) << 8;
+        let aram_off_l = (echo_base + ep_before * 4) & 0xFFFF;
+        let written = i16::from_le_bytes([aram[aram_off_l], aram[(aram_off_l + 1) & 0xFFFF]]);
+
+        // Correct: echo_in alone (EFB=0), on the order of tens of
+        // thousands for a full-amplitude voice. Buggy (>>7 of the whole
+        // sum): would land in the low hundreds. 5000 comfortably
+        // separates the two.
+        assert!(
+            written.unsigned_abs() as i32 > 5000,
+            "echo buffer write should be loud (not attenuated ~128x), got {written}"
         );
     }
 
@@ -1531,6 +1766,33 @@ mod tests {
             dsp1.noise_lfsr, dsp2.noise_lfsr,
             "LFSR must be deterministic"
         );
+    }
+
+    /// D6: the LFSR must step with the documented hardware form —
+    /// `new = (lfsr >> 1) | (((lfsr ^ (lfsr >> 1)) & 1) << 14)` — a
+    /// right-shift LFSR with feedback into bit 14, not the old left-shift
+    /// form. Cross-check the first several steps against a hand-stepped
+    /// reference computed directly from that formula, starting from the
+    /// documented power-on state (0x4000).
+    #[test]
+    fn noise_lfsr_matches_hand_stepped_reference() {
+        fn reference_step(lfsr: u16) -> u16 {
+            let feedback = ((lfsr ^ (lfsr >> 1)) & 1) << 14;
+            (lfsr >> 1) | feedback
+        }
+
+        let mut dsp = Dsp::new();
+        assert_eq!(dsp.noise_lfsr, 0x4000, "power-on LFSR state");
+
+        let mut reference = 0x4000u16;
+        for step in 0..16 {
+            dsp.step_noise();
+            reference = reference_step(reference);
+            assert_eq!(
+                dsp.noise_lfsr, reference,
+                "LFSR diverged from hand-stepped reference at step {step}"
+            );
+        }
     }
 
     // ---- Full sample step smoke test ----
@@ -1635,118 +1897,112 @@ mod tests {
     mod fidelity_tests {
         use super::*;
 
-        /// Hardware-reference BRR nybble decode.
+        /// FIX2: pinned hardware-verified BRR decode vectors.
         ///
-        /// Real hardware works in a *halved* domain:
-        ///   half = (nybble << shift) >> 1          (shift 13..15: (nyb>>3)<<11)
-        ///   filter 1: + old1*15/16     (full-scale coefficient)
-        ///   filter 2: + old1*61/32 - old2*15/16
-        ///   filter 3: + old1*115/64 - old2*13/16
-        ///   then clamp the halved value to 16 bits, double it, and WRAP
-        ///   (not clamp) the doubled result into 16 bits. Stored samples are
-        ///   therefore always even, and overflow past +/-0x4000 wraps.
+        /// Provenance: generated by a Python transliteration of blargg's
+        /// `SPC_DSP::decode_brr` (snes9x `apu/bapu/dsp/SPC_DSP.cpp`,
+        /// fetched from
+        /// `https://raw.githubusercontent.com/snes9xgit/snes9x/master/apu/bapu/dsp/SPC_DSP.cpp`
+        /// on 2026-07-16), NOT from this crate's own production code —
+        /// the previous version of this test used a same-shaped
+        /// `hw_ref_decode` reference function that reimplemented the
+        /// production formulas and therefore could never disagree with a
+        /// bug in `decode_brr_nybble` (a reviewer flagged the circularity:
+        /// e.g. filter 2, nybble 0, shift 0, old1=old2=-100 must decode to
+        /// exactly -100 on real hardware, which the old circular test could
+        /// not catch). These 60 vectors are pinned constants, compared
+        /// against production with **zero tolerance**.
         ///
-        /// Below is the full-scale integer formulation of the documented
-        /// algorithm (exact per fullsnes filter formulas; +/- 1-2 LSB of
-        /// truncation slack vs the halved-domain order of operations, which
-        /// the comparison tolerance absorbs).
-        fn hw_ref_decode(nyb: i32, shift: u8, filter: u8, old1: i16, old2: i16) -> i16 {
-            let s0: i32 = if shift > 12 {
-                // Invalid shift: (nybble >> 3) << 11 in the halved domain
-                // => full-scale -4096 for negative nybbles, 0 otherwise.
-                if nyb < 0 {
-                    -4096
-                } else {
-                    0
-                }
-            } else {
-                ((nyb << shift) >> 1) << 1
-            };
-            let o1 = old1 as i32;
-            let o2 = old2 as i32;
-            let f: i32 = match filter {
-                0 => s0,
-                1 => s0 + o1 + ((-o1) >> 4),
-                2 => s0 + o1 * 2 + ((-o1 * 3) >> 5) - o2 + (o2 >> 4),
-                _ => s0 + o1 * 2 + ((-o1 * 13) >> 6) - o2 + ((o2 * 3) >> 4),
-            };
-            // 16-bit clamp in the halved domain = clamp full-scale to
-            // [-65536, 65534], then the double-and-wrap truncates to i16.
-            let c = f.clamp(-65536, 65534);
-            (c as i16) & !1
-        }
+        /// Coverage: all 4 filter modes x shifts {0, 5, 12, 13, 15}
+        /// (0/5/12 = valid shift range boundaries and mid-range; 13/15 =
+        /// the invalid-shift saturation case) x 3 history/nybble combos
+        /// ("typical" — small in-range magnitudes; "divergent" — the
+        /// reviewer-found case above; "wrap-boundary" — history near
+        /// +/-32000 with the most-negative nybble, exercising the 16-bit
+        /// wrap-not-saturate doubling step).
+        ///
+        /// Regeneration: see
+        /// `scripts/gen_brr_vectors.py`-equivalent logic in the scratch
+        /// generator used to produce this table (not checked into the
+        /// repo): it clamps the halved-domain accumulator to i16 range
+        /// then doubles with 16-bit wraparound, matching `CLAMP16(s); s =
+        /// (int16_t)(s * 2);` in the C++ source exactly. Regenerate by
+        /// re-fetching SPC_DSP.cpp and re-running the same transliteration
+        /// if this table is ever suspected of drifting from hardware.
+        ///
+        /// Columns: (filter, shift, nybble, old1, old2, expected).
+        #[rustfmt::skip]
+        const BRR_HW_VECTORS: &[(u8, u8, i32, i16, i16, i16)] = &[
+            (0, 0, 3, 100, 50, 2), (0, 0, 0, -100, -100, 0), (0, 0, -8, -32000, 32000, -8),
+            (0, 5, 3, 100, 50, 96), (0, 5, 0, -100, -100, 0), (0, 5, -8, -32000, 32000, -256),
+            (0, 12, 3, 100, 50, 12288), (0, 12, 0, -100, -100, 0), (0, 12, -8, -32000, 32000, -32768),
+            (0, 13, 3, 100, 50, 0), (0, 13, 0, -100, -100, 0), (0, 13, -8, -32000, 32000, -4096),
+            (0, 15, 3, 100, 50, 0), (0, 15, 0, -100, -100, 0), (0, 15, -8, -32000, 32000, -4096),
+            (1, 0, 3, 100, 50, 94), (1, 0, 0, -100, -100, -94), (1, 0, -8, -32000, 32000, -30008),
+            (1, 5, 3, 100, 50, 188), (1, 5, 0, -100, -100, -94), (1, 5, -8, -32000, 32000, -30256),
+            (1, 12, 3, 100, 50, 12380), (1, 12, 0, -100, -100, -94), (1, 12, -8, -32000, 32000, 2768),
+            (1, 13, 3, 100, 50, 92), (1, 13, 0, -100, -100, -94), (1, 13, -8, -32000, 32000, 31440),
+            (1, 15, 3, 100, 50, 92), (1, 15, 0, -100, -100, -94), (1, 15, -8, -32000, 32000, 31440),
+            (2, 0, 3, 100, 50, 144), (2, 0, 0, -100, -100, -100), (2, 0, -8, -32000, 32000, 0),
+            (2, 5, 3, 100, 50, 238), (2, 5, 0, -100, -100, -100), (2, 5, -8, -32000, 32000, 0),
+            (2, 12, 3, 100, 50, 12430), (2, 12, 0, -100, -100, -100), (2, 12, -8, -32000, 32000, 0),
+            (2, 13, 3, 100, 50, 142), (2, 13, 0, -100, -100, -100), (2, 13, -8, -32000, 32000, 0),
+            (2, 15, 3, 100, 50, 142), (2, 15, 0, -100, -100, -100), (2, 15, -8, -32000, 32000, 0),
+            (3, 0, 3, 100, 50, 138), (3, 0, 0, -100, -100, -100), (3, 0, -8, -32000, 32000, 0),
+            (3, 5, 3, 100, 50, 232), (3, 5, 0, -100, -100, -100), (3, 5, -8, -32000, 32000, 0),
+            (3, 12, 3, 100, 50, 12424), (3, 12, 0, -100, -100, -100), (3, 12, -8, -32000, 32000, 0),
+            (3, 13, 3, 100, 50, 136), (3, 13, 0, -100, -100, -100), (3, 13, -8, -32000, 32000, 0),
+            (3, 15, 3, 100, 50, 136), (3, 15, 0, -100, -100, -100), (3, 15, -8, -32000, 32000, 0),
+        ];
 
-        /// The production BRR decoder must match the hardware reference for
-        /// all filter modes, shifts (including the invalid >12 range), and
-        /// representative filter history values (including the wrap regime
-        /// past +/-0x4000).
+        /// The production BRR decoder must match every pinned hardware
+        /// vector EXACTLY (no tolerance) — see `BRR_HW_VECTORS` doc comment
+        /// for provenance and coverage.
         #[test]
-        #[ignore = "documents divergence D2/D5; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
         fn fidelity_brr_filter_coefficients_match_hardware() {
-            let history: [(i16, i16); 11] = [
-                (0, 0),
-                (100, 50),
-                (-100, -50),
-                (1000, -1000),
-                (-1000, 1000),
-                (8000, 6000),
-                (-8000, -6000),
-                (20000, 18000),
-                (-20000, -18000),
-                (28000, -28000),
-                (-28000, 28000),
-            ];
-            // Track the worst divergence per filter mode for diagnostics.
-            let mut worst = [(0i32, (0i32, 0u8, 0i16, 0i16, 0i32, 0i32)); 4];
-            for filter in 0..4u8 {
-                for shift in 0..=13u8 {
-                    for nyb in -8..=7i32 {
-                        for &(o1, o2) in &history {
-                            let hw = hw_ref_decode(nyb, shift, filter, o1, o2) as i32;
-                            let got = Dsp::decode_brr_nybble(nyb, shift, filter, o1, o2) as i32;
-                            let d = (hw - got).abs();
-                            if d > worst[filter as usize].0 {
-                                worst[filter as usize] =
-                                    (d, (nyb, shift, o1, o2, hw, got));
-                            }
-                        }
-                    }
-                }
-            }
-            for (filter, (d, (nyb, shift, o1, o2, hw, got))) in worst.iter().enumerate() {
-                assert!(
-                    *d <= 64,
-                    "BRR filter {filter} diverges from hardware: worst |diff| = {d} at \
-                     (nybble={nyb}, shift={shift}, old1={o1}, old2={o2}): hw={hw}, code={got}"
+            for &(filter, shift, nyb, old1, old2, expected) in BRR_HW_VECTORS {
+                let got = Dsp::decode_brr_nybble(nyb, shift, filter, old1, old2);
+                assert_eq!(
+                    got, expected,
+                    "BRR filter {filter} diverges from pinned hardware vector at \
+                     (nybble={nyb}, shift={shift}, old1={old1}, old2={old2}): \
+                     expected={expected}, got={got}"
                 );
             }
         }
 
-        /// Gaussian coefficient assignment. At fractional position 0 the
-        /// interpolation point sits exactly on the *second-newest* sample.
-        /// Hardware tap weights (oldest s0 .. newest s3), frac = i:
+        /// Gaussian coefficient assignment. Hardware tap weights (oldest s0
+        /// .. newest s3), frac = i:
         ///   s0: GAUSS[255-i]   s1: GAUSS[511-i]
         ///   s2: GAUSS[256+i]   s3: GAUSS[i]
-        /// so at i = 0 the newest sample has weight GAUSS[0] = 0 and the
-        /// second-newest has near-maximum weight GAUSS[256].
+        /// so at i = 0 the newest sample (s3) has weight GAUSS[0] = 0, and
+        /// the *dominant* tap is s1 (two samples behind newest) with weight
+        /// GAUSS[511] = 1305 — the table's near-maximum. (An earlier
+        /// version of this test targeted s2, one behind newest, expecting
+        /// it to carry the near-max weight; per the verified formula above
+        /// s2's weight at i=0 is GAUSS[256] = 374, a secondary lobe, not
+        /// the dominant tap — corrected here to target s1, matching the
+        /// hardware reference this test's own doc comment states.)
         #[test]
-        #[ignore = "documents divergence D4; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
         fn fidelity_gauss_tap_coefficient_assignment() {
-            // buf_pos = 0 => newest sample lives at index 15.
+            // One BRR block decoded (buf_pos = 16), playback at its last
+            // sample (block_offset = 15) => newest tap (s3) lives at index
+            // 15, with s2/s1/s0 at 14/13/12.
             let mut newest = [0i16; BRR_BUF_LEN];
             newest[15] = 16000;
-            let newest_only = Dsp::gaussian_interp(&newest, 0, 0);
+            let newest_only = Dsp::gaussian_interp(&newest, 16, 15, 0);
             assert!(
                 newest_only.abs() <= 16,
                 "newest tap must have ~zero weight at frac=0 (GAUSS[0]=0), got {newest_only}"
             );
 
-            let mut second = [0i16; BRR_BUF_LEN];
-            second[14] = 16000;
-            let second_only = Dsp::gaussian_interp(&second, 0, 0);
+            let mut dominant = [0i16; BRR_BUF_LEN];
+            dominant[13] = 16000;
+            let dominant_only = Dsp::gaussian_interp(&dominant, 16, 15, 0);
             assert!(
-                second_only > 4000,
-                "second-newest tap must carry weight GAUSS[256] (~full) at frac=0, got {second_only}"
+                dominant_only > 4000,
+                "the tap two samples behind newest (s1) must carry the dominant weight \
+                 GAUSS[511] at frac=0, got {dominant_only}"
             );
         }
 
@@ -1756,7 +2012,6 @@ mod tests {
         /// sums to ~2048 (matching the >>11 normalization; a few indices
         /// overflow to 2049, the documented hardware overflow quirk).
         #[test]
-        #[ignore = "documents divergence D3; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
         fn fidelity_gauss_table_matches_published_values() {
             assert_eq!(GAUSS[0], 0);
             assert_eq!(
@@ -1785,7 +2040,6 @@ mod tests {
         /// interpolation is discontinuous (the "crunchy audio" defect).
         #[cfg(feature = "audio")]
         #[test]
-        #[ignore = "documents divergence D1; fix gated on .agents/plans/audio-fidelity-and-apu-clock/01"]
         fn fidelity_pure_tone_renders_smoothly() {
             let mut dsp = Dsp::new();
             let mut aram = [0u8; 0x10000];

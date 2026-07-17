@@ -39,6 +39,9 @@ Packages 01 and 03 are independent and can be implemented in parallel;
   at construction, and behind a new cargo feature so the default build is
   **byte- and icount-identical** (icount changes re-baseline absolute-icount
   epoch chains; see `docs/emulator-performance-profile.md:82-88`).
+  **(2026-07-16: this "byte- and icount-identical" default-build guarantee
+  is superseded for the APU clock epoch — see
+  `.agents/decisions/2026-07-16-apu-clock-epoch-cut.md`.)**
 - **Frame hashes are unaffected by design**: `frame_hash = blake3(wram ‖ fb)`
   (`crates/refwork-hash/src/lib.rs:26-31`) does not cover APU/DSP/ARAM, and
   the tap only captures values already computed. `refwork-verify` double-run

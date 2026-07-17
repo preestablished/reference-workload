@@ -101,6 +101,20 @@ in this core. Risk ranking: D8 highest (ENVX decay *timing* — the register
 sound drivers classically poll), then D1-D6 via OUTX values. So these
 fixes are *plausibly* CPU-invisible for this game but not provably so.
 
+> **Correction (2026-07-16):** the claim above that the echo buffer is
+> core-private and NOT ARAM is wrong. `dsp.rs` has a pre-existing echo
+> write into ARAM alongside the in-memory `echo_buf_l/r` write (the write
+> at the echo region, `aram[aram_off_l]`/`aram[aram_off_r]` and their +1
+> byte pairs, immediately after the `echo_buf_l/r` update) — so D9/D10 ARE
+> SPC-visible in principle via that ARAM region, not confined to a
+> core-private array. This is moot in practice for this landing: the
+> determinism epoch cut was operator-approved (see
+> `.agents/decisions/2026-07-16-apu-clock-epoch-cut.md`) and both tracks
+> (Track A DSP fidelity, Track B APU clock) landed together, so the gate
+> question of "does Track A need to land alone" no longer applies. Left
+> here as a rationale correction for anyone re-deriving the visibility
+> analysis later.
+
 **The gate** — one headless replay of the **canonical 45,230-frame
 discovery-01 session** (currently `discovery-01.bak-6` after the
 2026-07-16 rotation; identify by frame/dump count, not name) under the

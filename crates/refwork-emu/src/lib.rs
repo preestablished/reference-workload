@@ -44,7 +44,10 @@ pub const WRAM_INIT_BYTE: u8 = 0x55;
 
 /// Emulator core version string, published in the `meta` region by the
 /// harness (API.md §3.6) and recorded in determinism reports.
-pub const EMU_VERSION: &str = "refwork-emu 0.1.0";
+///
+/// - 0.2.0 = APU clock epoch (2026-07-16 decision; SPC debt-carry + DSP
+///   fidelity fixes).
+pub const EMU_VERSION: &str = "refwork-emu 0.2.0";
 
 /// Nominal sample rate, in Hz, of the stream drained by
 /// [`Core::take_audio_samples`]. Derived from the DSP clock model

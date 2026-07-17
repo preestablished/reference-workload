@@ -31,8 +31,8 @@
 //! master clock is 315/88 MHz ≈ 21.47727 MHz. The exact integer fraction
 //! that minimises drift while staying in integer arithmetic: 1024 / 21477
 //! (where 21477 ≈ 21.477 × 1000). Over one NTSC frame (357,368 master
-//! clocks) this yields ≈ 17,029 SPC cycles, matching the documented
-//! relationship ≈ 1024/21477.
+//! clocks) this yields ≈ 17,038.9 SPC cycles (357,368 × 1024/21477), the
+//! documented relationship.
 //!
 //! ## Memory map
 //!
@@ -62,7 +62,7 @@ use timers::Timer;
 ///
 /// SPC_NUM / SPC_DEN ≈ 1.024 MHz / 21.477 MHz ≈ 1/20.97.
 /// Using 1024 / 21477 keeps the ratio exact enough that over one NTSC frame
-/// (357,368 master clocks) we drain ≈ 17,028 SPC cycles.
+/// (357,368 master clocks) we drain ≈ 17,039 SPC cycles.
 pub const SPC_NUM: u64 = 1024;
 
 /// Denominator for the SPC700 / master-clock ratio (integer accumulator model).
@@ -156,6 +156,10 @@ pub struct Apu {
     /// SPC-cycle accumulator for the integer timing model.
     /// Holds fractional SPC cycles (0..SPC_DEN).
     spc_accum: u64,
+    /// SPC cycles executed beyond a previous call's budget (instruction
+    /// overshoot), repaid by shrinking future budgets. Bounded by the largest
+    /// single step() return (36, the IPL-HLE command step).
+    spc_debt: u64,
     /// DSP sample sub-cycle counter: counts SPC cycles until next sample.
     dsp_cycle_accum: u64,
 }
@@ -242,6 +246,7 @@ impl Apu {
             #[cfg(feature = "introspect")]
             diag_ipl_block_bytes: [0; 8],
             spc_accum: 0,
+            spc_debt: 0,
             dsp_cycle_accum: 0,
         }
     }
@@ -789,13 +794,37 @@ impl Apu {
     ///   SPC cycles to drain = `spc_accum / SPC_DEN`
     ///   `spc_accum %= SPC_DEN`
     ///
+    /// SPC700 instructions execute in whole-cycle steps, so the final step of
+    /// a call can push the cycles actually run past the drained budget. That
+    /// excess is carried forward as `spc_debt` and repaid out of *future*
+    /// budgets (before the step loop runs), rather than being handed to the
+    /// timers/DSP for free. This keeps the long-run SPC rate exactly
+    /// `SPC_NUM/SPC_DEN` of the master clock regardless of call granularity —
+    /// the accumulator model's contract stays true whether a caller advances
+    /// once per frame or once per bus access. `spc_debt` is bounded (see
+    /// `debug_assert!` below): repayment (`repaid = spc_debt.min(spc_to_run)`)
+    /// happens before the step loop runs. FIX5: when `spc_to_run < spc_debt`,
+    /// repayment consumes the entire budget (`spc_to_run` is driven to 0) and
+    /// the step loop is skipped for this call with nonzero *residual* debt
+    /// left over — debt at loop entry is not "always 0" in that case. The
+    /// bound instead holds because the loop only ever *runs* when residual
+    /// debt is exactly 0 (having been fully repaid), so any cycles the loop
+    /// produces start from a zero base; the largest possible overshoot from
+    /// a single call's loop is one step's worth of cycles (36, the IPL-HLE
+    /// command step).
+    ///
     /// The DSP is clocked one sample per `DSP_CLOCKS_PER_SAMPLE` SPC cycles.
     ///
     /// Returns the ApuHalt if a halt condition was reached during advance.
     pub fn advance_master_cycles(&mut self, master_cycles: u64) -> Option<ApuHalt> {
         self.spc_accum += master_cycles * SPC_NUM;
-        let spc_to_run = self.spc_accum / SPC_DEN;
+        let mut spc_to_run = self.spc_accum / SPC_DEN;
         self.spc_accum %= SPC_DEN;
+
+        // Repay overshoot from earlier calls before running new cycles.
+        let repaid = self.spc_debt.min(spc_to_run);
+        self.spc_debt -= repaid;
+        spc_to_run -= repaid;
 
         let mut spc_ran: u64 = 0;
         while spc_ran < spc_to_run {
@@ -822,6 +851,20 @@ impl Apu {
                 self.dsp.step_sample(aram_raw);
             }
         }
+
+        // Carry the final instruction's overshoot into future budgets.
+        // saturating_sub: a halted early-break leaves spc_ran <= spc_to_run -> 0.
+        self.spc_debt += spc_ran.saturating_sub(spc_to_run);
+        // FIX5: the analytical bound on spc_debt is 35 (one step short of
+        // the max single `step()` return of 36 cycles — the overshoot is
+        // at most `step_cycles - 1`). The debug_assert threshold is 64, a
+        // deliberate safety margin above that analytical bound rather than
+        // the bound itself: this assert is a tripwire against a future
+        // change silently widening the max step cost (e.g. a slower
+        // IPL-HLE command or a new instruction timing), not a tight
+        // correctness check — a tight `< 35` would fire on any legitimate
+        // widening before anyone had a chance to update the analysis.
+        debug_assert!(self.spc_debt < 64);
 
         self.halted
     }
@@ -1092,23 +1135,22 @@ mod tests {
         assert!(apu.cpu.pc != 0xFFC0, "IPL ROM should advance PC");
     }
 
-    // ---- Overshoot-leak diagnosis (bug-demonstration tests) ----
+    // ---- Overshoot bound tests (post debt-carry fix) ----
     //
     // `advance_master_cycles` drains whole SPC cycles from the integer
     // accumulator, then steps whole instructions until `spc_ran >=
     // spc_to_run`. The final instruction can push `spc_ran` past
-    // `spc_to_run`; that excess is never subtracted from the next call's
-    // budget, yet it still clocks the timers and the DSP sample
-    // accumulator. One big call overshoots at most once (bounded by one
-    // instruction), but many tiny calls (the `$2140-$2143` catch-up
-    // pattern in bus.rs) overshoot once *per drained call*, inflating the
-    // effective SPC/DSP rate by up to instruction_cycles / spc_to_run.
+    // `spc_to_run`; that excess is carried forward as `spc_debt` and repaid
+    // out of the next call's budget before any further cycles run, so it
+    // never reaches the timers or the DSP sample accumulator for free. One
+    // big call overshoots at most once (bounded by one instruction); many
+    // tiny calls (the `$2140-$2143` catch-up pattern in bus.rs) no longer
+    // compound the overshoot per drained call, because each call's debt is
+    // repaid before it steps a single new instruction.
     //
-    // These tests measure that leak directly. They intentionally PASS
-    // against the current (buggy) behavior so the defect is pinned with
-    // exact numbers; once the overshoot is carried back into the
-    // accumulator, flip the assertions to the "correct clocking" variants
-    // noted inline.
+    // These tests pin the CORRECT post-fix clocking: a single call and a
+    // pathologically chunked sequence over the same span both stay within
+    // one instruction's worth of the exact SPC_NUM/SPC_DEN budget.
 
     /// SPC cycles actually delivered to the timers/DSP by
     /// `advance_master_cycles`, reconstructed from the DSP sample counter
@@ -1143,11 +1185,13 @@ mod tests {
     }
 
     #[test]
-    fn advance_master_cycles_chunked_overshoots_spc_budget() {
+    fn advance_master_cycles_chunked_overshoot_is_bounded() {
         // Same total master cycles, delivered in 30-cycle chunks (the
-        // scale of a per-CPU-access `apu_catch_up`). Every chunk drains
-        // 1-2 SPC cycles of budget but runs one whole 7-cycle HLE step,
-        // so the excess accumulates once per call.
+        // scale of a per-CPU-access `apu_catch_up`). With debt-carry, each
+        // chunk repays the prior call's overshoot before stepping a new
+        // instruction, so only the final call's overshoot survives — the
+        // same one-instruction bound as the single-call test, regardless of
+        // how many calls it took to get there.
         const FRAME_MCLK: u64 = 357_368;
         const CHUNK: u64 = 30;
 
@@ -1163,16 +1207,87 @@ mod tests {
         let budget = spc_cycles_budgeted(&apu, FRAME_MCLK);
         println!(
             "chunked overshoot: budget={budget} SPC cycles, delivered={delivered} \
-             ({:.3}x), excess={}",
-            delivered as f64 / budget as f64,
+             ({} permille), excess={}",
+            delivered * 1000 / budget,
             delivered - budget
         );
         // Correct clocking: delivered - budget <= 6 (one instruction, as in
-        // the single-call test). Current behavior: ~4.9x the budget.
+        // the single-call test) -- the debt-carry model prevents the excess
+        // from compounding across chunks.
         assert!(
-            delivered > budget * 4,
-            "expected the per-call overshoot leak to inflate delivered SPC \
-             cycles well past the budget: delivered={delivered} budget={budget}"
+            delivered >= budget && delivered - budget <= 6,
+            "chunked overshoot must be bounded by one instruction, same as \
+             the single-call case: delivered={delivered} budget={budget}"
+        );
+    }
+
+    #[test]
+    fn advance_master_cycles_chunk_invariant_over_long_run_and_pathological_chunking() {
+        // Debt-carry's core guarantee: over a long run, total SPC cycles
+        // actually executed track the exact SPC_NUM/SPC_DEN budget within
+        // one outstanding debt's worth (<= 35, per the `spc_debt` field's
+        // documented bound), no matter how pathologically the master-cycle
+        // span is chunked into `advance_master_cycles` calls -- including
+        // many single-master-cycle calls, which is the extreme end of the
+        // `$2140-$2143` per-bus-access catch-up pattern this fix targets.
+        const TOTAL_MCLK: u64 = 357_368 * 3; // three NTSC frames
+
+        for &chunk in &[1u64, 2, 3, 7, 30, 4096, 357_368] {
+            let mut apu = Apu::new();
+            let mut advanced = 0u64;
+            while advanced < TOTAL_MCLK {
+                let c = chunk.min(TOTAL_MCLK - advanced);
+                apu.advance_master_cycles(c);
+                advanced += c;
+            }
+
+            let delivered = spc_cycles_delivered(&apu);
+            let budget = spc_cycles_budgeted(&apu, TOTAL_MCLK);
+            assert!(
+                delivered >= budget,
+                "chunk={chunk}: delivered SPC cycles must never fall short \
+                 of the budget: delivered={delivered} budget={budget}"
+            );
+            assert!(
+                delivered - budget <= 35,
+                "chunk={chunk}: outstanding debt exceeded its documented \
+                 bound: delivered={delivered} budget={budget} \
+                 excess={}",
+                delivered - budget
+            );
+        }
+    }
+
+    #[test]
+    fn advance_master_cycles_freezes_debt_and_samples_while_halted() {
+        // Once halted, the step loop breaks before running any instruction
+        // (`if self.halted.is_some() { break; }` precedes `step()`), so a
+        // halted call can only ever repay outstanding debt (never grow it)
+        // and never advances the DSP sample accumulator. Force the halt
+        // directly via the `pub halted` field -- the same state `step()`
+        // sets internally for SLEEP/STOP/test-trigger -- rather than driving
+        // a specific SPC700 opcode sequence to reach it.
+        let mut apu = Apu::new();
+        apu.advance_master_cycles(1000);
+        apu.halted = Some(ApuHalt::Sleep);
+
+        // One halted call fully repays any debt outstanding from the prior
+        // (non-halted) run, since repayment is unconditional and precedes
+        // the loop, and this call's own spc_to_run comfortably exceeds the
+        // <= 35 debt bound. From here, debt is stable at 0.
+        apu.advance_master_cycles(21_477);
+        let debt_before = apu.spc_debt;
+        let samples_before = apu.dsp.sample_count;
+
+        apu.advance_master_cycles(357_368); // one more full frame, still halted
+
+        assert_eq!(
+            apu.spc_debt, debt_before,
+            "spc_debt must not change across a halted advance"
+        );
+        assert_eq!(
+            apu.dsp.sample_count, samples_before,
+            "no DSP samples should be produced while halted"
         );
     }
 
@@ -1269,11 +1384,13 @@ mod tests {
             assert!(n1 > 0, "expected some pairs to have been produced");
         }
 
-        // ---- Overshoot-leak sample-count tests (bug demonstration) ----
+        // ---- Chunk-invariant sample-count tests (post debt-carry fix) ----
         //
         // Companions to the SPC-budget tests in the parent module: measure
-        // the same instruction-granularity overshoot leak at the level the
-        // symptom was observed — drained stereo pairs.
+        // chunk-size independence at the level the original overshoot-leak
+        // symptom was observed — drained stereo pairs. With debt-carry, the
+        // pair count is invariant (within one instruction's worth of
+        // samples) to how the same total master-cycle span is chunked.
 
         /// Drain everything currently queued, returning pairs drained.
         fn drain_all_pairs(apu: &mut Apu) -> u64 {
@@ -1311,11 +1428,11 @@ mod tests {
         }
 
         #[test]
-        fn sample_count_depends_on_advance_chunk_size() {
+        fn sample_count_independent_of_advance_chunk_size() {
             // Identical Apus, identical total master cycles; only the call
-            // granularity differs. With correct clocking the two pair
-            // counts would differ by at most 1; the overshoot leak makes
-            // the chunked one ~4.9x larger.
+            // granularity differs. Debt-carry keeps the two pair counts
+            // within one instruction's worth of samples of each other,
+            // regardless of chunking.
             const FRAME_MCLK: u64 = 357_368; // one NTSC frame
 
             let mut single = Apu::new();
@@ -1327,14 +1444,14 @@ mod tests {
 
             println!(
                 "one frame ({FRAME_MCLK} mclk): single-call={single_pairs} pairs, \
-                 30-cycle chunks={chunked_pairs} pairs ({:.3}x)",
-                chunked_pairs as f64 / single_pairs as f64
+                 30-cycle chunks={chunked_pairs} pairs ({} permille)",
+                chunked_pairs * 1000 / single_pairs
             );
-            // Correct clocking: chunked_pairs.abs_diff(single_pairs) <= 1.
             assert!(
-                chunked_pairs > single_pairs * 2,
-                "chunk-size dependence demonstrates the overshoot leak: \
-                 single={single_pairs} chunked={chunked_pairs}"
+                chunked_pairs.abs_diff(single_pairs) <= 1,
+                "chunked and single-call pair counts should match within one \
+                 instruction's worth of samples: single={single_pairs} \
+                 chunked={chunked_pairs}"
             );
         }
 
@@ -1356,18 +1473,17 @@ mod tests {
 
             println!(
                 "one second ({ONE_SECOND_MCLK} mclk): single-call={single_pairs} pairs, \
-                 30-cycle chunks={chunked_pairs} pairs ({:.3}x)",
-                chunked_pairs as f64 / single_pairs as f64
+                 30-cycle chunks={chunked_pairs} pairs ({} permille)",
+                chunked_pairs * 1000 / single_pairs
             );
             assert_eq!(
                 single_pairs, 32_000,
                 "single-call rate should be exactly 32 kHz for one second"
             );
-            // Correct clocking: chunked_pairs.abs_diff(32_000) <= 1.
             assert!(
-                chunked_pairs > 150_000,
-                "expected the overshoot leak to inflate the chunked rate to \
-                 ~156k pairs/s; got {chunked_pairs}"
+                chunked_pairs.abs_diff(32_000) <= 1,
+                "chunked rate should also be ~32 kHz for one second, \
+                 regardless of call granularity; got {chunked_pairs}"
             );
         }
     }
