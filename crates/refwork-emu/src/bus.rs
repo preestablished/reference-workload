@@ -67,6 +67,10 @@ pub struct SysBus {
     pub hdma: Hdma,
     /// HDMA enable register ($420C): bitmask of channels running this frame.
     pub hdmaen: u8,
+    /// Channels whose HDMA table hit its terminator this frame. A mid-frame
+    /// `$420C` enable cannot resurrect them (hardware/snes9x: `HDMA = value
+    /// & !HDMAEnded`); cleared by `init_hdma` at the start of each frame.
+    pub hdma_ended: u8,
     pub joypad: Joypad,
 
     /// Master clocks elapsed since the start of the current frame.
@@ -164,6 +168,7 @@ impl SysBus {
             dma: Dma::new(),
             hdma: Hdma::new(),
             hdmaen: 0,
+            hdma_ended: 0,
             joypad: Joypad::new(),
 
             mclk_frame: 0,
@@ -470,6 +475,9 @@ impl SysBus {
     ///
     /// `a_read` is called for each table-byte fetch (A-bus, no B-bus traffic).
     pub fn init_hdma(&mut self) {
+        // Frame boundary: terminated channels become re-enableable again
+        // (snes9x clears HDMAEnded in S9xStartHDMA).
+        self.hdma_ended = 0;
         for ch_idx in 0..8usize {
             if self.hdmaen & (1 << ch_idx) == 0 {
                 self.hdma.state[ch_idx] = HdmaState::default(); // inactive
@@ -500,7 +508,10 @@ impl SysBus {
         self.dma.ch[ch_idx].ntrl = ntrl_byte;
 
         if ntrl_byte == 0 {
-            // Terminator entry: channel is done for this frame.
+            // Terminator entry: channel is done for this frame. Record it so
+            // a mid-frame $420C re-enable cannot resurrect the channel with
+            // ntrl=0 (which would wrap 0->0xFF and stream garbage).
+            self.hdma_ended |= 1 << ch_idx;
             return HdmaState {
                 active: false,
                 do_transfer: false,
@@ -1289,8 +1300,35 @@ impl Bus for SysBus {
                     }
 
                     // $420C: HDMAEN — store enable mask; HDMA runs each scanline.
+                    //
+                    // Channels newly set MID-FRAME activate immediately and
+                    // resume with their current (game-staged) A2A/NTRL/DAS —
+                    // no re-initialization, per hardware and snes9x
+                    // (`PPU.HDMA = value & ~HDMAEnded`; games stage channel
+                    // state via the writable $43x8-$43xA). First service is
+                    // the next line's execute_hdma — ~1 line later than real
+                    // hardware's same-line HDMA point, a documented
+                    // line-granularity simplification. Channels whose table
+                    // terminated this frame stay dead until the next frame's
+                    // init_hdma. Cleared channels stop via the mask check in
+                    // execute_hdma with state retained, so re-enabling
+                    // resumes where they left off.
                     0x420C => {
+                        let newly = value & !self.hdmaen & !self.hdma_ended;
                         self.hdmaen = value;
+                        for ch_idx in 0..8usize {
+                            if newly & (1 << ch_idx) != 0 {
+                                // Never-inited channels carry the default
+                                // state (do_transfer=false), matching
+                                // snes9x's DoTransfer=FALSE for channels
+                                // disabled at frame init; cleared-then-
+                                // re-enabled channels still have
+                                // active=true and keep their in-flight
+                                // do_transfer (repeat-mode resume) — only
+                                // `active` is ever touched here.
+                                self.hdma.state[ch_idx].active = true;
+                            }
+                        }
                     }
 
                     // $420D: MEMSEL.
@@ -1855,5 +1893,112 @@ mod tests {
         assert_eq!(&bus.wram[0..2], &[0xAA, 0xBB]);
         assert_eq!(bus.dma.ch[0].das, 0x2002);
         assert!(!bus.hdma.state[0].active);
+    }
+
+    // ---- Mid-frame $420C enable (resume semantics; snes9x-verified) ----
+    //
+    // A mid-frame enable activates a channel WITHOUT re-initialization:
+    // the game stages A2A/NTRL itself via the writable $43x8-$43xA.
+    // Reference: snes9x ppu.cpp $420C = `HDMA = value & ~HDMAEnded`.
+
+    #[test]
+    fn hdma_midframe_enable_with_staged_primer() {
+        // Mask 0 at frame init; game stages A2A=table, NTRL=1 (the classic
+        // primer: decrement 1->0 at the first serviced line loads the first
+        // entry; data transfers on the line after).
+        let mut bus = make_hdma_bus(&[0x03, 0xAA, 0x00]);
+        bus.hdmaen = 0;
+        bus.init_hdma();
+        bus.execute_hdma();
+        bus.execute_hdma();
+        assert_eq!(bus.wmadd, 0, "disabled channel must not transfer");
+
+        bus.write(0x004308, 0x00); // A2A low
+        bus.write(0x004309, 0x10); // A2A high -> $1000
+        bus.write(0x00430A, 0x01); // NTRL primer
+        bus.write(0x00420C, 0x01); // mid-frame enable
+        assert!(bus.hdma.state[0].active, "enable must activate the channel");
+        assert_eq!(bus.wmadd, 0, "no transfer at the write itself");
+
+        bus.execute_hdma(); // primer line: 1->0, loads the entry
+        assert_eq!(bus.wmadd, 0, "primer line must not transfer data");
+        bus.execute_hdma(); // first data line
+        assert_eq!(bus.wram[0], 0xAA);
+        assert_eq!(bus.wmadd, 1, "entry data transfers one line after enable+primer");
+    }
+
+    #[test]
+    fn hdma_cleared_then_reenabled_resumes() {
+        // Repeat entry: one byte per line. Clearing the mask mid-entry
+        // freezes the channel (state retained); re-enabling resumes exactly
+        // where it left off — it must NOT restart from A1T.
+        let mut bus = make_hdma_bus(&[0x84, 0xAA, 0xBB, 0xCC, 0xDD, 0x00]);
+        bus.init_hdma();
+        bus.execute_hdma();
+        assert_eq!(&bus.wram[0..1], &[0xAA]);
+
+        bus.write(0x00420C, 0x00); // clear mid-entry
+        let ntrl_frozen = bus.dma.ch[0].ntrl;
+        bus.execute_hdma();
+        bus.execute_hdma();
+        assert_eq!(bus.wmadd, 1, "cleared channel must not transfer");
+        assert_eq!(bus.dma.ch[0].ntrl, ntrl_frozen, "counter must freeze");
+
+        bus.write(0x00420C, 0x01); // re-enable
+        bus.execute_hdma();
+        assert_eq!(
+            &bus.wram[0..2],
+            &[0xAA, 0xBB],
+            "resume must continue mid-entry (repeat do_transfer preserved), not restart at A1T"
+        );
+    }
+
+    #[test]
+    fn hdma_midframe_enable_resumes_from_staged_a2a() {
+        // Two 1-line entries; the game stages A2A at the SECOND entry.
+        // Under (wrong) init-at-enable semantics A2A would reset to A1T and
+        // 0xAA would appear; correct resume semantics play 0xBB only.
+        let mut bus = make_hdma_bus(&[0x01, 0xAA, 0x01, 0xBB, 0x00]);
+        bus.hdmaen = 0;
+        bus.init_hdma();
+
+        bus.write(0x004308, 0x02); // A2A -> $1002 (second entry)
+        bus.write(0x004309, 0x10);
+        bus.write(0x00430A, 0x01); // primer
+        bus.write(0x00420C, 0x01);
+
+        bus.execute_hdma(); // primer -> loads entry at $1002
+        bus.execute_hdma(); // transfers its data byte
+        assert_eq!(bus.wram[0], 0xBB, "must transfer from staged A2A entry");
+        assert_eq!(bus.wmadd, 1);
+        assert_ne!(bus.wram[0], 0xAA, "A1T entry data must never appear");
+    }
+
+    #[test]
+    fn hdma_terminated_channel_stays_dead_on_reenable() {
+        // After the table terminator, a same-frame $420C re-enable must not
+        // resurrect the channel (ntrl=0 would wrap 0->0xFF and stream
+        // garbage). The next frame's init_hdma revives it normally.
+        let mut bus = make_hdma_bus(&[0x01, 0xAA, 0x00]);
+        bus.init_hdma();
+        bus.execute_hdma(); // transfers 0xAA, exhausts entry, loads terminator
+        assert!(!bus.hdma.state[0].active);
+        assert_eq!(bus.hdma_ended, 0x01, "terminator must record the channel");
+        assert_eq!(bus.wmadd, 1);
+
+        bus.write(0x00420C, 0x00);
+        bus.write(0x00420C, 0x01); // attempted same-frame resurrection
+        assert!(!bus.hdma.state[0].active, "ended channel must stay dead");
+        for _ in 0..3 {
+            bus.execute_hdma();
+        }
+        assert_eq!(bus.wmadd, 1, "no post-terminator garbage transfers");
+        assert_eq!(bus.dma.ch[0].ntrl, 0, "ntrl must not wrap");
+
+        bus.init_hdma(); // next frame
+        assert_eq!(bus.hdma_ended, 0, "frame init clears the ended mask");
+        assert!(bus.hdma.state[0].active, "init revives the channel");
+        bus.execute_hdma();
+        assert_eq!(bus.wmadd, 2, "channel transfers again after frame init");
     }
 }
