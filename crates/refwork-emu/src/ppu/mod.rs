@@ -1316,7 +1316,16 @@ impl Ppu {
             }
         }
 
-        let final_color = if do_math && !main_is_backdrop {
+        // Hardware applies color math to the main-screen backdrop exactly
+        // like any layer, gated by CGADSUB bit 5 (which every call site
+        // already passes as `math_enabled` for backdrop pixels) — there is
+        // no backdrop exclusion. snes9x drives backdrop through the same
+        // math-op table as tiles (DrawBackdropMath), including halving.
+        #[cfg(not(feature = "introspect"))]
+        {
+            let _ = main_is_backdrop;
+        }
+        let final_color = if do_math {
             // Determine sub-screen color operand.
             let use_subscreen = (cgwsel & 0x02) != 0;
             let sub_is_transparent = matches!(sub_color, PixelColor::Cgram(0));
@@ -3645,5 +3654,61 @@ mod ppu_tests {
             0,
             "counter_latched should clear after $213F read"
         );
+    }
+
+    /// CGADSUB bit 5: the main-screen BACKDROP participates in color math
+    /// like any layer (hardware; snes9x DrawBackdropMath). Red backdrop,
+    /// subtract fixed-color white => black.
+    #[test]
+    fn ppu_backdrop_color_math_subtract_applies() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none()); // full brightness
+        assert!(p.write(0x2C, 0x00).is_none()); // TM: no layers -> backdrop
+        assert!(p.write(0x30, 0x00).is_none()); // fixed-color operand
+        assert!(p.write(0x31, 0xA0).is_none()); // subtract | backdrop enable
+        // CGRAM color 0 = pure red (0x001F).
+        assert!(p.write(0x21, 0).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+        // COLDATA: all channels, intensity 31 (white).
+        assert!(p.write(0x32, 0xFF).is_none());
+        p.render_scanline(1);
+        assert_eq!(p.back[0], 0, "blue");
+        assert_eq!(p.back[1], 0, "green");
+        assert_eq!(p.back[2], 0, "red: 31 - 31 = 0");
+    }
+
+    /// CGADSUB bit 5 clear: backdrop stays outside color math.
+    #[test]
+    fn ppu_backdrop_color_math_gated_by_bit5() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none());
+        assert!(p.write(0x2C, 0x00).is_none());
+        assert!(p.write(0x30, 0x00).is_none());
+        assert!(p.write(0x31, 0x80).is_none()); // subtract, backdrop NOT enabled
+        assert!(p.write(0x21, 0).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+        assert!(p.write(0x32, 0xFF).is_none());
+        p.render_scanline(1);
+        assert_eq!(p.back[2], 255, "red backdrop unmodified when bit5 clear");
+    }
+
+    /// Half-math applies to the backdrop like any layer (snes9x halves
+    /// backdrop through the same op table): red + 0, halved => 5-bit 15.
+    #[test]
+    fn ppu_backdrop_color_math_half_applies() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none());
+        assert!(p.write(0x2C, 0x00).is_none());
+        assert!(p.write(0x30, 0x00).is_none());
+        assert!(p.write(0x31, 0x60).is_none()); // add | half | backdrop
+        assert!(p.write(0x21, 0).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+        // COLDATA left at 0: (31 + 0) / 2 = 15.
+        p.render_scanline(1);
+        assert_eq!(p.back[2], 123, "red: 5-bit 15 -> 8-bit 123");
+        assert_eq!(p.back[1], 0, "green");
     }
 }
