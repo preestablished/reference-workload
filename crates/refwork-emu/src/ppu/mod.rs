@@ -40,23 +40,16 @@ use sprite::{render_sprite_line, SpritePixel};
 
 /// Compute a single window's 256-pixel active mask.
 /// Returns a bitmask array where `mask[x] = 1` means the window covers pixel x.
-/// Window is active for pixels in the range [left, right] (inclusive, wrapping u8).
+/// Window is active for pixels in the range [left, right] (inclusive). A
+/// degenerate range (left > right) is an EMPTY window (no pixels active) —
+/// hardware does not wrap it.
 #[inline]
 fn window_range_mask(left: u8, right: u8, out: &mut [u8; 256]) {
     for x in 0u8..=255 {
-        out[x as usize] = if left <= right {
-            if x >= left && x <= right {
-                1
-            } else {
-                0
-            }
+        out[x as usize] = if left <= right && x >= left && x <= right {
+            1
         } else {
-            // Wrapped range: active outside the gap
-            if x >= left || x <= right {
-                1
-            } else {
-                0
-            }
+            0
         };
     }
 }
@@ -833,8 +826,9 @@ impl Ppu {
             0x2F => self.tsw = value,
 
             // ── $2130 CGWSEL ───────────────────────────────────
-            // Bits [7:6]: color-math window clip region (0=never,1=in-win,2=out-win,3=always)
-            // Bits [5:4]: color-math enabled region (same encoding)
+            // Bits [7:6]: color-math window clip region (0=never,1=out-win,2=in-win,3=always)
+            // Bits [5:4]: color-math enabled region (0=always,1=in-win,2=out-win,3=never —
+            //   asymmetric vs bits [7:6])
             // Bit 1: sub-screen BG/OBJ enable (0=fixed color only, 1=sub-screen layers)
             // Bit 0 selects direct color for eligible BG1 modes.
             0x30 => self.cgwsel = value,
@@ -894,10 +888,10 @@ impl Ppu {
     ///   bits [7:6] = W2 BG2: bit6=invert, bit7=enable
     /// W34SEL ($2124) same layout for BG3/BG4.
     /// WOBJSEL ($2125):
-    ///   bits [1:0] = W1 OBJ: bit0=enable, bit1=invert
-    ///   bits [3:2] = W2 OBJ: bit2=enable, bit3=invert
-    ///   bits [5:4] = W1 COL: bit4=enable, bit5=invert  (color-math window)
-    ///   bits [7:6] = W2 COL: bit6=enable, bit7=invert
+    ///   bits [1:0] = W1 OBJ: bit0=invert, bit1=enable
+    ///   bits [3:2] = W2 OBJ: bit2=invert, bit3=enable
+    ///   bits [5:4] = W1 COL: bit4=invert, bit5=enable  (color-math window)
+    ///   bits [7:6] = W2 COL: bit6=invert, bit7=enable
     ///
     /// WBGLOG ($212A): BG1/2/3/4 combination ops; WOBJLOG ($212B): OBJ/COL ops.
     /// TMW ($212E): main-screen window mask enable per layer.
@@ -1263,7 +1257,8 @@ impl Ppu {
         math_enabled: bool,
     ) {
         // CGWSEL bits [7:6]: clip color to black (main screen clip region).
-        //   0=never clip, 1=clip inside windows, 2=clip outside windows, 3=always
+        //   0=never clip, 1=clip outside windows, 2=clip inside windows, 3=always
+        //   (asymmetric vs bits [5:4] below).
         // CGWSEL bits [5:4]: color math enable region.
         //   0=always, 1=inside windows, 2=outside windows, 3=never
         // CGWSEL bit 1: sub-screen BG/OBJ enable. When clear, the color-math
@@ -1289,8 +1284,8 @@ impl Ppu {
         let in_clip_window = self.math_win_mask[x];
         let clip_main = match clip_region {
             0 => false,
-            1 => in_clip_window != 0,
-            2 => in_clip_window == 0,
+            1 => in_clip_window == 0, // clip OUTSIDE the color window
+            2 => in_clip_window != 0, // clip INSIDE the color window
             3 => true,
             _ => false,
         };
@@ -1335,7 +1330,10 @@ impl Ppu {
             };
 
             let add = (cgadsub & 0x80) == 0; // bit7=0 → add, bit7=1 → sub
-            let half = (cgadsub & 0x40) != 0 && !(use_subscreen && sub_is_transparent);
+            // Hardware disables halving when the main pixel was clipped to
+            // black (bsnes windowAbove gate).
+            let half =
+                (cgadsub & 0x40) != 0 && !(use_subscreen && sub_is_transparent) && !clip_main;
             color_math_op(main_r, main_g, main_b, sub_r, sub_g, sub_b, add, half)
         } else {
             // No math: use raw main color
@@ -3394,14 +3392,14 @@ mod ppu_tests {
         }
     }
 
-    /// window_range_mask: wrapped range (left > right → outside the gap is active).
+    /// window_range_mask: degenerate range (left > right) is an EMPTY window —
+    /// hardware does not wrap it (no pixels active).
     #[test]
-    fn window_range_mask_wrapped() {
+    fn window_range_mask_degenerate_is_empty() {
         let mut mask = [0u8; 256];
         window_range_mask(250, 5, &mut mask);
         for (x, &m) in mask.iter().enumerate() {
-            let expected = if x >= 250 || x <= 5 { 1 } else { 0 };
-            assert_eq!(m, expected, "pixel {x}");
+            assert_eq!(m, 0, "pixel {x}: degenerate window must be empty");
         }
     }
 
@@ -3465,6 +3463,127 @@ mod ppu_tests {
         assert_eq!(p.back[0], 0, "blue");
         assert_eq!(p.back[1], 0, "green");
         assert_eq!(p.back[2], 255, "red");
+    }
+
+    /// CGWSEL bits [7:6] clip region = 1: clip OUTSIDE the color window
+    /// (hardware encoding; asymmetric vs the math-enable region in bits
+    /// [5:4]). Opaque BG1 red pixel, uniform across the line (same tile
+    /// setup as `ppu_cgwsel_fixed_color_ignores_enabled_subscreen_layer`).
+    /// Color window W1 = [100,150]. Pixel inside the window must NOT be
+    /// clipped; pixel outside must be clipped to black.
+    #[test]
+    fn ppu_cgwsel_clip_region_1_clips_outside_color_window() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none()); // full brightness, no force blank
+        assert!(p.write(0x05, 0x00).is_none()); // BG mode 0
+        assert!(p.write(0x07, 0x00).is_none()); // BG1SC base 0
+        assert!(p.write(0x0B, 0x01).is_none()); // BG1 char base = 0x1000 words
+        assert!(p.write(0x2C, 0x01).is_none()); // TM: BG1 main-screen enable
+        assert!(p.write(0x26, 100).is_none()); // WH0 = 100
+        assert!(p.write(0x27, 150).is_none()); // WH1 = 150 (W1 = [100,150])
+        assert!(p.write(0x25, 0x20).is_none()); // WOBJSEL: W1 COL enable, not inverted
+        assert!(p.write(0x30, 0x70).is_none()); // CGWSEL: clip=1(out), math-enable=3(never)
+
+        p.vram[0] = 0x00;
+        p.vram[1] = 0x00;
+        p.vram[0x2000] = 0xFF;
+        p.vram[0x2001] = 0x00;
+
+        assert!(p.write(0x21, 1).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+
+        p.render_scanline(1);
+
+        // x=125: inside the color window → region 1 does NOT clip → red.
+        assert_eq!(p.back[500], 0, "x=125 blue");
+        assert_eq!(p.back[501], 0, "x=125 green");
+        assert_eq!(p.back[502], 255, "x=125 red");
+        assert_eq!(p.back[503], 0, "x=125 alpha");
+
+        // x=10: outside the color window → region 1 DOES clip → black.
+        assert_eq!(p.back[40], 0, "x=10 blue");
+        assert_eq!(p.back[41], 0, "x=10 green");
+        assert_eq!(p.back[42], 0, "x=10 red");
+        assert_eq!(p.back[43], 0, "x=10 alpha");
+    }
+
+    /// CGWSEL bits [7:6] clip region = 2: clip INSIDE the color window.
+    /// Same scene as region 1 above, only CGWSEL's clip-region field
+    /// differs; the inside/outside expectations invert.
+    #[test]
+    fn ppu_cgwsel_clip_region_2_clips_inside_color_window() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none());
+        assert!(p.write(0x05, 0x00).is_none());
+        assert!(p.write(0x07, 0x00).is_none());
+        assert!(p.write(0x0B, 0x01).is_none());
+        assert!(p.write(0x2C, 0x01).is_none());
+        assert!(p.write(0x26, 100).is_none());
+        assert!(p.write(0x27, 150).is_none());
+        assert!(p.write(0x25, 0x20).is_none());
+        assert!(p.write(0x30, 0xB0).is_none()); // CGWSEL: clip=2(in), math-enable=3(never)
+
+        p.vram[0] = 0x00;
+        p.vram[1] = 0x00;
+        p.vram[0x2000] = 0xFF;
+        p.vram[0x2001] = 0x00;
+
+        assert!(p.write(0x21, 1).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+
+        p.render_scanline(1);
+
+        // x=125: inside the color window → region 2 DOES clip → black.
+        assert_eq!(p.back[500], 0, "x=125 blue");
+        assert_eq!(p.back[501], 0, "x=125 green");
+        assert_eq!(p.back[502], 0, "x=125 red");
+        assert_eq!(p.back[503], 0, "x=125 alpha");
+
+        // x=10: outside the color window → region 2 does NOT clip → red.
+        assert_eq!(p.back[40], 0, "x=10 blue");
+        assert_eq!(p.back[41], 0, "x=10 green");
+        assert_eq!(p.back[42], 255, "x=10 red");
+        assert_eq!(p.back[43], 0, "x=10 alpha");
+    }
+
+    /// Half-math must not apply to a pixel clipped to black by CGWSEL's
+    /// clip region (bsnes windowAbove gate). Main pixel is a non-backdrop
+    /// opaque BG1 pixel (the math branch is gated `do_math &&
+    /// !main_is_backdrop`; a backdrop pixel never reaches halving and the
+    /// test would be vacuous). CGADSUB: add + half + BG1 participates;
+    /// CGWSEL: fixed-color sub operand, clip-always, math-enable-always.
+    #[test]
+    fn ppu_cgadsub_half_math_suppressed_when_main_clipped() {
+        let mut p = make_ppu();
+        assert!(p.write(0x00, 0x0F).is_none()); // full brightness, no force blank
+        assert!(p.write(0x05, 0x00).is_none()); // BG mode 0
+        assert!(p.write(0x07, 0x00).is_none()); // BG1SC base 0
+        assert!(p.write(0x0B, 0x01).is_none()); // BG1 char base = 0x1000 words
+        assert!(p.write(0x2C, 0x01).is_none()); // TM: BG1 main-screen enable
+        assert!(p.write(0x30, 0xC0).is_none()); // CGWSEL: clip=3(always), math-enable=0(always)
+        assert!(p.write(0x31, 0x41).is_none()); // CGADSUB: add, half, BG1 participates
+        assert!(p.write(0x32, (1 << 5) | 20).is_none()); // COLDATA R=20
+
+        p.vram[0] = 0x00;
+        p.vram[1] = 0x00;
+        p.vram[0x2000] = 0xFF;
+        p.vram[0x2001] = 0x00;
+
+        assert!(p.write(0x21, 1).is_none());
+        assert!(p.write(0x22, 0x1F).is_none());
+        assert!(p.write(0x22, 0x00).is_none());
+
+        p.render_scanline(1);
+
+        // Main pixel is clipped to black; math still applies (fixed-color
+        // add), but hardware suppresses halving on a clipped main pixel:
+        // 0 + 20 = 20, NOT halved to 10.
+        assert_eq!(p.back[0], 0, "blue");
+        assert_eq!(p.back[1], 0, "green");
+        assert_eq!(p.back[2], 165, "red (un-halved 20, not halved 10)");
+        assert_eq!(p.back[3], 0, "alpha");
     }
 
     /// COLDATA component write: each plane independently settable.

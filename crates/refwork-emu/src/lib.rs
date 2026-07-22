@@ -49,7 +49,8 @@ pub const WRAM_INIT_BYTE: u8 = 0x55;
 ///   fidelity fixes).
 /// - 0.2.1 = HDMA mid-frame enable (same 2026-07-16 epoch, still
 ///   pre-re-baseline; disambiguates recordings made under 0.2.0).
-pub const EMU_VERSION: &str = "refwork-emu 0.2.1";
+/// - 0.2.2 = CGWSEL clip-region + window semantics (same 2026-07-16 epoch).
+pub const EMU_VERSION: &str = "refwork-emu 0.2.2";
 
 /// Nominal sample rate, in Hz, of the stream drained by
 /// [`Core::take_audio_samples`]. Derived from the DSP clock model
