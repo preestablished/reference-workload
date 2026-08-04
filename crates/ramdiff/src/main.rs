@@ -139,6 +139,10 @@ fn usage() {
     println!("         [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)");
     #[cfg(feature = "interactive")]
     println!("         [--no-audio]   (interactive; skip audio playback entirely)");
+    #[cfg(feature = "interactive")]
+    println!(
+        "         [--stats]   (interactive; periodic fps/audio diagnostics on stderr)"
+    );
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -173,6 +177,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     let mut gamepad: Option<std::path::PathBuf> = None;
     let mut pad_debug = false;
     let mut no_audio = false;
+    let mut stats = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -233,6 +238,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             "--no-audio" => {
                 no_audio = true;
             }
+            "--stats" => {
+                stats = true;
+            }
             other => {
                 return Err(format!("record: unknown option {:?}", other));
             }
@@ -257,6 +265,7 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             gamepad,
             pad_debug,
             no_audio,
+            stats,
         });
     }
 
@@ -274,6 +283,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
     }
     if no_audio {
         return Err("record: --no-audio requires --interactive".to_owned());
+    }
+    if stats {
+        return Err("record: --stats requires --interactive".to_owned());
     }
 
     let rom = rom.ok_or_else(|| "record: --rom is required".to_owned())?;
@@ -640,6 +652,36 @@ mod tests {
             "/tmp/ramdiff-pad-debug-test-interactive".to_owned(),
             "--interactive".to_owned(),
             "--pad-debug".to_owned(),
+        ];
+        let err = cmd_record(&args).unwrap_err();
+        assert!(err.contains("--rom is required"), "err: {}", err);
+    }
+
+    /// `--stats` is interactive-only, mirroring `--pad-debug`.
+    #[test]
+    fn stats_requires_interactive() {
+        let args = vec![
+            "--session".to_owned(),
+            "/tmp/ramdiff-stats-test-not-interactive".to_owned(),
+            "--stats".to_owned(),
+        ];
+        let err = cmd_record(&args).unwrap_err();
+        assert!(
+            err.contains("--stats requires --interactive"),
+            "err: {}",
+            err
+        );
+    }
+
+    /// Smoke-parse: with `--interactive` present, `--stats` must be
+    /// recognized and control must reach the `--rom is required` check.
+    #[test]
+    fn stats_parses_under_interactive() {
+        let args = vec![
+            "--session".to_owned(),
+            "/tmp/ramdiff-stats-test-interactive".to_owned(),
+            "--interactive".to_owned(),
+            "--stats".to_owned(),
         ];
         let err = cmd_record(&args).unwrap_err();
         assert!(err.contains("--rom is required"), "err: {}", err);

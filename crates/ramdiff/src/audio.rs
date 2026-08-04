@@ -42,6 +42,12 @@
 //!   recovered through the slow slew. The producer-side watermark
 //!   ([`apply_watermark`]) stays as a hard backstop for producer bursts the
 //!   loop cannot absorb.
+//! - **Diagnostics are counted here, reported by the caller**: the sink
+//!   tracks re-primes ([`AudioSink::reprimes`]) and queue depth
+//!   ([`AudioSink::depth_ms`], [`AudioSink::take_min_depth_ms`]) but never
+//!   prints — `record.rs::run_interactive` owns the (rate-limited) stderr
+//!   messaging, because only the frame loop knows whether a drain was an
+//!   unexplained stall or the expected aftermath of the blocking F5 prompt.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,6 +99,19 @@ struct DeviceState {
     depth_target: usize,
     /// Count of watermark-trim events (not samples) since the sink opened.
     watermark_drops: u64,
+    /// Device sample rate, kept for depth-in-samples → milliseconds
+    /// conversion in the diagnostics accessors.
+    device_rate: u32,
+    /// Count of empty-queue re-prime events since the sink opened.
+    reprimes: u64,
+    /// Queue depth at the end of the most recent `push` (post-extend/trim).
+    /// Cached so diagnostics never take an extra queue lock — the realtime
+    /// callback's `try_lock` must stay uncontended by stats reads.
+    last_depth: usize,
+    /// Minimum *pre-prime* depth observed since the last
+    /// [`AudioSink::take_min_depth_ms`] — read before `ensure_primed` runs,
+    /// so a full drain records as 0 rather than being masked by the refill.
+    min_depth: usize,
 }
 
 impl AudioSink {
@@ -142,21 +161,20 @@ impl AudioSink {
         // live loop stalled, e.g. blocked on the F5 dump prompt while the
         // device kept consuming) is re-primed with silence in one step: the
         // ±0.5% slew authority would otherwise take many seconds to rebuild
-        // the cushion, crackling the whole way.
-        let (depth, reprimed) = {
+        // the cushion, crackling the whole way. Reporting is the caller's
+        // job (see the module doc); here we only count.
+        let (raw_depth, depth, reprimed) = {
             let mut queue = device
                 .queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let raw_depth = queue.len();
             let reprimed = ensure_primed(&mut queue, device.depth_target);
-            (queue.len(), reprimed)
+            (raw_depth, queue.len(), reprimed)
         };
+        device.min_depth = device.min_depth.min(raw_depth);
         if reprimed {
-            eprintln!(
-                "interactive: audio queue drained (stalled frame loop?) — re-primed with \
-                 {}ms of silence",
-                LOW_WATERMARK_MS
-            );
+            device.reprimes += 1;
         }
         let target = device.depth_target as f64;
         let error = (target - depth as f64) / target; // >0 when queue is low
@@ -169,14 +187,17 @@ impl AudioSink {
             return;
         }
 
-        let dropped = {
+        let (dropped, depth_after) = {
             let mut queue = device
                 .queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             queue.extend(self.scratch.iter().copied());
-            apply_watermark(&mut queue, device.high_watermark, device.low_watermark)
+            let dropped =
+                apply_watermark(&mut queue, device.high_watermark, device.low_watermark);
+            (dropped, queue.len())
         };
+        device.last_depth = depth_after;
         if dropped > 0 {
             device.watermark_drops += 1;
         }
@@ -199,6 +220,35 @@ impl AudioSink {
     /// Intended for a shutdown diagnostic; see `record.rs::run_interactive`.
     pub fn watermark_drops(&self) -> u64 {
         self.device.as_ref().map_or(0, |d| d.watermark_drops)
+    }
+
+    /// Count of empty-queue re-prime events since the sink opened (0 if
+    /// disabled). The caller detects new drains by diffing this across a
+    /// frame's `push` calls; see `record.rs::run_interactive`.
+    pub fn reprimes(&self) -> u64 {
+        self.device.as_ref().map_or(0, |d| d.reprimes)
+    }
+
+    /// Queue depth (milliseconds of audio) at the end of the most recent
+    /// `push`. `None` when there is no backing device. Cached — never takes
+    /// the queue lock.
+    pub fn depth_ms(&self) -> Option<u32> {
+        self.device
+            .as_ref()
+            .map(|d| sample_count_to_ms(d.last_depth, d.device_rate, QUEUE_CHANNELS))
+    }
+
+    /// Minimum pre-prime queue depth (milliseconds) observed since the last
+    /// call, then reset to the current depth. A window that contained a full
+    /// drain reads 0 here even though the re-prime refilled the queue —
+    /// that is the point (the post-refill depth alone would hide the stall).
+    /// `None` when there is no backing device.
+    pub fn take_min_depth_ms(&mut self) -> Option<u32> {
+        self.device.as_mut().map(|d| {
+            let min = sample_count_to_ms(d.min_depth, d.device_rate, QUEUE_CHANNELS);
+            d.min_depth = d.last_depth;
+            min
+        })
     }
 }
 
@@ -286,6 +336,13 @@ fn try_open() -> Result<AudioSink, String> {
             low_watermark,
             depth_target: low_watermark,
             watermark_drops: 0,
+            device_rate,
+            reprimes: 0,
+            // Both start at the primed depth: `last_depth` is what the queue
+            // actually holds right now, and `min_depth` must not report a
+            // fake 0 before the first push.
+            last_depth: low_watermark,
+            min_depth: low_watermark,
         }),
     })
 }
@@ -389,6 +446,14 @@ fn write_frame_f32(frame: &mut [f32], l: i16, r: i16, muted: bool) {
 /// `ms` milliseconds of audio at `rate_hz` with `channels` channels.
 fn ms_to_sample_count(ms: u32, rate_hz: u32, channels: usize) -> usize {
     (rate_hz as usize) * channels * (ms as usize) / 1000
+}
+
+/// Inverse of [`ms_to_sample_count`]: milliseconds of audio represented by
+/// `samples` interleaved i16 samples at `rate_hz` with `channels` channels.
+/// `rate_hz >= 1000` is guaranteed by the open-time guard in [`try_open`],
+/// so the divisor is never 0.
+fn sample_count_to_ms(samples: usize, rate_hz: u32, channels: usize) -> u32 {
+    (samples * 1000 / (rate_hz as usize * channels)) as u32
 }
 
 /// Round down to a multiple of 2: queue thresholds must be whole stereo
@@ -698,6 +763,30 @@ mod tests {
         let mut sink = AudioSink::disabled();
         sink.push(&[1, 2, 3, 4, 5, 6]);
         assert_eq!(sink.watermark_drops(), 0);
+    }
+
+    #[test]
+    fn disabled_sink_diagnostics_report_absence() {
+        // The --no-audio / device-failure path must render as "audio off",
+        // not as misleading zeros: depth accessors are None, counters 0.
+        let mut sink = AudioSink::disabled();
+        assert_eq!(sink.reprimes(), 0);
+        assert_eq!(sink.depth_ms(), None);
+        assert_eq!(sink.take_min_depth_ms(), None);
+    }
+
+    #[test]
+    fn sample_count_to_ms_inverts_ms_to_sample_count() {
+        // 9600 samples @ 48kHz stereo = 100ms.
+        assert_eq!(sample_count_to_ms(9_600, 48_000, 2), 100);
+        assert_eq!(sample_count_to_ms(24_000, 48_000, 2), 250);
+        assert_eq!(sample_count_to_ms(0, 48_000, 2), 0);
+        // Round-trips for a spread of rates, including the odd 11025 Hz.
+        for rate in [8_000u32, 11_025, 32_000, 44_100, 48_000, 96_000] {
+            let samples = ms_to_sample_count(100, rate, 2);
+            let ms = sample_count_to_ms(samples, rate, 2);
+            assert!((99..=100).contains(&ms), "rate {rate}: got {ms}ms");
+        }
     }
 
     #[test]

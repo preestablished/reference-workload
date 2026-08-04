@@ -230,6 +230,10 @@ pub struct InteractiveOpts {
     /// `--no-audio`: skip opening an audio sink entirely (no playback, no
     /// device probing). Interactive-only; see `audio.rs`.
     pub no_audio: bool,
+    /// `--stats`: periodic (every 5s) frame/audio diagnostics line plus
+    /// per-phase slow-frame attribution on stderr. Interactive-only; see
+    /// `StatsWindow` below and beads issue refwork-xkp.
+    pub stats: bool,
 }
 
 #[cfg(any(feature = "interactive", test))]
@@ -425,6 +429,270 @@ fn open_interactive_log(path: &std::path::Path, resume: bool) -> Result<std::fs:
     Ok(file)
 }
 
+// ─── Live-loop diagnostics (beads issue refwork-xkp) ─────────────────────────
+//
+// Pure logic only — every type here takes `now: Instant` as a parameter so
+// tests need no sleeping and no device/window. Gated on `test` as well as the
+// feature so the default-features CI run compiles and executes the tests
+// (matching `open_interactive_log` above); the audio sink itself cannot get
+// that treatment because the whole `audio` module is feature-gated.
+
+/// Interval for both the periodic `--stats` line and the rate limits on the
+/// re-prime / slow-frame notes.
+#[cfg(any(feature = "interactive", test))]
+const DIAG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Slow-frame threshold. Deliberately well below `audio.rs`'s 100ms cushion:
+/// proportional-only rate control settles the queue at ~2/3 of target, so
+/// ~70ms stalls already drain it — a 100ms threshold would miss exactly the
+/// stalls that cause re-primes. ~3 frame budgets is a real anomaly.
+#[cfg(any(feature = "interactive", test))]
+const SLOW_FRAME_MS: u64 = 50;
+
+/// Wall-clock cost of one live-loop iteration, split by phase. `other` is
+/// the residual (whole iteration minus the five measured spans): hotkey
+/// handling and dump writes — anything in the loop body not explicitly
+/// timed, so a stall outside the named phases is still visible instead of
+/// being silently misattributed. (The loop-condition poll between
+/// iterations sits outside every span, including this one.)
+#[cfg(any(feature = "interactive", test))]
+#[derive(Clone, Copy, Default)]
+struct PhaseTimes {
+    /// `build_pad` + gamepad poll.
+    input: std::time::Duration,
+    /// `Core::run_one_frame`.
+    emu: std::time::Duration,
+    /// Audio ring drain + `AudioSink::push` (resampling included).
+    audio: std::time::Duration,
+    /// Pad-line write + flush (and the cheap fault check preceding it).
+    write: std::time::Duration,
+    /// Blit + `update_with_buffer`. In steady state this *includes* minifb's
+    /// frame-limiter sleep (i.e. the remaining frame budget); attribution is
+    /// only meaningful on outlier frames, where the limiter adds nothing.
+    blit: std::time::Duration,
+    /// Residual: total − the five spans above.
+    other: std::time::Duration,
+}
+
+#[cfg(any(feature = "interactive", test))]
+impl PhaseTimes {
+    fn total(&self) -> std::time::Duration {
+        self.input + self.emu + self.audio + self.write + self.blit + self.other
+    }
+
+    /// Name of the phase that dominated this iteration.
+    fn dominant(&self) -> &'static str {
+        let pairs = [
+            ("input", self.input),
+            ("emu", self.emu),
+            ("audio", self.audio),
+            ("write", self.write),
+            ("blit", self.blit),
+            ("other", self.other),
+        ];
+        pairs
+            .iter()
+            .max_by_key(|(_, d)| *d)
+            .map(|(name, _)| *name)
+            .unwrap_or("other")
+    }
+
+    /// Full per-phase breakdown, e.g.
+    /// `input 0ms, emu 3ms, audio 1ms, write 0ms, blit 236ms, other 0ms`.
+    fn describe(&self) -> String {
+        format!(
+            "input {}ms, emu {}ms, audio {}ms, write {}ms, blit {}ms, other {}ms",
+            self.input.as_millis(),
+            self.emu.as_millis(),
+            self.audio.as_millis(),
+            self.write.as_millis(),
+            self.blit.as_millis(),
+            self.other.as_millis()
+        )
+    }
+}
+
+/// Minimal 1-per-interval limiter for stderr notes.
+#[cfg(any(feature = "interactive", test))]
+struct RateLimiter {
+    last: Option<std::time::Instant>,
+}
+
+#[cfg(any(feature = "interactive", test))]
+impl RateLimiter {
+    fn new() -> RateLimiter {
+        RateLimiter { last: None }
+    }
+
+    /// True (and arms the interval) if nothing was allowed in the last
+    /// [`DIAG_INTERVAL`]; the first call is always allowed.
+    fn allow(&mut self, now: std::time::Instant) -> bool {
+        let ok = self
+            .last
+            .is_none_or(|last| now.duration_since(last) >= DIAG_INTERVAL);
+        if ok {
+            self.last = Some(now);
+        }
+        ok
+    }
+}
+
+/// Rate-limited reporting for audio-queue re-primes (the "audio queue
+/// drained" note that used to print unconditionally per event — the log
+/// spam half of refwork-xkp). Suppressed events are counted and flushed
+/// into the next printed note; the session total lands in the shutdown
+/// summary regardless.
+#[cfg(any(feature = "interactive", test))]
+struct ReprimeReporter {
+    limiter: RateLimiter,
+    suppressed: u64,
+}
+
+#[cfg(any(feature = "interactive", test))]
+impl ReprimeReporter {
+    fn new() -> ReprimeReporter {
+        ReprimeReporter {
+            limiter: RateLimiter::new(),
+            suppressed: 0,
+        }
+    }
+
+    /// Report `count` new re-primes (this frame's delta; 0 is a no-op).
+    /// Returns the message to print, at most one per [`DIAG_INTERVAL`].
+    /// `gap` is the wall-clock time since the previous audio push — the
+    /// datum that distinguishes a genuinely stalled frame loop (gap >> one
+    /// frame) from a drain the loop never caused (gap ≈ 16ms, e.g. a large
+    /// device callback eating a below-target cushion). `after_dump_prompt`
+    /// marks the drain as the expected aftermath of the blocking F5 prompt.
+    fn note(
+        &mut self,
+        count: u64,
+        gap: Option<std::time::Duration>,
+        after_dump_prompt: bool,
+        now: std::time::Instant,
+    ) -> Option<String> {
+        if count == 0 {
+            return None;
+        }
+        if !self.limiter.allow(now) {
+            self.suppressed += count;
+            return None;
+        }
+        let mut msg = String::from("interactive: audio queue drained — re-primed with silence");
+        if let Some(gap) = gap {
+            use std::fmt::Write;
+            let _ = write!(msg, " (gap since last push: {}ms)", gap.as_millis());
+        }
+        if after_dump_prompt {
+            msg.push_str(" (after dump prompt — expected)");
+        } else {
+            msg.push_str(" (stalled frame loop?)");
+        }
+        if self.suppressed > 0 {
+            use std::fmt::Write;
+            let _ = write!(msg, " [+{} earlier note(s) suppressed]", self.suppressed);
+            self.suppressed = 0;
+        }
+        Some(msg)
+    }
+}
+
+/// Accumulates per-iteration timings and emits the periodic `--stats` line.
+#[cfg(any(feature = "interactive", test))]
+struct StatsWindow {
+    window_start: std::time::Instant,
+    frames: u64,
+    worst: PhaseTimes,
+    /// Session-wide (not window) counters for the shutdown summary.
+    slow_frames: u64,
+    worst_ever_ms: u64,
+}
+
+#[cfg(any(feature = "interactive", test))]
+impl StatsWindow {
+    fn new(now: std::time::Instant) -> StatsWindow {
+        StatsWindow {
+            window_start: now,
+            frames: 0,
+            worst: PhaseTimes::default(),
+            slow_frames: 0,
+            worst_ever_ms: 0,
+        }
+    }
+
+    /// Record one iteration. `skip_worst` excludes it from worst-frame and
+    /// slow-frame accounting (the F5-prompt iteration: a human typing a
+    /// label is an intentional block, not a stall — though it still counts
+    /// toward fps, because the session really did drop frames).
+    fn record(&mut self, phases: &PhaseTimes, skip_worst: bool) {
+        self.frames += 1;
+        if skip_worst {
+            return;
+        }
+        let total = phases.total();
+        if total > self.worst.total() {
+            self.worst = *phases;
+        }
+        let total_ms = total.as_millis() as u64;
+        if total_ms > SLOW_FRAME_MS {
+            self.slow_frames += 1;
+        }
+        self.worst_ever_ms = self.worst_ever_ms.max(total_ms);
+    }
+
+    /// Whether a stats line is due — callers use this to gather inputs with
+    /// side effects (e.g. `AudioSink::take_min_depth_ms` resets the window
+    /// minimum) only when [`StatsWindow::maybe_line`] will actually emit.
+    fn due(&self, now: std::time::Instant) -> bool {
+        self.frames > 0 && now.duration_since(self.window_start) >= DIAG_INTERVAL
+    }
+
+    /// Emit the stats line once per [`DIAG_INTERVAL`], then reset the
+    /// window. `audio` is `(last_depth_ms, min_depth_ms)` for the window,
+    /// `None` when the sink has no device (`--no-audio` / open failure);
+    /// `reprimes_window`/`trims_window` are this window's deltas,
+    /// `reprimes_total` the session total.
+    fn maybe_line(
+        &mut self,
+        now: std::time::Instant,
+        audio: Option<(u32, u32)>,
+        reprimes_window: u64,
+        reprimes_total: u64,
+        trims_window: u64,
+    ) -> Option<String> {
+        let elapsed = now.duration_since(self.window_start);
+        if elapsed < DIAG_INTERVAL || self.frames == 0 {
+            return None;
+        }
+        let fps = self.frames as f64 / elapsed.as_secs_f64();
+        let worst_ms = self.worst.total().as_millis();
+        let mut msg = format!(
+            "interactive: stats: {:.1} fps, worst frame {}ms ({})",
+            fps,
+            worst_ms,
+            self.worst.dominant()
+        );
+        {
+            use std::fmt::Write;
+            match audio {
+                Some((depth, min)) => {
+                    let _ = write!(
+                        msg,
+                        ", audio depth {}ms (min {}ms), reprimes {} this window ({} total), \
+                         trims {}",
+                        depth, min, reprimes_window, reprimes_total, trims_window
+                    );
+                }
+                None => msg.push_str(", audio off"),
+            }
+        }
+        self.window_start = now;
+        self.frames = 0;
+        self.worst = PhaseTimes::default();
+        Some(msg)
+    }
+}
+
 #[cfg(feature = "interactive")]
 pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     use minifb::{Key, Window, WindowOptions};
@@ -532,31 +800,6 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     let mut log_file = open_interactive_log(&opts.output_log, opts.resume)?;
 
-    // Audio: construct only after replay has finished (replay must never be
-    // audible) and before the live loop starts. `--no-audio` skips device
-    // construction entirely — `AudioSink::disabled()` is the same
-    // never-fails no-op sink a real device error would degrade to.
-    let mut audio_sink = if opts.no_audio {
-        crate::audio::AudioSink::disabled()
-    } else {
-        crate::audio::AudioSink::open()
-    };
-    // The replay above ran the core at full speed with no realtime pacing,
-    // so any audio it produced has no relationship to wall-clock playback.
-    // Drain and discard it so a resumed session does not play a stale burst
-    // at startup; a single drain call only moves one buffer's worth, so
-    // loop until the ring reports empty.
-    let mut audio_scratch = [0i16; 4096];
-    loop {
-        if core.take_audio_samples(&mut audio_scratch) == 0 {
-            break;
-        }
-    }
-    // Baseline for the shutdown summary: a resumed session legitimately
-    // overflows the ring during replay (nothing drains it during that
-    // phase), so only the delta accrued during the *live* loop is reported.
-    let audio_dropped_baseline = core.audio_dropped_pairs();
-
     const BASE_TITLE: &str = "ramdiff record [interactive] — F5=dump, M=mute, Esc=quit";
     let mut window = Window::new(
         BASE_TITLE,
@@ -577,6 +820,35 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // within ~0.16%, so the watermark backstop (see `audio.rs`) fires
     // rarely (window occlusion, debugger pauses) instead of periodically.
     window.limit_update_rate(Some(std::time::Duration::from_micros(16_667)));
+
+    // Audio: construct only after replay has finished (replay must never be
+    // audible) and after the window exists — the device starts consuming the
+    // 100ms silence cushion the moment the stream opens, so opening it
+    // before the (potentially slow, cold-start) window creation would
+    // guarantee a spurious drained-queue event before the first live frame.
+    // `--no-audio` skips device construction entirely —
+    // `AudioSink::disabled()` is the same never-fails no-op sink a real
+    // device error would degrade to.
+    let mut audio_sink = if opts.no_audio {
+        crate::audio::AudioSink::disabled()
+    } else {
+        crate::audio::AudioSink::open()
+    };
+    // The replay above ran the core at full speed with no realtime pacing,
+    // so any audio it produced has no relationship to wall-clock playback.
+    // Drain and discard it so a resumed session does not play a stale burst
+    // at startup; a single drain call only moves one buffer's worth, so
+    // loop until the ring reports empty.
+    let mut audio_scratch = [0i16; 4096];
+    loop {
+        if core.take_audio_samples(&mut audio_scratch) == 0 {
+            break;
+        }
+    }
+    // Baseline for the shutdown summary: a resumed session legitimately
+    // overflows the ring during replay (nothing drains it during that
+    // phase), so only the delta accrued during the *live* loop is reported.
+    let audio_dropped_baseline = core.audio_dropped_pairs();
 
     // Boxed: a quarter-MiB by value blows the default test-thread stack.
     let mut fb_xrgb: Box<[u8; refwork_emu::FB_BYTES]> = Box::new([0u8; refwork_emu::FB_BYTES]);
@@ -619,7 +891,27 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         },
     };
 
+    // Live-loop diagnostics (refwork-xkp): per-phase wall-clock timing,
+    // rate-limited re-prime notes, optional periodic `--stats` line. The
+    // checkpoints below cost a handful of `Instant::now()` calls per frame —
+    // noise against the 16.7ms budget.
+    let mut stats = StatsWindow::new(std::time::Instant::now());
+    let mut reprime_reporter = ReprimeReporter::new();
+    let mut slow_frame_limiter = RateLimiter::new();
+    // End of the previous iteration's audio push — the re-prime note's "gap
+    // since last push" is measured against this.
+    let mut last_push_done: Option<std::time::Instant> = None;
+    // Whether the previous iteration ran the blocking F5 dump prompt: the
+    // drain it causes is only *detected* by the next iteration's push, so
+    // that re-prime must be attributed to the prompt, not to a stall.
+    let mut prompt_last_iter = false;
+    let mut reprimes_after_prompt: u64 = 0;
+    // `--stats` window baselines for per-window deltas.
+    let mut reprimes_window_base: u64 = 0;
+    let mut trims_window_base: u64 = 0;
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let t_start = std::time::Instant::now();
         // Build pad from current key state, merged with the gamepad if any.
         #[allow(unused_mut)]
         let mut pad = build_pad(&window);
@@ -627,13 +919,16 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         if let Some(g) = gamepad.as_mut() {
             pad |= g.poll();
         }
+        let t_input = std::time::Instant::now();
 
         let flags = core.run_one_frame(pad);
+        let t_emu = std::time::Instant::now();
 
         // Drain this frame's synthesized audio and hand it to the sink.
         // Looped: the scratch buffer is smaller than a full frame's worth
         // could theoretically be if the sink fell behind, so keep draining
         // until the ring reports empty.
+        let reprimes_before = audio_sink.reprimes();
         loop {
             let n = core.take_audio_samples(&mut audio_scratch);
             if n == 0 {
@@ -641,6 +936,8 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
             }
             audio_sink.push(&audio_scratch[..n]);
         }
+        let t_audio = std::time::Instant::now();
+        let reprime_delta = audio_sink.reprimes() - reprimes_before;
 
         if let Some(fault) = core.fault() {
             // This frame's pad line was not written yet, so the log holds
@@ -658,6 +955,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         log_file
             .flush()
             .map_err(|e| format!("flush error: {}", e))?;
+        let t_write = std::time::Instant::now();
 
         // Blit to window.
         core.blit_completed_frame(&mut fb_xrgb);
@@ -665,9 +963,13 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         window
             .update_with_buffer(&fb_u32, FB_WIDTH, FB_HEIGHT)
             .map_err(|e| format!("window update: {}", e))?;
+        let t_blit = std::time::Instant::now();
+
+        let mut dump_prompt_this_iter = false;
 
         // F5 hotkey: dump WRAM.
         if window.is_key_pressed(Key::F5, minifb::KeyRepeat::No) {
+            dump_prompt_this_iter = true;
             eprint!("interactive: dump label: ");
             let _ = std::io::stderr().flush();
             let mut label = String::new();
@@ -713,6 +1015,78 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
         }
 
         frame += 1;
+
+        // End-of-iteration diagnostics. `other` picks up everything the
+        // named spans don't (F5/M hotkey handling incl. the dump write) so
+        // a stall there is attributed instead of vanishing.
+        let t_end = std::time::Instant::now();
+        let phases = PhaseTimes {
+            input: t_input.duration_since(t_start),
+            emu: t_emu.duration_since(t_input),
+            audio: t_audio.duration_since(t_emu),
+            write: t_write.duration_since(t_audio),
+            blit: t_blit.duration_since(t_write),
+            other: t_end.duration_since(t_blit),
+        };
+        // Re-prime note (rate-limited): emitted here, outside every measured
+        // span, so the note's own eprintln cost can never show up as a fake
+        // "write"/"audio" stall in the very diagnostics it belongs to. The
+        // gap is measured from the previous iteration's push to this one's
+        // (≈ how long the loop was away), not from note to note.
+        if reprime_delta > 0 {
+            if prompt_last_iter {
+                reprimes_after_prompt += reprime_delta;
+            }
+            let gap = last_push_done.map(|t| t_emu.duration_since(t));
+            if let Some(msg) = reprime_reporter.note(reprime_delta, gap, prompt_last_iter, t_end)
+            {
+                eprintln!("{}", msg);
+            }
+        }
+        last_push_done = Some(t_audio);
+
+        stats.record(&phases, dump_prompt_this_iter);
+        if opts.stats {
+            // Slow-frame attribution is keyed to this iteration's own
+            // wall-clock only: a re-prime observed here was caused by the
+            // *previous* iteration (detection is one push late), so printing
+            // this frame's breakdown for it would attribute the stall to an
+            // innocent frame. Sub-threshold drains are covered by the
+            // re-prime note's gap and the stats line's min depth instead.
+            let total_ms = phases.total().as_millis() as u64;
+            if !dump_prompt_this_iter
+                && total_ms > SLOW_FRAME_MS
+                && slow_frame_limiter.allow(t_end)
+            {
+                eprintln!(
+                    "interactive: slow frame: {}ms ({})",
+                    total_ms,
+                    phases.describe()
+                );
+            }
+            if stats.due(t_end) {
+                // `take_min_depth_ms` resets the window minimum, so only
+                // call it when a line is actually due.
+                let audio_diag = match (audio_sink.depth_ms(), audio_sink.take_min_depth_ms()) {
+                    (Some(depth), Some(min)) => Some((depth, min)),
+                    _ => None,
+                };
+                let reprimes_total = audio_sink.reprimes();
+                let trims_total = audio_sink.watermark_drops();
+                if let Some(line) = stats.maybe_line(
+                    t_end,
+                    audio_diag,
+                    reprimes_total - reprimes_window_base,
+                    reprimes_total,
+                    trims_total - trims_window_base,
+                ) {
+                    eprintln!("{}", line);
+                }
+                reprimes_window_base = reprimes_total;
+                trims_window_base = trims_total;
+            }
+        }
+        prompt_last_iter = dump_prompt_this_iter;
     }
 
     // `frame` was incremented past the last written line: it equals the
@@ -720,17 +1094,34 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     session.log_frames = Some(frame);
     session.save()?;
 
-    // Shutdown diagnostic: both counters reflect only the live loop (the
-    // audio baseline was captured after replay, before any live frame ran).
+    // Shutdown diagnostic: all counters reflect only the live loop (the
+    // audio baseline was captured after replay, before any live frame ran;
+    // the sink itself only exists for the live loop). This is also the
+    // final flush for re-primes whose individual notes were rate-limited
+    // away.
     let watermark_drops = audio_sink.watermark_drops();
+    let reprimes = audio_sink.reprimes();
     let dropped_pairs = core
         .audio_dropped_pairs()
         .saturating_sub(audio_dropped_baseline);
-    if watermark_drops > 0 || dropped_pairs > 0 {
+    if watermark_drops > 0 || dropped_pairs > 0 || reprimes > 0 {
         eprintln!(
-            "interactive: audio: {} watermark trim(s), {} pair(s) dropped by ring overflow \
-             during this session",
-            watermark_drops, dropped_pairs
+            "interactive: audio: {} watermark trim(s), {} pair(s) dropped by ring overflow, \
+             {} queue re-prime(s) ({} attributed to the dump prompt) during this session",
+            watermark_drops, dropped_pairs, reprimes, reprimes_after_prompt
+        );
+    }
+    if stats.slow_frames > 0 {
+        eprintln!(
+            "interactive: {} frame(s) over {}ms this session, worst {}ms{}",
+            stats.slow_frames,
+            SLOW_FRAME_MS,
+            stats.worst_ever_ms,
+            if opts.stats {
+                ""
+            } else {
+                " — rerun with --stats for per-phase attribution"
+            }
         );
     }
 
@@ -1180,5 +1571,155 @@ mod tests {
         assert_eq!(a.offset, 0x0010);
         let b = super::parse_watch_addr("wram:16").unwrap();
         assert_eq!(b.offset, 16);
+    }
+
+    // ─── Live-loop diagnostics (refwork-xkp) ─────────────────────────────
+    //
+    // `Instant` has no synthetic constructor; all instants are one
+    // `Instant::now()` base plus `Duration` offsets. Note these tests cover
+    // the pure decide/format logic only — the wiring inside the live loop
+    // (and `AudioSink::push` counting) needs a device and a window, and is
+    // exercised by the follow-up live-run bead, not here.
+
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    #[test]
+    fn rate_limiter_allows_first_then_gates_on_interval() {
+        let base = std::time::Instant::now();
+        let mut rl = RateLimiter::new();
+        assert!(rl.allow(base));
+        assert!(!rl.allow(base + ms(4_999)));
+        assert!(rl.allow(base + ms(5_000)));
+        assert!(!rl.allow(base + ms(5_001)));
+    }
+
+    #[test]
+    fn reprime_reporter_first_event_logs_immediately() {
+        let base = std::time::Instant::now();
+        let mut rep = ReprimeReporter::new();
+        assert_eq!(rep.note(0, None, false, base), None);
+        let msg = rep.note(1, Some(ms(240)), false, base).unwrap();
+        assert!(msg.contains("audio queue drained"), "{msg}");
+        assert!(msg.contains("gap since last push: 240ms"), "{msg}");
+        assert!(msg.contains("stalled frame loop?"), "{msg}");
+        assert!(!msg.contains("suppressed"), "{msg}");
+    }
+
+    #[test]
+    fn reprime_reporter_suppresses_within_interval_then_flushes_count() {
+        let base = std::time::Instant::now();
+        let mut rep = ReprimeReporter::new();
+        assert!(rep.note(1, None, false, base).is_some());
+        assert_eq!(rep.note(1, None, false, base + ms(1_000)), None);
+        assert_eq!(rep.note(2, None, false, base + ms(2_000)), None);
+        let msg = rep.note(1, None, false, base + ms(6_000)).unwrap();
+        assert!(msg.contains("[+3 earlier note(s) suppressed]"), "{msg}");
+        // The suppressed counter resets once flushed.
+        let msg = rep.note(1, None, false, base + ms(12_000)).unwrap();
+        assert!(!msg.contains("suppressed"), "{msg}");
+    }
+
+    #[test]
+    fn reprime_reporter_annotates_dump_prompt_drains() {
+        let base = std::time::Instant::now();
+        let mut rep = ReprimeReporter::new();
+        let msg = rep.note(1, Some(ms(30_000)), true, base).unwrap();
+        assert!(msg.contains("after dump prompt — expected"), "{msg}");
+        assert!(!msg.contains("stalled frame loop"), "{msg}");
+    }
+
+    #[test]
+    fn phase_times_dominant_and_describe() {
+        let p = PhaseTimes {
+            input: ms(0),
+            emu: ms(3),
+            audio: ms(1),
+            write: ms(0),
+            blit: ms(236),
+            other: ms(0),
+        };
+        assert_eq!(p.total(), ms(240));
+        assert_eq!(p.dominant(), "blit");
+        assert_eq!(
+            p.describe(),
+            "input 0ms, emu 3ms, audio 1ms, write 0ms, blit 236ms, other 0ms"
+        );
+        // A stall outside the named spans lands in (and is attributed to)
+        // the residual bucket.
+        let p2 = PhaseTimes {
+            other: ms(200),
+            ..PhaseTimes::default()
+        };
+        assert_eq!(p2.dominant(), "other");
+    }
+
+    #[test]
+    fn stats_window_emits_once_per_interval_and_resets() {
+        let base = std::time::Instant::now();
+        let mut sw = StatsWindow::new(base);
+        let frame = PhaseTimes {
+            emu: ms(16),
+            ..PhaseTimes::default()
+        };
+        for _ in 0..300 {
+            sw.record(&frame, false);
+        }
+        assert!(!sw.due(base + ms(4_999)));
+        assert!(sw.due(base + ms(5_000)));
+        let line = sw
+            .maybe_line(base + ms(5_000), Some((96, 41)), 1, 3, 0)
+            .unwrap();
+        assert!(line.contains("60.0 fps"), "{line}");
+        assert!(line.contains("worst frame 16ms (emu)"), "{line}");
+        assert!(line.contains("audio depth 96ms (min 41ms)"), "{line}");
+        assert!(line.contains("reprimes 1 this window (3 total)"), "{line}");
+        // The window reset: nothing due right after an emitted line.
+        assert!(!sw.due(base + ms(5_001)));
+        assert_eq!(sw.maybe_line(base + ms(5_001), None, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn stats_window_no_audio_renders_audio_off() {
+        let base = std::time::Instant::now();
+        let mut sw = StatsWindow::new(base);
+        sw.record(&PhaseTimes::default(), false);
+        let line = sw.maybe_line(base + ms(5_000), None, 0, 0, 0).unwrap();
+        assert!(line.contains("audio off"), "{line}");
+        assert!(!line.contains("depth"), "{line}");
+    }
+
+    #[test]
+    fn stats_window_slow_frame_accounting_skips_prompt_iterations() {
+        let base = std::time::Instant::now();
+        let mut sw = StatsWindow::new(base);
+        // The F5-prompt iteration: an intentional block, not a stall — it
+        // must not pollute worst-frame or slow-frame accounting (but still
+        // counts toward fps).
+        let prompt = PhaseTimes {
+            other: ms(30_000),
+            ..PhaseTimes::default()
+        };
+        sw.record(&prompt, true);
+        assert_eq!(sw.frames, 1);
+        assert_eq!(sw.slow_frames, 0);
+        assert_eq!(sw.worst_ever_ms, 0);
+        assert_eq!(sw.worst.total(), ms(0));
+        // A genuinely slow frame is counted and remembered.
+        let slow = PhaseTimes {
+            blit: ms(240),
+            ..PhaseTimes::default()
+        };
+        sw.record(&slow, false);
+        assert_eq!(sw.slow_frames, 1);
+        assert_eq!(sw.worst_ever_ms, 240);
+        // A normal 16ms frame is not slow.
+        let normal = PhaseTimes {
+            emu: ms(16),
+            ..PhaseTimes::default()
+        };
+        sw.record(&normal, false);
+        assert_eq!(sw.slow_frames, 1);
     }
 }
