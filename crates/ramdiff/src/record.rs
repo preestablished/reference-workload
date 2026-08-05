@@ -449,12 +449,83 @@ const DIAG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(any(feature = "interactive", test))]
 const SLOW_FRAME_MS: u64 = 50;
 
+/// Wall-clock frame period for the live loop, chosen for **audio
+/// equilibrium**: the core synthesizes
+/// `MCLK_PER_FRAME × SPC_NUM / (SPC_DEN × DSP_CLOCKS_PER_SAMPLE)`
+/// = 357,368 × 1024 / (21,477 × 32) ≈ 532.466 stereo pairs per frame
+/// (those constants are private to `refwork-emu` — `timing.rs` and
+/// `apu/mod.rs` — so they are restated here; a timing-model change there
+/// must be mirrored, and the `frame_period_matches_audio_production_rate`
+/// test pins the relationship). The sink consumes 32,000 pairs/s, so the
+/// period is 532.466/32,000 s = 357,368/21,477,000 s ≈ 16.6396ms
+/// (~60.098 fps).
+///
+/// The loop paces itself rather than using minifb's
+/// `limit_update_rate`: that limiter is plain `thread::sleep`, which
+/// overshoots ~0.8ms/frame on macOS — the measured 57.3 fps / −4.7% audio
+/// deficit of refwork-ta9, far beyond the ±0.5% slew authority, draining
+/// the queue every ~2.4s into an audible 100ms silence gap.
+#[cfg(any(feature = "interactive", test))]
+const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_nanos(16_639_568);
+
+/// If pacing falls further behind than this (the F5 prompt, window
+/// occlusion), restart the cadence from now instead of fast-forwarding
+/// through the backlog at unlimited speed. Note the degenerate case: a
+/// host that *persistently* cannot hold 60fps resyncs forever and the
+/// pacer never sleeps — pacing degrades to free-run and audio still
+/// starves. That is a host-capability limit the pacer cannot fix, only
+/// make visible (the --stats fps line will sit below 60).
+#[cfg(any(feature = "interactive", test))]
+const PACE_RESYNC: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Margin under the deadline where coarse `thread::sleep` hands over to a
+/// spin finish — sleep alone overshoots by about this much, which is the
+/// precise error the pacer exists to remove.
+#[cfg(any(feature = "interactive", test))]
+const PACE_SPIN_MARGIN: std::time::Duration = std::time::Duration::from_micros(1500);
+
+/// Block until `deadline`: coarse sleep to within [`PACE_SPIN_MARGIN`],
+/// then spin the rest. Returns immediately for a deadline already passed.
+/// The spin finish costs up to ~1.5ms of busy CPU per frame (~9% of the
+/// budget) — deliberately traded for the sub-ms pacing precision that
+/// `thread::sleep` alone cannot deliver.
+#[cfg(any(feature = "interactive", test))]
+fn pace_until(deadline: std::time::Instant) {
+    loop {
+        let now = std::time::Instant::now();
+        let Some(remaining) = deadline.checked_duration_since(now) else {
+            return;
+        };
+        if remaining > PACE_SPIN_MARGIN {
+            std::thread::sleep(remaining - PACE_SPIN_MARGIN);
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// Next frame's deadline after pacing to `deadline`. Absolute-cadence:
+/// a small slip is absorbed by the next frame (no drift accumulates), but
+/// falling behind by [`PACE_RESYNC`] or more restarts the schedule from
+/// `now`. Pure logic, testable with synthetic instants.
+#[cfg(any(feature = "interactive", test))]
+fn advance_deadline(deadline: std::time::Instant, now: std::time::Instant) -> std::time::Instant {
+    if now
+        .checked_duration_since(deadline)
+        .is_some_and(|late| late >= PACE_RESYNC)
+    {
+        now + FRAME_PERIOD
+    } else {
+        deadline + FRAME_PERIOD
+    }
+}
+
 /// Wall-clock cost of one live-loop iteration, split by phase. `other` is
 /// the residual (whole iteration minus the five measured spans): hotkey
 /// handling and dump writes — anything in the loop body not explicitly
 /// timed, so a stall outside the named phases is still visible instead of
-/// being silently misattributed. (The loop-condition poll between
-/// iterations sits outside every span, including this one.)
+/// being silently misattributed. (The loop-condition poll and the frame
+/// pacer's sleep sit outside every span, including this one.)
 #[cfg(any(feature = "interactive", test))]
 #[derive(Clone, Copy, Default)]
 struct PhaseTimes {
@@ -466,9 +537,9 @@ struct PhaseTimes {
     audio: std::time::Duration,
     /// Pad-line write + flush (and the cheap fault check preceding it).
     write: std::time::Duration,
-    /// Blit + `update_with_buffer`. In steady state this *includes* minifb's
-    /// frame-limiter sleep (i.e. the remaining frame budget); attribution is
-    /// only meaningful on outlier frames, where the limiter adds nothing.
+    /// Blit + `update_with_buffer` — real work only: frame pacing happens
+    /// after the measured spans (see `pace_until` in the live loop), so
+    /// neither this nor `total` includes the pacing sleep.
     blit: std::time::Duration,
     /// Residual: total − the five spans above.
     other: std::time::Duration,
@@ -812,14 +883,12 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     )
     .map_err(|e| format!("cannot open window: {}", e))?;
 
-    // ~60 fps target: minifb's previous 16ms limit is a 62.5fps ceiling,
-    // which on a fast host produces ~33,280 stereo pairs/s against the
-    // 32,000/s the audio sink consumes — a systematic +4% surplus that
-    // would force a watermark trim (an audible ~150ms skip) every few
-    // seconds. 16,667us tracks the emulator's ~60.0988fps NTSC rate to
-    // within ~0.16%, so the watermark backstop (see `audio.rs`) fires
-    // rarely (window occlusion, debugger pauses) instead of periodically.
-    window.limit_update_rate(Some(std::time::Duration::from_micros(16_667)));
+    // Frame pacing is ours, not minifb's (refwork-ta9): its sleep-based
+    // limiter overshoots ~0.8ms/frame on macOS (57.3 fps measured), a −4.7%
+    // audio deficit that drained the queue into a 100ms silence gap every
+    // ~2.4s. The loop paces itself against [`FRAME_PERIOD`] instead — see
+    // the pacer constants above and `pace_until` at the loop's end.
+    window.limit_update_rate(None);
 
     // Audio: construct only after replay has finished (replay must never be
     // audible) and after the window exists — the device starts consuming the
@@ -909,6 +978,9 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // `--stats` window baselines for per-window deltas.
     let mut reprimes_window_base: u64 = 0;
     let mut trims_window_base: u64 = 0;
+
+    // First frame-pacing deadline (see the pacer constants above).
+    let mut next_deadline = std::time::Instant::now() + FRAME_PERIOD;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let t_start = std::time::Instant::now();
@@ -1087,6 +1159,12 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
             }
         }
         prompt_last_iter = dump_prompt_this_iter;
+
+        // Frame pacing (refwork-ta9): sleep+spin to the absolute deadline,
+        // deliberately outside every measured span so `worst frame` and the
+        // slow-frame line reflect real work, not the pacer's idle time.
+        pace_until(next_deadline);
+        next_deadline = advance_deadline(next_deadline, std::time::Instant::now());
     }
 
     // `frame` was incremented past the last written line: it equals the
@@ -1721,5 +1799,66 @@ mod tests {
         };
         sw.record(&normal, false);
         assert_eq!(sw.slow_frames, 1);
+    }
+
+    // ─── Frame pacer (refwork-ta9) ───────────────────────────────────────
+
+    #[test]
+    fn frame_period_matches_audio_production_rate() {
+        // Audio equilibrium is the whole point of the pacer: at one frame
+        // per FRAME_PERIOD, the core's per-frame output
+        // (MCLK_PER_FRAME × SPC_NUM / (SPC_DEN × DSP_CLOCKS_PER_SAMPLE)
+        //  = 357,368 × 1024 / (21,477 × 32) pairs — the refwork-emu
+        // constants restated, see FRAME_PERIOD's doc) must equal the
+        // sink's 32,000 pairs/s draw.
+        let pairs_per_frame = 357_368.0 * 1024.0 / (21_477.0 * 32.0);
+        let produced_per_s = pairs_per_frame / FRAME_PERIOD.as_secs_f64();
+        assert!(
+            (produced_per_s - 32_000.0).abs() < 0.5,
+            "audio production at FRAME_PERIOD is {produced_per_s} pairs/s, want 32000"
+        );
+    }
+
+    #[test]
+    fn advance_deadline_keeps_cadence_and_resyncs_when_far_behind() {
+        let base = std::time::Instant::now();
+        let deadline = base + FRAME_PERIOD;
+        // On time: one period later — absolute cadence, no drift.
+        assert_eq!(
+            advance_deadline(deadline, deadline),
+            deadline + FRAME_PERIOD
+        );
+        // Early (paced-to before the deadline was reached — cannot really
+        // happen, but must not panic or shift the schedule).
+        assert_eq!(advance_deadline(deadline, base), deadline + FRAME_PERIOD);
+        // Slightly late (< resync threshold): keep the absolute schedule so
+        // the next frame absorbs the slip.
+        assert_eq!(
+            advance_deadline(deadline, deadline + ms(50)),
+            deadline + FRAME_PERIOD
+        );
+        // Exactly at the threshold: resync (the comparison is >=).
+        let at_threshold = deadline + PACE_RESYNC;
+        assert_eq!(
+            advance_deadline(deadline, at_threshold),
+            at_threshold + FRAME_PERIOD
+        );
+        // Far behind (>= resync): restart from now — no fast-forward burst
+        // after the F5 prompt or a long occlusion.
+        let very_late = deadline + ms(30_000);
+        assert_eq!(
+            advance_deadline(deadline, very_late),
+            very_late + FRAME_PERIOD
+        );
+    }
+
+    #[test]
+    fn pace_until_past_deadline_returns_immediately() {
+        let start = std::time::Instant::now();
+        pace_until(start);
+        assert!(
+            start.elapsed() < ms(50),
+            "pace_until on an expired deadline must not sleep"
+        );
     }
 }
