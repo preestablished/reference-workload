@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# replay-fidelity — gate G2 for a recorded hand-play session (discovery-02
+# recording readiness, package 04).
+# Usage: replay-fidelity <session-name>
+#   Replays $PR/ramdiff/<name>/interactive.padlog through the scripted
+#   `ramdiff record` path into a fresh sibling $PR/ramdiff/replay-verify-<name>
+#   with one --mark per recorded dump, compares every dump byte-for-byte,
+#   then runs `refwork-verify double-run` over the same trajectory.
+#   Evidence: $PR/evidence/replay-fidelity-<name>.txt, double-run-<name>.json,
+#   replay-verify-<name>.stderr, double-run-<name>.stderr.
+#   Prints frame numbers and IDENTICAL/DIVERGED per dump; never dump bytes,
+#   hashes, or the ROM path. Exit 0 only on `fidelity: PASS` or
+#   `fidelity: NOT-APPLICABLE` (a NOT-APPLICABLE.md marker with no padlog).
+set -euo pipefail
+
+if [ $# -ne 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  sed -n "2,14p" "$0" | sed "s/^# \{0,1\}//"; exit 0
+fi
+NAME="$1"
+if ! [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "error: session name must match [A-Za-z0-9][A-Za-z0-9_.-]* (got: $NAME)" >&2
+  exit 1
+fi
+
+# Repo root from this script's real location (mirrors tools/record-ramdiff).
+SRC="$0"
+while [ -L "$SRC" ]; do
+  DIR="$(cd "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  if [[ "$SRC" != /* ]]; then SRC="$DIR/$SRC"; fi
+done
+REPO_ROOT="$(cd "$(dirname "$SRC")/.." && pwd)"
+RAMDIFF="$REPO_ROOT/target/release/ramdiff"
+VERIFY="$REPO_ROOT/target/release/refwork-verify"
+
+# Private root from the pointer file outside every checkout; never printed.
+# RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only).
+POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
+if [ -n "${RAMDIFF_PRIVATE_ROOT:-}" ]; then
+  PR="$RAMDIFF_PRIVATE_ROOT"
+elif [ -s "$POINTER" ]; then
+  PR="$(head -n1 "$POINTER")"
+else
+  echo "error: private-root pointer file missing: $POINTER" >&2
+  exit 1
+fi
+SESS="$PR/ramdiff/$NAME"
+RV="$PR/ramdiff/replay-verify-$NAME"
+EVID="$PR/evidence"
+mkdir -p "$EVID"
+
+# NOT-APPLICABLE marker (timer session when the game has no level timer).
+if [ -f "$SESS/NOT-APPLICABLE.md" ] && [ ! -f "$SESS/interactive.padlog" ]; then
+  echo "fidelity: NOT-APPLICABLE ($NAME)" | tee "$EVID/replay-fidelity-$NAME.txt"
+  exit 0
+fi
+if [ ! -f "$SESS/session.yaml" ] || [ ! -f "$SESS/interactive.padlog" ]; then
+  echo "error: $NAME is not a recorded session (needs session.yaml + interactive.padlog)" >&2
+  exit 1
+fi
+[ -x "$RAMDIFF" ] || { echo "error: ramdiff release binary not built (cargo build --release -p ramdiff)" >&2; exit 1; }
+[ -x "$VERIFY" ] || { echo "error: refwork-verify release binary not built (cargo build --release -p refwork-verify)" >&2; exit 1; }
+if [ -e "$RV" ]; then
+  echo "error: $NAME already has a replay-verify dir; a rerun needs a new take name (names are never reused)" >&2
+  exit 1
+fi
+
+# Single-ROM guard, same as record-ramdiff.
+ROM_DIR="$PR/ROMs/SNES"
+shopt -s nullglob
+roms=("$ROM_DIR"/*)
+shopt -u nullglob
+if [ "${#roms[@]}" -ne 1 ] || [ ! -f "${roms[0]}" ]; then
+  echo "error: expected exactly 1 regular file under the private ROM dir, found ${#roms[@]} entries" >&2
+  exit 1
+fi
+ROM="${roms[0]}"
+
+# Frames to replay = log_frames (the recorded session's own count); the
+# marks are every non-zero dump frame (frame 0 is the platform-capture
+# sentinel and is never a checkpoint).
+FRAMES="$(awk '/^log_frames:/{print $2}' "$SESS/session.yaml")"
+if ! [[ "$FRAMES" =~ ^[0-9]+$ ]] || [ "$FRAMES" -eq 0 ]; then
+  echo "error: session.yaml has no usable log_frames (was the session quit with Esc?)" >&2
+  exit 1
+fi
+MARKS=()
+while read -r frame; do
+  MARKS+=(--mark "$frame=f$frame")
+done < <(awk '/^  frame: /{ if ($2 != 0) print $2 }' "$SESS/session.yaml" | sort -n | uniq)
+echo "replay-fidelity: replaying $FRAMES frames with $(( ${#MARKS[@]} / 2 )) checkpoint(s) for $NAME" >&2
+
+REPLAY_ERR="$EVID/replay-verify-$NAME.stderr"
+set +e
+"$RAMDIFF" record --rom "$ROM" --script "$SESS/interactive.padlog" --session "$RV" \
+  ${MARKS[@]+"${MARKS[@]}"} --frames "$FRAMES" 2> "$REPLAY_ERR"
+replay_status=$?
+set -e
+if [ "$replay_status" -ne 0 ] || grep -q 'fault at frame' "$REPLAY_ERR"; then
+  echo "FAULT during replay (exit $replay_status); see evidence/replay-verify-$NAME.stderr" | tee "$EVID/replay-fidelity-$NAME.txt"
+  exit 1
+fi
+
+# Byte compare every recorded dump against its replayed twin. Where two
+# dumps share a frame the later file on disk is the one the recording kept
+# (labels can collide on a file); compare each listed entry regardless.
+# (frame 0 is filtered inside awk: a `grep -v` with no surviving lines would
+# exit 1 and, under pipefail, abort the script before any verdict is written.)
+awk '/^  frame: /{f=$2} /^  file: /{ if (f != 0) print f, $2 }' "$SESS/session.yaml" |
+while read -r frame orig; do
+  if cmp -s "$RV/f${frame}.bin" "$SESS/$orig"; then
+    echo "frame $frame: IDENTICAL"
+  else
+    echo "frame $frame: DIVERGED"
+  fi
+done | tee "$EVID/replay-fidelity-$NAME.txt"
+
+# Run-to-run determinism over the exact trajectory (the stricter gate).
+"$VERIFY" double-run --rom "$ROM" --script "$SESS/interactive.padlog" --frames "$FRAMES" \
+  --report "$EVID/double-run-$NAME.json" 2> "$EVID/double-run-$NAME.stderr" || true
+
+if grep -q '"deterministic": true' "$EVID/double-run-$NAME.json" 2>/dev/null \
+   && ! grep -q DIVERGED "$EVID/replay-fidelity-$NAME.txt" \
+   && grep -q IDENTICAL "$EVID/replay-fidelity-$NAME.txt"; then
+  echo "fidelity: PASS ($NAME)" | tee -a "$EVID/replay-fidelity-$NAME.txt"
+else
+  echo "fidelity: FAIL ($NAME)" | tee -a "$EVID/replay-fidelity-$NAME.txt"
+  exit 1
+fi
