@@ -21,7 +21,7 @@
 
 use ramdiff::emit::{run_emit, EmitOpts};
 use ramdiff::filter::{run_search, FilterOp};
-use ramdiff::record::get_pad;
+use ramdiff::record::{get_pad, run_record, RecordOpts};
 use ramdiff::session::{CandidateSet, DumpMeta, SearchWidth, Session, WRAM_SIZE};
 use refwork_emu::{Cartridge, Core, RegionBuffers, WRAM_INIT_BYTE};
 use refwork_featuremap::{parse_feature_map, Discretize, FeatureType, Semantics, Stability};
@@ -262,5 +262,68 @@ fn round_trip_finds_frame_counter() {
         "Round-trip OK: frame counter at 0x{:04X}, {} candidates after full filter chain",
         FRAME_CTR_OFFSET,
         s3.candidates.offsets.len()
+    );
+}
+
+/// A scripted `record` stamps a fresh session with the emulator epoch and
+/// the ROM's BLAKE3, and refuses to add dumps to a session stamped under a
+/// different emulator version (discovery-02 recording readiness, package 01).
+#[test]
+fn record_stamps_session_epoch() {
+    let (_rom_tmp, rom_path) = build_synth_rom();
+    let rom_bytes = std::fs::read(&rom_path).unwrap();
+    let expected_hex = blake3::hash(&rom_bytes).to_hex().to_string();
+
+    let session_tmp = TempDir::new("-stamp");
+    let session_dir = session_tmp.path.clone();
+    let script = session_tmp.path.join("script.padlog");
+    std::fs::write(&script, "padlog v1\n0000\n0000\n0000\n").unwrap();
+
+    let opts = |session_dir: &std::path::Path| RecordOpts {
+        rom: rom_path.clone(),
+        script: script.clone(),
+        session_dir: session_dir.to_owned(),
+        marks: vec![(2, "a".to_owned())],
+        dump_every: None,
+        total_frames: Some(3),
+        quiet: true,
+    };
+
+    run_record(&opts(&session_dir)).unwrap();
+    let s = Session::load(&session_dir).unwrap();
+    assert_eq!(s.dumps.len(), 1);
+    assert_eq!(
+        s.emu_version.as_deref(),
+        Some(refwork_emu::EMU_VERSION),
+        "fresh scripted session must carry the current EMU_VERSION"
+    );
+    assert_eq!(s.rom_blake3.as_deref(), Some(expected_hex.as_str()));
+
+    // A second run into the same (matching) session is allowed.
+    run_record(&opts(&session_dir)).unwrap();
+
+    // Re-stamp under a foreign version: the next scripted run must refuse,
+    // naming both versions, and must not touch the stored stamp.
+    let mut s = Session::load(&session_dir).unwrap();
+    s.emu_version = Some("refwork-emu 0.0.0-test".to_owned());
+    s.save().unwrap();
+    let err = run_record(&opts(&session_dir)).unwrap_err();
+    assert!(err.contains("refwork-emu 0.0.0-test"), "err: {}", err);
+    assert!(err.contains(refwork_emu::EMU_VERSION), "err: {}", err);
+    let after = Session::load(&session_dir).unwrap();
+    assert_eq!(after.emu_version.as_deref(), Some("refwork-emu 0.0.0-test"));
+    assert_eq!(after.dumps.len(), 2, "refused run must add no dumps");
+
+    // A different ROM hash refuses too — without printing either hash.
+    let mut s = Session::load(&session_dir).unwrap();
+    s.emu_version = Some(refwork_emu::EMU_VERSION.to_owned());
+    s.rom_blake3 = Some("00".repeat(32));
+    s.save().unwrap();
+    let err = run_record(&opts(&session_dir)).unwrap_err();
+    assert!(err.contains("rom_blake3 mismatch"), "err: {}", err);
+    assert!(
+        !err.contains(&expected_hex),
+        "err must not leak the ROM hash: {}",
+        err
     );
 }

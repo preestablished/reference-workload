@@ -150,6 +150,19 @@ pub struct Session {
     /// `session.yaml` files written before this field existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_frames: Option<u64>,
+    /// `refwork_emu::EMU_VERSION` of the build that recorded this session
+    /// (the determinism epoch marker). Written once, at the first save of a
+    /// fresh interactive session or the first scripted `record` into an empty
+    /// session; never rewritten by `--resume`. Absent in sessions recorded
+    /// before the field existed — those get a warning on resume and fail
+    /// `ramdiff lint` check C11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emu_version: Option<String>,
+    /// Lowercase BLAKE3 hex of the ROM image the session was recorded
+    /// against. Same lifecycle as `emu_version`. The value is private
+    /// (it identifies the ROM); tools compare it but never print it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rom_blake3: Option<String>,
     /// Current candidate set (may be empty before the first search).
     #[serde(default)]
     pub candidates: CandidateSet,
@@ -162,8 +175,18 @@ impl Session {
             dir: dir.into(),
             dumps: Vec::new(),
             log_frames: None,
+            emu_version: None,
+            rom_blake3: None,
             candidates: CandidateSet::default(),
         }
+    }
+
+    /// Record the emulator epoch and ROM identity this session is recorded
+    /// under. Pure setter: callers decide when a stamp is legitimate (fresh
+    /// sessions only — see `record::check_epoch` for the resume side).
+    pub fn stamp(&mut self, emu_version: &str, rom_blake3_hex: &str) {
+        self.emu_version = Some(emu_version.to_owned());
+        self.rom_blake3 = Some(rom_blake3_hex.to_owned());
     }
 
     /// Load a session from `dir/session.yaml`, or return a fresh session if
@@ -242,5 +265,75 @@ impl Session {
     /// Register a new dump. Does not persist; call `save()` after.
     pub fn add_dump(&mut self, meta: DumpMeta) {
         self.dumps.push(meta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three-field YAML from the module docs' era: no stamp fields.
+    const LEGACY_YAML: &str = "dumps:\n- label: a\n  frame: 5\n  file: a.bin\n  region: wram\nlog_frames: 10\ncandidates:\n  width: u8\n  offsets: []\n";
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ramdiff-session-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn session_yaml_without_stamp_loads_and_stays_unstamped() {
+        let dir = temp_dir("legacy");
+        std::fs::write(dir.join("session.yaml"), LEGACY_YAML).unwrap();
+        let s = Session::load(&dir).unwrap();
+        assert_eq!(s.emu_version, None);
+        assert_eq!(s.rom_blake3, None);
+        assert_eq!(s.log_frames, Some(10));
+        s.save().unwrap();
+        let text = std::fs::read_to_string(dir.join("session.yaml")).unwrap();
+        assert!(!text.contains("emu_version:"), "saved: {}", text);
+        assert!(!text.contains("rom_blake3:"), "saved: {}", text);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn session_stamp_round_trips() {
+        let dir = temp_dir("stamp");
+        let mut s = Session::new(&dir);
+        let hex = "ab".repeat(32);
+        s.stamp("refwork-emu 9.9.9-test", &hex);
+        s.save().unwrap();
+        let loaded = Session::load(&dir).unwrap();
+        assert_eq!(
+            loaded.emu_version.as_deref(),
+            Some("refwork-emu 9.9.9-test")
+        );
+        assert_eq!(loaded.rom_blake3.as_deref(), Some(hex.as_str()));
+        let text = std::fs::read_to_string(dir.join("session.yaml")).unwrap();
+        assert!(
+            text.contains("emu_version: refwork-emu 9.9.9-test"),
+            "{}",
+            text
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_stamp_type_is_a_parse_error() {
+        let dir = temp_dir("malformed");
+        std::fs::write(
+            dir.join("session.yaml"),
+            "dumps: []\nemu_version: [1, 2]\ncandidates:\n  width: u8\n  offsets: []\n",
+        )
+        .unwrap();
+        let err = Session::load(&dir).unwrap_err();
+        assert!(err.contains("cannot parse"), "err: {}", err);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -62,6 +62,25 @@ pub fn run_record(opts: &RecordOpts) -> Result<(), String> {
     // Load ROM.
     let rom_bytes = std::fs::read(&opts.rom)
         .map_err(|e| format!("cannot read ROM {:?}: {}", opts.rom.display(), e))?;
+    let rom_hex = blake3::hash(&rom_bytes).to_hex().to_string();
+
+    // Epoch stamp: a first-ever scripted run into an empty session stamps
+    // it; anything else must match the stamp already there. Scripted mode
+    // has no override — a new `--session` directory is always available.
+    if session.dumps.is_empty() && session.emu_version.is_none() {
+        session.stamp(refwork_emu::EMU_VERSION, &rom_hex);
+    } else {
+        for w in check_epoch(
+            session.emu_version.as_deref(),
+            refwork_emu::EMU_VERSION,
+            session.rom_blake3.as_deref(),
+            &rom_hex,
+            false,
+        )? {
+            eprintln!("record: warning: {}", w);
+        }
+    }
+
     let cart = Cartridge::from_rom(rom_bytes, None).map_err(|e| format!("bad ROM: {:?}", e))?;
 
     // Allocate leaked WRAM buffer (matches hash_chain.rs pattern).
@@ -202,6 +221,71 @@ pub fn parse_mark(s: &str) -> Result<(u64, String), String> {
         return Err("--mark: label must not be empty".to_owned());
     }
     Ok((frame, label.to_owned()))
+}
+
+// ─── Emulator epoch / ROM identity stamp ─────────────────────────────────────
+
+/// Compare a session's stored `emu_version` / `rom_blake3` stamps against
+/// the running build and ROM before anything is replayed.
+///
+/// Returns `Ok(warnings)` (possibly empty) when the session may proceed and
+/// `Err(text)` when it must not. `downgrade` (the `--skip-replay-verify`
+/// override) turns every refusal into a warning; the stored stamps are
+/// never rewritten either way. Order of evaluation: ROM mismatch first (the
+/// less recoverable condition — a version mismatch must never mask it),
+/// then version mismatch, then missing-stamp notes. Hash values are never
+/// included in the messages (the ROM identity is private); `EMU_VERSION`
+/// strings are public and are named.
+pub fn check_epoch(
+    stored_emu: Option<&str>,
+    current_emu: &str,
+    stored_rom: Option<&str>,
+    current_rom: &str,
+    downgrade: bool,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+
+    if let Some(h) = stored_rom {
+        if h != current_rom {
+            let msg = "session was recorded against a different ROM (rom_blake3 mismatch); \
+                       refusing to resume"
+                .to_owned();
+            if !downgrade {
+                return Err(msg);
+            }
+            warnings.push(msg);
+        }
+    }
+
+    match stored_emu {
+        Some(v) if v != current_emu => {
+            let msg = format!(
+                "session was recorded under \"{}\" but this build is \"{}\"; the replayed \
+                 state would not match what was played. Re-record under this build, or pass \
+                 --skip-replay-verify to resume anyway (session stays stamped \"{}\" and \
+                 will fail lint).",
+                v, current_emu, v
+            );
+            if !downgrade {
+                return Err(msg);
+            }
+            warnings.push(msg);
+        }
+        Some(_) => {
+            if stored_rom.is_none() {
+                warnings.push("session has no rom_blake3 stamp".to_owned());
+            }
+        }
+        None => {
+            warnings.push(
+                "session has no emu_version stamp (recorded before the field existed); dump \
+                 divergence is the only epoch check"
+                    .to_owned(),
+            );
+        }
+    }
+
+    Ok(warnings)
 }
 
 // ─── Interactive record ───────────────────────────────────────────────────────
@@ -792,6 +876,28 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 
     // Load ROM.
     let rom_bytes = std::fs::read(&opts.rom).map_err(|e| format!("cannot read ROM: {}", e))?;
+    let rom_hex = blake3::hash(&rom_bytes).to_hex().to_string();
+
+    // Emulator epoch / ROM identity: a resumed session must have been
+    // recorded by this build against this ROM (byte divergence at a
+    // checkpoint used to be the only signal). A fresh session is stamped in
+    // memory here and hits disk right after the log is opened below.
+    if opts.resume {
+        for w in check_epoch(
+            session.emu_version.as_deref(),
+            refwork_emu::EMU_VERSION,
+            session.rom_blake3.as_deref(),
+            &rom_hex,
+            opts.skip_replay_verify,
+        )
+        .map_err(|e| format!("cannot resume: {}", e))?
+        {
+            eprintln!("interactive: warning: {}", w);
+        }
+    } else {
+        session.stamp(refwork_emu::EMU_VERSION, &rom_hex);
+    }
+
     let cart = Cartridge::from_rom(rom_bytes, None).map_err(|e| format!("bad ROM: {:?}", e))?;
 
     let wram: &'static mut [u8; 0x20000] = Box::leak(Box::new([WRAM_INIT_BYTE; 0x20000]));
@@ -870,6 +976,14 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     }
 
     let mut log_file = open_interactive_log(&opts.output_log, opts.resume)?;
+
+    // Persist the fresh session's stamp now, so a run killed before its
+    // first F5 dump still records the epoch it was started under. (A
+    // header-only padlog plus a stamped, dump-less session.yaml still
+    // counts as clean for the fresh-session guard.)
+    if !opts.resume {
+        session.save()?;
+    }
 
     const BASE_TITLE: &str = "ramdiff record [interactive] — F5=dump, M=mute, Esc=quit";
     let mut window = Window::new(
@@ -1640,6 +1754,87 @@ mod tests {
         let mut dst = [0u32; 2];
         xrgb_to_u32(&src, &mut dst, 2, 1);
         assert_eq!(dst, [0x0011_2233, 0x00aa_bbcc]);
+    }
+
+    // ─── Epoch / ROM stamp check ─────────────────────────────────────────
+
+    const CUR_EMU: &str = "refwork-emu 0.2.3";
+    const OLD_EMU: &str = "refwork-emu 0.2.0";
+    const CUR_ROM: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_ROM: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn check_epoch_table() {
+        // Both match: clean.
+        assert_eq!(
+            check_epoch(Some(CUR_EMU), CUR_EMU, Some(CUR_ROM), CUR_ROM, false).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            check_epoch(Some(CUR_EMU), CUR_EMU, Some(CUR_ROM), CUR_ROM, true).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // No emu stamp (legacy): warning regardless of override or ROM.
+        for downgrade in [false, true] {
+            for rom in [None, Some(CUR_ROM), Some(OTHER_ROM)] {
+                let r = check_epoch(None, CUR_EMU, rom, CUR_ROM, downgrade);
+                if rom == Some(OTHER_ROM) && !downgrade {
+                    // ROM precedence: a wrong ROM refuses even a legacy session.
+                    assert!(r.unwrap_err().contains("rom_blake3 mismatch"));
+                    continue;
+                }
+                let w = r.unwrap();
+                assert!(
+                    w.iter().any(|m| m.contains("no emu_version stamp")),
+                    "{:?}",
+                    w
+                );
+            }
+        }
+
+        // Version matches, ROM stamp missing: warning.
+        let w = check_epoch(Some(CUR_EMU), CUR_EMU, None, CUR_ROM, false).unwrap();
+        assert_eq!(w, vec!["session has no rom_blake3 stamp".to_owned()]);
+
+        // Version mismatch, no override: error naming both versions.
+        let e = check_epoch(Some(OLD_EMU), CUR_EMU, Some(CUR_ROM), CUR_ROM, false).unwrap_err();
+        assert!(e.contains(OLD_EMU) && e.contains(CUR_EMU), "{}", e);
+        assert!(e.contains("--skip-replay-verify"), "{}", e);
+        let e = check_epoch(Some(OLD_EMU), CUR_EMU, None, CUR_ROM, false).unwrap_err();
+        assert!(e.contains(OLD_EMU), "{}", e);
+
+        // Version mismatch with override: same text as a warning.
+        let w = check_epoch(Some(OLD_EMU), CUR_EMU, Some(CUR_ROM), CUR_ROM, true).unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains(OLD_EMU) && w[0].contains(CUR_EMU), "{:?}", w);
+
+        // ROM mismatch, no override: error without hashes.
+        let e = check_epoch(Some(CUR_EMU), CUR_EMU, Some(OTHER_ROM), CUR_ROM, false).unwrap_err();
+        assert!(e.contains("rom_blake3 mismatch"), "{}", e);
+        assert!(!e.contains(OTHER_ROM) && !e.contains(CUR_ROM), "{}", e);
+
+        // ROM mismatch with override: warning without hashes.
+        let w = check_epoch(Some(CUR_EMU), CUR_EMU, Some(OTHER_ROM), CUR_ROM, true).unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("rom_blake3 mismatch"), "{:?}", w);
+        assert!(!w[0].contains(OTHER_ROM), "{:?}", w);
+    }
+
+    #[test]
+    fn check_epoch_combined_mismatch_prefers_rom() {
+        let e = check_epoch(Some(OLD_EMU), CUR_EMU, Some(OTHER_ROM), CUR_ROM, false).unwrap_err();
+        assert!(e.contains("rom_blake3 mismatch"), "{}", e);
+        assert!(
+            !e.contains(OLD_EMU),
+            "version text must not be emitted: {}",
+            e
+        );
+
+        let w = check_epoch(Some(OLD_EMU), CUR_EMU, Some(OTHER_ROM), CUR_ROM, true).unwrap();
+        assert_eq!(w.len(), 2, "{:?}", w);
+        assert!(w[0].contains("rom_blake3 mismatch"), "{:?}", w);
+        assert!(w[1].contains(OLD_EMU), "{:?}", w);
     }
 
     #[test]
