@@ -15,5 +15,6 @@ pub mod filter;
 pub mod gamepad;
 #[cfg(all(feature = "interactive", target_os = "macos"))]
 pub mod gamepad_macos;
+pub mod lint;
 pub mod record;
 pub mod session;

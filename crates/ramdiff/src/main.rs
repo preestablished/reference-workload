@@ -7,6 +7,11 @@
 //!                [--mark <frame>=<label>] [--dump-every N] [--frames N]
 //!                [--interactive]   (only when compiled with --features interactive)
 //!                [--resume] [--skip-replay-verify]
+//!                  (a fresh session is stamped with `emu_version` = the build's
+//!                   `refwork_emu::EMU_VERSION` and `rom_blake3`; `--resume`
+//!                   refuses a session stamped by another build or ROM before
+//!                   replaying — `--skip-replay-verify` downgrades that to a
+//!                   warning and leaves the stored stamp untouched)
 //!                [--gamepad /dev/input/eventN]   (interactive, Linux; default: auto-detect)
 //!                [--pad-debug]   (interactive; verbose per-event pad diagnostics on stderr)
 //!                [--no-audio]   (interactive; skip audio playback entirely)
@@ -27,6 +32,13 @@
 //!              [--region wram] [--semantics <s>] [--description <text>]
 //!              [--discretize identity|none|bits]
 //!              [--force]
+//!
+//! ramdiff lint --session <dir> [--checklist <labels.yaml>] [--kind <name>]
+//!              [--final] [--waive <label-glob>]...
+//!   Checks a recorded session against the committed label checklist
+//!   (tools/discovery-02-required-labels.yaml; see `lint.rs` for the check
+//!   table). Mid-session, missing labels are INFO; `--final` requires every
+//!   required label and `log_frames == padlog frames`. Exit 1 on any FAIL.
 //! ```
 //!
 //! # Interactive mode keyboard mapping (feature `interactive`)
@@ -89,6 +101,7 @@ use std::str::FromStr;
 use ramdiff::candidates::CandidatesOpts;
 use ramdiff::emit::{parse_feature_type, parse_semantics, parse_stability, EmitOpts};
 use ramdiff::filter::{run_search, FilterOp};
+use ramdiff::lint::{run_lint, LintOpts};
 use ramdiff::record::{parse_mark, parse_watch_addr, InteractiveOpts, RecordOpts, WatchOpts};
 use ramdiff::session::SearchWidth;
 
@@ -106,6 +119,7 @@ fn main() {
         "candidates" => cmd_candidates(&args[1..]),
         "watch" => cmd_watch(&args[1..]),
         "emit" => cmd_emit(&args[1..]),
+        "lint" => cmd_lint(&args[1..]),
         "--help" | "-h" | "help" => {
             usage();
             return;
@@ -159,6 +173,10 @@ fn usage() {
     println!("       --type <type> --stability stable|volatile");
     println!("       [--region wram] [--semantics <s>] [--description <text>]");
     println!("       [--discretize identity|none|bits] [--force]");
+    println!();
+    println!("  lint --session <dir> [--checklist <labels.yaml>] [--kind <name>]");
+    println!("       [--final] [--waive <label-glob>]...");
+    println!("       (default checklist: <exe>/../../tools/discovery-02-required-labels.yaml)");
 }
 
 // ─── record ──────────────────────────────────────────────────────────────────
@@ -559,6 +577,88 @@ fn cmd_emit(args: &[String]) -> Result<(), String> {
     })
 }
 
+// ─── lint ─────────────────────────────────────────────────────────────────────
+
+/// Relative location of the committed checklist from a `target/<profile>/`
+/// binary. `CARGO_MANIFEST_DIR` is compile-time only, so at runtime the
+/// default is derived from the executable's location; anything else needs
+/// an explicit `--checklist` (the `tools/lint-session` wrapper always passes
+/// one).
+const DEFAULT_CHECKLIST_FROM_EXE: &str = "../../tools/discovery-02-required-labels.yaml";
+
+fn default_checklist() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("lint: cannot locate exe: {}", e))?;
+    let candidate = exe
+        .parent()
+        .map(|d| d.join(DEFAULT_CHECKLIST_FROM_EXE))
+        .filter(|p| p.is_file());
+    candidate.ok_or_else(|| {
+        format!(
+            "lint: --checklist is required (no {} next to the executable)",
+            DEFAULT_CHECKLIST_FROM_EXE
+        )
+    })
+}
+
+fn cmd_lint(args: &[String]) -> Result<(), String> {
+    let mut session_dir: Option<std::path::PathBuf> = None;
+    let mut checklist: Option<std::path::PathBuf> = None;
+    let mut kind: Option<String> = None;
+    let mut final_ = false;
+    let mut waive: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session" => {
+                i += 1;
+                session_dir = Some(need_path("lint", "--session", args, i)?);
+            }
+            "--checklist" => {
+                i += 1;
+                checklist = Some(need_path("lint", "--checklist", args, i)?);
+            }
+            "--kind" => {
+                i += 1;
+                kind = Some(need_str("lint", "--kind", args, i)?);
+            }
+            "--final" => {
+                final_ = true;
+            }
+            "--waive" => {
+                i += 1;
+                waive.push(need_str("lint", "--waive", args, i)?);
+            }
+            other => {
+                return Err(format!("lint: unknown option {:?}", other));
+            }
+        }
+        i += 1;
+    }
+
+    let session_dir = session_dir.ok_or_else(|| "lint: --session is required".to_owned())?;
+    let checklist = match checklist {
+        Some(c) => c,
+        None => default_checklist()?,
+    };
+
+    let report = run_lint(&LintOpts {
+        session_dir,
+        checklist,
+        kind,
+        final_,
+        waive,
+    })?;
+    print!("{}", report.render());
+    if report.passed() {
+        Ok(())
+    } else {
+        // The report already says what failed; exit non-zero without the
+        // generic "ramdiff: error:" prefix repeating it.
+        std::process::exit(1);
+    }
+}
+
 // ─── Argument helpers ─────────────────────────────────────────────────────────
 
 fn need_path(
@@ -671,6 +771,14 @@ mod tests {
             "err: {}",
             err
         );
+    }
+
+    #[test]
+    fn lint_requires_session_and_rejects_unknown_option() {
+        let err = cmd_lint(&["--final".to_owned()]).unwrap_err();
+        assert!(err.contains("--session is required"), "err: {}", err);
+        let err = cmd_lint(&["--bogus".to_owned()]).unwrap_err();
+        assert!(err.contains("unknown option"), "err: {}", err);
     }
 
     /// Smoke-parse: with `--interactive` present, `--stats` must be

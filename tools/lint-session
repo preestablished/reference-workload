@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# lint-session — run `ramdiff lint` on a private hand-play session by name.
+# Usage: lint-session <session-name> [--final] [--waive <label-glob>]... [--kind <name>]
+#   Resolves the private root from the pointer file, lints
+#   $PR/ramdiff/<session-name> against tools/discovery-02-required-labels.yaml
+#   and tees the report to $PR/evidence/lint-<session-name>[-final].txt.
+#   Prints nothing private beyond what `ramdiff lint` prints (check ids,
+#   label names, frame counts). Exit status is ramdiff lint's (1 on any FAIL).
+set -euo pipefail
+
+if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  sed -n "2,9p" "$0" | sed "s/^# \{0,1\}//"; exit 0
+fi
+SESSION_NAME="$1"; shift
+if ! [[ "$SESSION_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "error: session name must match [A-Za-z0-9][A-Za-z0-9_.-]* (got: $SESSION_NAME)" >&2
+  exit 1
+fi
+FINAL=0
+extra_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --final) FINAL=1; extra_args+=(--final) ;;
+    --waive|--kind)
+      [ $# -ge 2 ] || { echo "error: $1 requires an argument" >&2; exit 1; }
+      extra_args+=("$1" "$2"); shift ;;
+    *) echo "error: unknown argument $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+# Resolve the repo root from this script's real location (mirrors
+# tools/record-ramdiff so an installed symlink works too).
+SRC="$0"
+while [ -L "$SRC" ]; do
+  DIR="$(cd "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  if [[ "$SRC" != /* ]]; then SRC="$DIR/$SRC"; fi
+done
+REPO_ROOT="$(cd "$(dirname "$SRC")/.." && pwd)"
+RAMDIFF="$REPO_ROOT/target/release/ramdiff"
+CHECKLIST="$REPO_ROOT/tools/discovery-02-required-labels.yaml"
+
+# Private root from the pointer file outside every checkout; its value is
+# never printed. RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only).
+POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
+if [ -n "${RAMDIFF_PRIVATE_ROOT:-}" ]; then
+  PRIVATE_ROOT="$RAMDIFF_PRIVATE_ROOT"
+elif [ -s "$POINTER" ]; then
+  PRIVATE_ROOT="$(head -n1 "$POINTER")"
+else
+  echo "error: private-root pointer file missing: $POINTER" >&2
+  exit 1
+fi
+SESSION_DIR="$PRIVATE_ROOT/ramdiff/$SESSION_NAME"
+EVIDENCE_DIR="$PRIVATE_ROOT/evidence"
+
+[ -x "$RAMDIFF" ] || { echo "error: ramdiff release binary not built (cargo build --release -p ramdiff)" >&2; exit 1; }
+[ -f "$CHECKLIST" ] || { echo "error: checklist missing: tools/discovery-02-required-labels.yaml" >&2; exit 1; }
+[ -d "$SESSION_DIR" ] || { echo "error: no session directory named $SESSION_NAME under the private root" >&2; exit 1; }
+mkdir -p "$EVIDENCE_DIR"
+
+OUT="$EVIDENCE_DIR/lint-$SESSION_NAME.txt"
+if [ "$FINAL" -eq 1 ]; then OUT="$EVIDENCE_DIR/lint-$SESSION_NAME-final.txt"; fi
+
+# Capture ramdiff's exit status through the tee (pipefail alone would also
+# surface a tee failure, which we do want to notice).
+set +e
+"$RAMDIFF" lint --session "$SESSION_DIR" --checklist "$CHECKLIST" \
+  ${extra_args[@]+"${extra_args[@]}"} | tee "$OUT"
+status=${PIPESTATUS[0]}
+set -e
+echo "lint-session: report written to evidence/$(basename "$OUT")" >&2
+exit "$status"

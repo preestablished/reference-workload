@@ -1,0 +1,79 @@
+# discovery-02 required-label checklist — the machine copy of the label
+# vocabulary in docs/discovery-02-recording-runbook.md. Consumed by
+# `ramdiff lint` (crates/ramdiff/src/lint.rs); the processing plan refers to
+# labels by these names only. Contains no private data.
+#
+# Rules encoded here:
+# - `ordered: true`: the required labels that are present must have strictly
+#   increasing dump frames in list order. Optional labels are unordered.
+# - Labels are literal (a `-N` suffix is part of the name). Unknown extra
+#   labels are ignored except for `forbidden_substrings`.
+# - `may_be_not_applicable: true`: a session directory holding only
+#   `NOT-APPLICABLE.md` (no padlog) passes as `lint: PASS (NOT-APPLICABLE)`.
+kind: ramdiff-label-checklist
+schema_version: 1
+label_pattern: "^[A-Za-z0-9_-]+$"      # equals the F5 sanitizer's kept set
+sessions:
+  discovery-02-main:
+    may_be_not_applicable: false
+    ordered: true                        # required labels appear in this order by frame
+    required:
+      - title-press-start
+      - title-1p-selected
+      - w1-hub
+      - w1s1-entry
+      - health-full
+      - health-hit-1
+      - score-before-1
+      - score-after-1
+      - score-before-2
+      - score-after-2
+      - w1s2-entry
+      - w1s2-midboss-begin
+      - w1s2-midboss-defeated
+      - w1s3-entry
+      - w1s4-entry
+      - w1s4-boss-begin
+      - w1s4-boss-defeated
+      - w1-clear
+      - w2-hub
+      - w2s1-entry
+      - w2s1-play
+      - session-end
+    optional:
+      - health-hit-2
+      - heal-1
+      - score-before-3
+      - score-after-3
+    forbidden_substrings: [gameover, dead, death]   # a game over must not be in the main session
+  discovery-02-gameover-death:
+    may_be_not_applicable: false
+    ordered: true
+    required:
+      - title-press-start
+      - w1s1-entry
+      - alive-baseline
+      - lives-full
+      - death-1
+      - respawn-1
+      - last-life
+      - death-final
+      - gameover-screen
+      - gameover-late
+      - post-gameover
+    optional:
+      - death-2
+      - respawn-2
+  discovery-02-gameover-timer:
+    may_be_not_applicable: true          # NOT-APPLICABLE.md in the session dir satisfies this kind
+    ordered: true
+    required:
+      - title-press-start
+      - w1s1-entry
+      - timer-start
+      - timer-mid
+      - timer-low
+      - timer-expired
+      - gameover-timer-screen
+      - gameover-timer-late
+    optional: []
