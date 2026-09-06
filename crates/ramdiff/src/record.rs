@@ -297,7 +297,9 @@ pub fn check_epoch(
 /// labels were stored as e.g. `\x1b[15~w1s4-entry`. Strip a run of leading
 /// escape sequences, drop any remaining ASCII control characters, and trim, so
 /// `\x1b[15~w1s4-entry` becomes `w1s4-entry`. Legitimate labels are
-/// `[A-Za-z0-9_-]`, which this never alters.
+/// `[A-Za-z0-9_-]`, which this never alters. Only *leading* escape sequences
+/// are removed (the real leak always precedes typed input); an escape that
+/// somehow landed mid-label would keep its printable bytes.
 pub fn clean_label(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut i = 0;
@@ -1893,6 +1895,10 @@ mod tests {
         assert_eq!(clean_label(""), "");
         // A lone escape with nothing after it yields an empty (ignored) label.
         assert_eq!(clean_label("\u{1b}"), "");
+        // Truncated/parameterized CSI openers must not panic (they strip to empty
+        // or to the trailing text).
+        assert_eq!(clean_label("\u{1b}["), "");
+        assert_eq!(clean_label("\u{1b}[?25hw1-hub"), "w1-hub");
     }
 
     #[test]
