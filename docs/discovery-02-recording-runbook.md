@@ -85,7 +85,10 @@ replayed.
   lint fails it (check C13).
 - Press **F5**, type the label exactly as listed (lowercase, digits, `-`),
   press Enter. The game is paused while the prompt waits; audio may
-  re-prime after — expected.
+  re-prime after — expected. When playing with the gamepad the terminal has
+  keyboard focus, so the F5 keypress also reaches the prompt as an escape
+  sequence; the prompt strips a leaked leading function-key sequence
+  automatically, so type the label normally.
 - The dump is taken at the frame shown; "entry" dumps are taken on the
   **first frame the player can move** in the stage.
 - Bracket pairs (`score-before-N` / `score-after-N`): dump `before`, cause

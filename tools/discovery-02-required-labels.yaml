@@ -45,7 +45,7 @@ sessions:
       - heal-1
       - score-before-3
       - score-after-3
-    forbidden_substrings: [gameover, dead, death]   # a game over must not be in the main session
+    forbidden_substrings: [gameover, game-over, dead, death]   # a game over must not be in the main session
   discovery-02-gameover-death:
     may_be_not_applicable: false
     ordered: true

@@ -288,6 +288,47 @@ pub fn check_epoch(
     Ok(warnings)
 }
 
+/// Remove terminal control noise from a typed dump label.
+///
+/// A function-key press (F5 = `ESC [ 1 5 ~`) can reach the controlling
+/// terminal's stdin as well as the emulator window, so the label read at the
+/// F5 prompt can arrive with one or more leading CSI/SS3 escape sequences and
+/// stray control bytes — seen live in discovery-02-main take 1, where several
+/// labels were stored as e.g. `\x1b[15~w1s4-entry`. Strip a run of leading
+/// escape sequences, drop any remaining ASCII control characters, and trim, so
+/// `\x1b[15~w1s4-entry` becomes `w1s4-entry`. Legitimate labels are
+/// `[A-Za-z0-9_-]`, which this never alters.
+pub fn clean_label(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0;
+    // Strip a run of leading CSI (ESC [ params/intermediates final 0x40..=0x7e)
+    // and SS3 (ESC O byte) escape sequences.
+    while i < chars.len() && chars[i] == '\u{1b}' {
+        if i + 1 < chars.len() && chars[i + 1] == '[' {
+            i += 2;
+            while i < chars.len() && !('\u{40}'..='\u{7e}').contains(&chars[i]) {
+                i += 1;
+            }
+            if i < chars.len() {
+                i += 1; // consume the final byte
+            }
+        } else if i + 1 < chars.len() && chars[i + 1] == 'O' {
+            i += 2;
+            if i < chars.len() {
+                i += 1; // consume the single SS3 byte
+            }
+        } else {
+            i += 1; // lone ESC
+        }
+    }
+    chars[i..]
+        .iter()
+        .filter(|c| !c.is_ascii_control())
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 // ─── Interactive record ───────────────────────────────────────────────────────
 
 /// Options for interactive record mode (headless stub — same fields used by
@@ -382,10 +423,7 @@ fn check_resume_integrity(
     session_log_frames: Option<u64>,
     dumps: &[DumpMeta],
 ) -> Result<(), String> {
-    let max_dump = dumps
-        .iter()
-        .filter(|d| d.frame > 0)
-        .max_by_key(|d| d.frame);
+    let max_dump = dumps.iter().filter(|d| d.frame > 0).max_by_key(|d| d.frame);
 
     if !log_exists {
         if max_dump.is_some() || session_log_frames.unwrap_or(0) > 0 {
@@ -1160,7 +1198,8 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
             let _ = std::io::stderr().flush();
             let mut label = String::new();
             let _ = std::io::stdin().read_line(&mut label);
-            let label = label.trim().to_owned();
+            // Strip any leaked function-key escape sequence (see `clean_label`).
+            let label = clean_label(&label);
             if !label.is_empty() {
                 let wram_ref: &[u8; WRAM_SIZE] = core.wram();
                 let safe: String = label
@@ -1224,8 +1263,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
                 reprimes_after_prompt += reprime_delta;
             }
             let gap = last_push_done.map(|t| t_emu.duration_since(t));
-            if let Some(msg) = reprime_reporter.note(reprime_delta, gap, prompt_last_iter, t_end)
-            {
+            if let Some(msg) = reprime_reporter.note(reprime_delta, gap, prompt_last_iter, t_end) {
                 eprintln!("{}", msg);
             }
         }
@@ -1240,9 +1278,7 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
             // innocent frame. Sub-threshold drains are covered by the
             // re-prime note's gap and the stats line's min depth instead.
             let total_ms = phases.total().as_millis() as u64;
-            if !dump_prompt_this_iter
-                && total_ms > SLOW_FRAME_MS
-                && slow_frame_limiter.allow(t_end)
+            if !dump_prompt_this_iter && total_ms > SLOW_FRAME_MS && slow_frame_limiter.allow(t_end)
             {
                 eprintln!(
                     "interactive: slow frame: {}ms ({})",
@@ -1606,10 +1642,7 @@ mod tests {
         let err = ensure_fresh_session(&session, &log).unwrap_err();
         assert!(err.contains("--resume"), "err: {}", err);
         // The refused run must not modify the file.
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap(),
-            "padlog v1\n0001\n"
-        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "padlog v1\n0001\n");
         std::fs::remove_file(log).unwrap();
     }
 
@@ -1675,7 +1708,10 @@ mod tests {
         assert!(check_resume_integrity(10, true, None, &dumps).is_ok());
 
         // A real dump alongside the sentinel still governs.
-        let dumps = vec![dump("external", 0, "external.bin"), dump("real", 50, "real.bin")];
+        let dumps = vec![
+            dump("external", 0, "external.bin"),
+            dump("real", 50, "real.bin"),
+        ];
         assert!(check_resume_integrity(51, true, None, &dumps).is_ok());
         assert!(check_resume_integrity(50, true, None, &dumps).is_err());
     }
@@ -1835,6 +1871,28 @@ mod tests {
         assert_eq!(w.len(), 2, "{:?}", w);
         assert!(w[0].contains("rom_blake3 mismatch"), "{:?}", w);
         assert!(w[1].contains(OLD_EMU), "{:?}", w);
+    }
+
+    #[test]
+    fn clean_label_strips_leaked_function_key_escapes() {
+        // The exact corruptions seen in discovery-02-main take 1.
+        assert_eq!(clean_label("\u{1b}[15~w1s4-entry\n"), "w1s4-entry");
+        assert_eq!(
+            clean_label("\u{1b}[15~\u{1b}[15~w1s2-midboss-begin"),
+            "w1s2-midboss-begin"
+        );
+        assert_eq!(clean_label("\u{1b}[15~score-after-5"), "score-after-5");
+        // SS3-form function key.
+        assert_eq!(
+            clean_label("\u{1b}OPtitle-press-start"),
+            "title-press-start"
+        );
+        // Clean labels are untouched; surrounding whitespace is trimmed.
+        assert_eq!(clean_label("w2s1-play\n"), "w2s1-play");
+        assert_eq!(clean_label("  health-full  "), "health-full");
+        assert_eq!(clean_label(""), "");
+        // A lone escape with nothing after it yields an empty (ignored) label.
+        assert_eq!(clean_label("\u{1b}"), "");
     }
 
     #[test]

@@ -880,7 +880,10 @@ mod tests {
         assert_eq!(main.required.len(), 22);
         assert!(main.ordered);
         assert!(!main.may_be_not_applicable);
-        assert_eq!(main.forbidden_substrings, vec!["gameover", "dead", "death"]);
+        assert_eq!(
+            main.forbidden_substrings,
+            vec!["gameover", "game-over", "dead", "death"]
+        );
         assert!(cl.sessions["discovery-02-gameover-timer"].may_be_not_applicable);
         assert!(!cl.sessions["discovery-02-gameover-death"].may_be_not_applicable);
         // Every listed label matches the sanitizer pattern (so it names its file).
@@ -1244,6 +1247,36 @@ mod tests {
             refwork_emu::EMU_VERSION,
         );
         assert_eq!(fails(&r), vec!["C10"], "{}", r.render());
+    }
+
+    #[test]
+    fn fails_on_hyphenated_game_over_label_in_main() {
+        // Regression: discovery-02-main take 1 carried a `game-over-screen`
+        // dump that slipped past a `gameover`-only forbidden list.
+        let spec = main_spec();
+        let mut facts = passing_facts(&spec, 5000);
+        {
+            let s = session_mut(&mut facts);
+            let last = s.dumps.last().unwrap().frame;
+            s.dumps.push(DumpMeta {
+                label: "game-over-screen".to_owned(),
+                frame: last + 10,
+                file: "game-over-screen.bin".to_owned(),
+                region: "wram".to_owned(),
+            });
+        }
+        facts
+            .dump_sizes
+            .insert("game-over-screen.bin".to_owned(), Some(WRAM_SIZE as u64));
+        let r = lint_session(
+            "discovery-02-main",
+            &spec,
+            &facts,
+            true,
+            &[],
+            refwork_emu::EMU_VERSION,
+        );
+        assert!(fails(&r).contains(&"C10"), "{}", r.render());
     }
 
     #[test]
