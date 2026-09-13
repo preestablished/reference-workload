@@ -35,8 +35,18 @@ pub const NOT_APPLICABLE_MARKER: &str = "NOT-APPLICABLE.md";
 /// Operator notes file; the `--waive` override requires the marker line
 /// below inside it.
 pub const SESSION_NOTES: &str = "SESSION-NOTES.md";
-/// The line in `SESSION-NOTES.md` that authorizes `--waive`.
-pub const WAIVE_MARKER_LINE: &str = "score_counter: NOT-APPLICABLE";
+/// Waiver markers: each `(line, glob)` pair means "if `SESSION-NOTES.md`
+/// contains `line` (trimmed, exact), then `--waive <glob>` is authorized".
+/// A glob may have more than one authorizing line (either present authorizes).
+/// This replaces the earlier single global flag, under which any `--waive`
+/// glob was authorized by the one score-counter line regardless of fit.
+pub const WAIVE_MARKERS: &[(&str, &str)] = &[
+    ("score_counter: NOT-APPLICABLE", "score-*"),
+    ("currency: NOT-APPLICABLE", "currency-only-*"),
+    ("currency_only: NOT-AVAILABLE", "currency-only-*"),
+    ("score_only: NOT-AVAILABLE", "score-only-*"),
+    ("both_event: NOT-AVAILABLE", "both-*"),
+];
 /// The interactive input log's file name inside a session directory.
 pub const PADLOG_FILE: &str = "interactive.padlog";
 /// The exact header line an interactive padlog starts with.
@@ -53,8 +63,9 @@ pub struct LintOpts {
     /// `log_frames == padlog frames`.
     pub final_: bool,
     /// `--waive <glob>` (repeatable): required labels matching a glob are
-    /// reported `WAIVED` instead of missing. Honored only when
-    /// `SESSION-NOTES.md` contains [`WAIVE_MARKER_LINE`].
+    /// reported `WAIVED` instead of missing. Each glob is honored only when
+    /// `SESSION-NOTES.md` contains a line that authorizes it (see
+    /// [`WAIVE_MARKERS`]).
     pub waive: Vec<String>,
 }
 
@@ -182,8 +193,10 @@ pub struct SessionFacts {
     pub dump_sizes: BTreeMap<String, Option<u64>>,
     /// `NOT-APPLICABLE.md` exists in the session dir.
     pub not_applicable_marker: bool,
-    /// `SESSION-NOTES.md` exists and contains [`WAIVE_MARKER_LINE`].
-    pub waive_marker: bool,
+    /// The waiver-marker lines (from [`WAIVE_MARKERS`]) present in
+    /// `SESSION-NOTES.md`. A `--waive` glob is authorized iff a present marker
+    /// maps to it.
+    pub waive_markers: BTreeSet<String>,
 }
 
 /// Load and validate a checklist file.
@@ -308,9 +321,14 @@ pub fn gather_facts(session_dir: &Path) -> SessionFacts {
     }
 
     let not_applicable_marker = session_dir.join(NOT_APPLICABLE_MARKER).is_file();
-    let waive_marker = std::fs::read_to_string(session_dir.join(SESSION_NOTES))
-        .map(|t| t.lines().any(|l| l.trim() == WAIVE_MARKER_LINE))
-        .unwrap_or(false);
+    let waive_markers: BTreeSet<String> = std::fs::read_to_string(session_dir.join(SESSION_NOTES))
+        .map(|t| {
+            t.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| WAIVE_MARKERS.iter().any(|(m, _)| *m == l))
+                .collect()
+        })
+        .unwrap_or_default();
 
     SessionFacts {
         session,
@@ -318,7 +336,7 @@ pub fn gather_facts(session_dir: &Path) -> SessionFacts {
         padlog_read_error,
         dump_sizes,
         not_applicable_marker,
-        waive_marker,
+        waive_markers,
     }
 }
 
@@ -766,11 +784,30 @@ pub fn run_lint(opts: &LintOpts) -> Result<LintReport, String> {
         return Err("--session is not a directory".to_owned());
     }
     let facts = gather_facts(&opts.session_dir);
-    if !opts.waive.is_empty() && !facts.waive_marker {
-        return Err(format!(
-            "--waive requires {} in the session dir containing the line `{}`",
-            SESSION_NOTES, WAIVE_MARKER_LINE
-        ));
+    for glob in &opts.waive {
+        let authorized = WAIVE_MARKERS
+            .iter()
+            .any(|(m, g)| g == glob && facts.waive_markers.contains(*m));
+        if !authorized {
+            let needed: Vec<&str> = WAIVE_MARKERS
+                .iter()
+                .filter(|(_, g)| g == glob)
+                .map(|(m, _)| *m)
+                .collect();
+            return Err(if needed.is_empty() {
+                format!(
+                    "--waive {:?}: no waiver marker is defined for this glob",
+                    glob
+                )
+            } else {
+                format!(
+                    "--waive {:?} requires one of these lines in {}: {}",
+                    glob,
+                    SESSION_NOTES,
+                    needed.join(" | ")
+                )
+            });
+        }
     }
     Ok(lint_session(
         &kind,
@@ -837,7 +874,7 @@ mod tests {
             padlog_read_error: None,
             dump_sizes: sizes,
             not_applicable_marker: false,
-            waive_marker: false,
+            waive_markers: BTreeSet::new(),
         }
     }
 
@@ -863,7 +900,8 @@ mod tests {
             vec![
                 "discovery-02-gameover-death",
                 "discovery-02-gameover-timer",
-                "discovery-02-main"
+                "discovery-02-main",
+                "discovery-02-score-currency"
             ]
         );
         let main = &cl.sessions["discovery-02-main"];
@@ -1384,7 +1422,7 @@ mod tests {
             padlog_read_error: None,
             dump_sizes: BTreeMap::new(),
             not_applicable_marker: true,
-            waive_marker: false,
+            waive_markers: BTreeSet::new(),
         };
         let timer = &cl.sessions["discovery-02-gameover-timer"];
         let r = lint_session(
@@ -1464,7 +1502,9 @@ mod tests {
         session_mut(&mut facts)
             .dumps
             .retain(|d| !d.label.starts_with("score-"));
-        facts.waive_marker = true;
+        facts
+            .waive_markers
+            .insert("score_counter: NOT-APPLICABLE".to_owned());
         let waive = vec!["score-*".to_owned()];
         let r = lint_session(
             "discovery-02-main",
@@ -1497,7 +1537,9 @@ mod tests {
         session_mut(&mut facts)
             .dumps
             .retain(|d| !d.label.starts_with("score-") && d.label != "w2-hub");
-        facts.waive_marker = true;
+        facts
+            .waive_markers
+            .insert("score_counter: NOT-APPLICABLE".to_owned());
         let waive = vec!["score-*".to_owned()];
         let r = lint_session(
             "discovery-02-main",
@@ -1629,7 +1671,7 @@ mod tests {
             waive,
         };
         let err = run_lint(&opts(vec!["score-*".to_owned()])).unwrap_err();
-        assert!(err.contains(WAIVE_MARKER_LINE), "{}", err);
+        assert!(err.contains("score_counter: NOT-APPLICABLE"), "{}", err);
 
         // Marker present (with surrounding notes): accepted.
         std::fs::write(
@@ -1645,6 +1687,161 @@ mod tests {
         // Without --waive the marker changes nothing.
         let r = run_lint(&opts(vec![])).unwrap();
         assert!(r.passed());
+    }
+
+    #[test]
+    fn waive_marker_is_scoped_per_glob() {
+        // The score-currency kind requires currency-only-* labels; a session
+        // missing them can be waived only by a currency marker, never by the
+        // score-counter marker (the pre-refactor global-flag bug).
+        let cl = checklist();
+        let spec = cl.sessions["discovery-02-score-currency"].clone();
+        let mut facts = passing_facts(&spec, 5000);
+        session_mut(&mut facts)
+            .dumps
+            .retain(|d| !d.label.starts_with("currency-only-"));
+        let tmp = TempDir::new("scoped-waive");
+        let dir = tmp.0.join("discovery-02-score-currency");
+        std::fs::create_dir_all(&dir).unwrap();
+        materialize(&dir, &facts, 0);
+        let opts = |notes: Option<&str>, waive: Vec<String>| {
+            if let Some(n) = notes {
+                std::fs::write(dir.join(SESSION_NOTES), n).unwrap();
+            } else {
+                let _ = std::fs::remove_file(dir.join(SESSION_NOTES));
+            }
+            LintOpts {
+                session_dir: dir.clone(),
+                checklist: PathBuf::from(REPO_CHECKLIST),
+                kind: None,
+                final_: true,
+                waive,
+            }
+        };
+
+        // No marker at all: --waive currency-only-* is refused, naming the lines.
+        let err = run_lint(&opts(None, vec!["currency-only-*".to_owned()])).unwrap_err();
+        assert!(err.contains("currency: NOT-APPLICABLE"), "{}", err);
+        assert!(err.contains("currency_only: NOT-AVAILABLE"), "{}", err);
+
+        // The WRONG marker (score-counter) must NOT authorize currency-only-*.
+        let err = run_lint(&opts(
+            Some(
+                "score_counter: NOT-APPLICABLE
+",
+            ),
+            vec!["currency-only-*".to_owned()],
+        ))
+        .unwrap_err();
+        assert!(err.contains("currency"), "{}", err);
+
+        // The right marker authorizes it → PASS (WAIVED).
+        let r = run_lint(&opts(
+            Some(
+                "currency: NOT-APPLICABLE
+",
+            ),
+            vec!["currency-only-*".to_owned()],
+        ))
+        .unwrap();
+        assert!(r.passed(), "{}", r.render());
+        assert!(
+            r.verdict().contains("WAIVED: currency-only-"),
+            "{}",
+            r.verdict()
+        );
+
+        // The alternate currency marker also authorizes it.
+        let r = run_lint(&opts(
+            Some(
+                "currency_only: NOT-AVAILABLE
+",
+            ),
+            vec!["currency-only-*".to_owned()],
+        ))
+        .unwrap();
+        assert!(r.passed(), "{}", r.render());
+    }
+
+    #[test]
+    fn waive_score_only_glob_needs_its_own_marker() {
+        let cl = checklist();
+        let spec = cl.sessions["discovery-02-score-currency"].clone();
+        let mut facts = passing_facts(&spec, 5000);
+        session_mut(&mut facts)
+            .dumps
+            .retain(|d| !d.label.starts_with("score-only-"));
+        let tmp = TempDir::new("scoreonly-waive");
+        let dir = tmp.0.join("discovery-02-score-currency");
+        std::fs::create_dir_all(&dir).unwrap();
+        materialize(&dir, &facts, 0);
+        let mk = |notes: &str, waive: Vec<String>| {
+            std::fs::write(dir.join(SESSION_NOTES), notes).unwrap();
+            LintOpts {
+                session_dir: dir.clone(),
+                checklist: PathBuf::from(REPO_CHECKLIST),
+                kind: None,
+                final_: true,
+                waive,
+            }
+        };
+        // currency marker does not authorize score-only-*.
+        let err = run_lint(&mk(
+            "currency: NOT-APPLICABLE
+",
+            vec!["score-only-*".to_owned()],
+        ))
+        .unwrap_err();
+        assert!(err.contains("score_only: NOT-AVAILABLE"), "{}", err);
+        // its own marker does.
+        let r = run_lint(&mk(
+            "score_only: NOT-AVAILABLE
+",
+            vec!["score-only-*".to_owned()],
+        ))
+        .unwrap();
+        assert!(r.passed(), "{}", r.render());
+        assert!(
+            r.verdict().contains("WAIVED: score-only-"),
+            "{}",
+            r.verdict()
+        );
+    }
+
+    #[test]
+    fn waive_both_event_glob_needs_its_own_marker() {
+        let cl = checklist();
+        let spec = cl.sessions["discovery-02-score-currency"].clone();
+        let mut facts = passing_facts(&spec, 5000);
+        session_mut(&mut facts)
+            .dumps
+            .retain(|d| !d.label.starts_with("both-"));
+        let tmp = TempDir::new("both-waive");
+        let dir = tmp.0.join("discovery-02-score-currency");
+        std::fs::create_dir_all(&dir).unwrap();
+        materialize(&dir, &facts, 0);
+        let mk = |notes: &str, waive: Vec<String>| {
+            std::fs::write(dir.join(SESSION_NOTES), notes).unwrap();
+            LintOpts {
+                session_dir: dir.clone(),
+                checklist: PathBuf::from(REPO_CHECKLIST),
+                kind: None,
+                final_: true,
+                waive,
+            }
+        };
+        // A currency marker does not authorize both-*.
+        let err =
+            run_lint(&mk("currency: NOT-APPLICABLE\n", vec!["both-*".to_owned()])).unwrap_err();
+        assert!(err.contains("both_event: NOT-AVAILABLE"), "{}", err);
+        // Its own marker does.
+        let r = run_lint(&mk(
+            "both_event: NOT-AVAILABLE\n",
+            vec!["both-*".to_owned()],
+        ))
+        .unwrap();
+        assert!(r.passed(), "{}", r.render());
+        assert!(r.verdict().contains("WAIVED: both-"), "{}", r.verdict());
     }
 
     #[test]

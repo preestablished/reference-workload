@@ -240,6 +240,79 @@ If expiry costs a life instead of the game, keep the same labels and write
 `timer_expiry: life-lost` in `SESSION-NOTES.md`; the processing plan then
 treats it as a death variant.
 
+## 4a. Session `discovery-02-score-currency` (score vs currency isolation)
+
+Purpose: `discovery-02-main` bracketed score events that also moved currency
+and other counters at once, so the score offset can't be told from the
+currency offset. This short session brackets **isolated** events. Plan:
+`~/.agents/projects/reference-workload/plans/discovery-02-score-currency-session/`.
+It stays in W1, contains no game over, and ends with Esc.
+
+Launch: `record-ramdiff discovery-02-score-currency --stats`. If you already
+ran the §0 warm-up in this sitting you need not repeat it. There is no boss
+fight, so the take budget is relaxed; a crash or mislabel still means a retake
+(`-take2`) or a rewind.
+
+For this game (operator-confirmed): score and coins are separate counters,
+coins give no score, and scoring gives no coins — so every bracket below is
+recordable and **no waiver is needed**. Currency can only be spent in later
+levels, so skip the `currency-spend` bracket here (note that in
+`SESSION-NOTES.md`) and just show coins increasing. The score is 4 digits at
+start and can reach 6 (past 65535), so it is a multi-byte counter: make
+`score-only-2` a large gain and **write the exact displayed score before and
+after** so the processing plan can find its high bytes; the top byte
+(above 9999) likely will not move in W1, which is expected.
+
+**For every bracket, write in `SESSION-NOTES.md` the on-screen before/after
+value of each visible counter and the bracket's frame span** (the F5 dump
+frames are shown on the launching terminal). This is what lets the processing
+plan stitch a multi-byte counter and subtract incidental movers.
+
+| # | Where | Label |
+|---|-------|-------|
+| 1 | Title "press start" | `title-press-start` |
+| 2 | W1-S1 first movable frame | `w1s1-entry` |
+| 3 | Standing still, undamaged, nothing collected | `baseline` |
+| 4 | Stand/walk a few seconds gaining nothing; dump before and after | `idle-before-1`, `idle-after-1` |
+| 5 | A **longer** stand/walk gaining nothing (match your longest event bracket below) | `idle-before-2`, `idle-after-2` |
+| 6 | Before/after one event that adds **score only, no currency** | `score-only-before-1`, `score-only-after-1` |
+| 7 | A **different** score-only event, **big enough to roll the score past a 100s/1000s digit** | `score-only-before-2`, `score-only-after-2` |
+| 8 | Before/after one event that adds **currency only, no score** | `currency-only-before-1`, `currency-only-after-1` |
+| 9 | A **different** currency pickup, at least one big enough to roll a digit | `currency-only-before-2`, `currency-only-after-2` |
+| 10 | Before/after one event that changes **both** score and currency | `both-before-1`, `both-after-1` |
+| 11 | Stand still 2 s, dump | `session-end` | then Esc |
+
+Optional: `currency-spend-before-1`/`currency-spend-after-1` around **spending**
+currency (shop/ammo) if the game allows it; a third of either kind
+(`score-only-before-3`/`score-only-after-3`,
+`currency-only-before-3`/`currency-only-after-3`).
+
+Why the "big enough to roll a digit" rule: the processing plan keeps an offset
+only if it rose in **every** score-only bracket. A multi-byte counter's high
+byte moves only on a carry, so at least one score-only and one currency-only
+event must be large enough to carry into the next digit, and you must record
+the displayed values so the high byte isn't lost.
+
+Fallbacks — pick the one that matches this game and record it in
+`SESSION-NOTES.md`, then lint with the matching waiver:
+
+| Situation | note line | final lint |
+|-----------|-----------|------------|
+| No currency counter at all | `currency: NOT-APPLICABLE` | `tools/lint-session discovery-02-score-currency --final --waive 'currency-only-*'` |
+| Currency exists but every currency pickup also gives score | `currency_only: NOT-AVAILABLE` | same `--waive 'currency-only-*'` |
+| Every scoring event also gives currency | `score_only: NOT-AVAILABLE` | `--waive 'score-only-*'` |
+| No event changes score and coins together | `both_event: NOT-AVAILABLE` | `--waive 'both-*'` |
+
+The bracket **order does not matter** (the lint kind is order-independent), so
+record them in whatever order the play makes easy. If the game has **no** event
+that changes score and coins together, that is fine and expected — record
+`both_event: NOT-AVAILABLE` in `SESSION-NOTES.md` and lint with
+`--waive 'both-*'`; otherwise the `both-before-1`/`both-after-1` bracket carries
+the substitute data for a fallback. After Esc:
+`tools/lint-session discovery-02-score-currency --final` → `lint: PASS` (or the
+matching `PASS (WAIVED: …)`), then `tools/replay-fidelity
+discovery-02-score-currency` → `fidelity: PASS`.
+
 ## 5. Crash, stall, or mistake
 
 - Window closed or process died: relaunch with

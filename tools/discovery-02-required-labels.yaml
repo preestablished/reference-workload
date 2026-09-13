@@ -77,3 +77,33 @@ sessions:
       - gameover-timer-screen
       - gameover-timer-late
     optional: []
+  discovery-02-score-currency:
+    may_be_not_applicable: false
+    ordered: false
+    required:
+      - title-press-start
+      - w1s1-entry
+      - baseline
+      - idle-before-1
+      - idle-after-1
+      - idle-before-2
+      - idle-after-2
+      - score-only-before-1
+      - score-only-after-1
+      - score-only-before-2
+      - score-only-after-2
+      - currency-only-before-1
+      - currency-only-after-1
+      - currency-only-before-2
+      - currency-only-after-2
+      - both-before-1
+      - both-after-1
+      - session-end
+    optional:
+      - currency-spend-before-1
+      - currency-spend-after-1
+      - score-only-before-3
+      - score-only-after-3
+      - currency-only-before-3
+      - currency-only-after-3
+    forbidden_substrings: [gameover, game-over, dead, death]   # no game over in this monotone session
