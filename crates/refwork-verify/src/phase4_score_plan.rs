@@ -105,7 +105,9 @@ impl<'a> Writer<'a> {
         }
 
         let batches = capture_ids
-            .chunks_exact(K)
+            .as_chunks::<K>()
+            .0
+            .iter()
             .enumerate()
             .map(|(idx, ids)| {
                 let batch_id = format!("{}-{:04}", self.opts.client_batch_prefix, idx + 1);

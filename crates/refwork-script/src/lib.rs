@@ -220,7 +220,9 @@ fn parse_hex32(hex: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    // `len == 64` above: the remainder of the 2-byte split is empty.
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for (i, chunk) in pairs.iter().enumerate() {
         let s = std::str::from_utf8(chunk).ok()?;
         out[i] = u8::from_str_radix(s, 16).ok()?;
     }

@@ -670,7 +670,7 @@ mod tests {
 
         assert!(!out.is_empty());
         assert_eq!(out.len() % 2, 0);
-        for pair in out.chunks_exact(2) {
+        for pair in out.as_chunks::<2>().0 {
             assert_eq!(pair[1], 0, "R channel leaked a nonzero sample: {pair:?}");
         }
     }
