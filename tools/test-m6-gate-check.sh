@@ -28,15 +28,18 @@ EOF
 chmod +x "$TMP/bin/bn"
 
 run_gate() {
-  PATH="$TMP/bin:$PATH" M6_CORPUS_ROOT="$TMP/corpus" M6_SCORER_RESOLUTION="$TMP/resolution.md" "$ROOT/tools/m6-gate-check.sh" 2>&1
+  PATH="${M6_TEST_PATH:-$TMP/bin:$PATH}" M6_CORPUS_ROOT="$TMP/corpus" M6_SCORER_RESOLUTION="$TMP/resolution.md" "$ROOT/tools/m6-gate-check.sh" 2>&1
 }
 must_pass() { output=$(run_gate); printf '%s\n' "$output" | grep -q 'PASS     scorer-M3'; printf '%s\n' "$output" | grep -q 'PASS     refwork-czi'; }
 must_fail() { if output=$(run_gate); then echo "expected failure" >&2; exit 1; fi; printf '%s\n' "$output" | grep -q "$1"; }
 
 must_pass
+FAKE_CZI_STATUS="done" must_pass
 FAKE_CZI_STATUS=open must_fail refwork-czi
 FAKE_20V_STATUS=not-closed must_fail refwork-20v
+FAKE_CZI_STATUS=ready_for_review must_fail refwork-czi
 FAKE_MODE=wrong-id must_fail refwork-czi
 FAKE_MODE=malformed must_fail refwork-czi
 FAKE_SCORER_LIST='[{"id":"state-scorer-0gy"},{"id":"state-scorer-0gy"}]' must_fail scorer-M3
+M6_TEST_PATH=/usr/bin:/bin must_fail 'bn or jq unavailable'
 echo 'm6 gate tests passed'
