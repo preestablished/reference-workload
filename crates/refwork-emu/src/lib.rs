@@ -51,6 +51,10 @@ pub const WRAM_INIT_BYTE: u8 = 0x55;
 ///   pre-re-baseline; disambiguates recordings made under 0.2.0).
 /// - 0.2.2 = CGWSEL clip-region + window semantics (same 2026-07-16 epoch).
 /// - 0.2.3 = backdrop color math per CGADSUB bit 5 (same 2026-07-16 epoch).
+///
+/// Deliberately independent of the crate's Cargo version (the workspace
+/// version names the image bundle, `refwork-demo@<version>`; this string
+/// names the emulator epoch a recording or bundle was made at).
 pub const EMU_VERSION: &str = "refwork-emu 0.2.3";
 
 /// Nominal sample rate, in Hz, of the stream drained by

@@ -103,7 +103,11 @@ and GATE3-CLAIMS is upgraded to `full-corpus`.
   the v3 program — see GATE3-CLAIMS.md and the private CHANGELOG-v3.md.
 
 ## Handoff surface
-No WorkloadImage registration (unchanged). Scorer handoff:
+No WorkloadImage registration (unchanged). 2026-09-14: the bundle identity
+moves to `dist/workload-image-0.2.0/` / `refwork-demo@0.2.0` (workspace
+version bump for the epoch-0.2.3 re-baseline; the manifest now carries
+`meta.built_from.emu_version`); the 0.2.0 bundle is not yet built, and every
+consumer runbook naming `workload-image-0.1.0` is stale until it is. Scorer handoff:
 `~/.agents/projects/reference-workload/requests/discovery-02-scorer-handoff/HANDOFF.md`
 + `.agents/handoffs/m6-scoring-handoff-for-state-scorer.md` (2026-09-13 M4 slot).
 

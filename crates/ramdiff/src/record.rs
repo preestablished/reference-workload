@@ -1367,7 +1367,8 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
 /// Esc-time hint: the checklist's required labels still absent from the
 /// session just saved (a mid-session lint with no waivers, so waived labels
 /// are listed too). Best-effort: a lint error (unknown session kind,
-/// unreadable checklist) prints nothing — `ramdiff lint` stays the
+/// unreadable checklist) is reported in one non-fatal line so a broken hint
+/// is distinguishable from "nothing missing" — `ramdiff lint` stays the
 /// authoritative check (refwork-0jz item 2).
 #[cfg(feature = "interactive")]
 fn print_missing_labels(session_dir: &std::path::Path, checklist: &std::path::Path) {
@@ -1378,14 +1379,14 @@ fn print_missing_labels(session_dir: &std::path::Path, checklist: &std::path::Pa
         final_: false,
         waive: Vec::new(),
     };
-    if let Ok(report) = crate::lint::run_lint(&opts) {
-        if !report.missing_required.is_empty() {
-            eprintln!(
-                "interactive: {} required label(s) still to take: {}",
-                report.missing_required.len(),
-                report.missing_required.join(", ")
-            );
-        }
+    match crate::lint::run_lint(&opts) {
+        Ok(report) if !report.missing_required.is_empty() => eprintln!(
+            "interactive: {} required label(s) still to take: {}",
+            report.missing_required.len(),
+            report.missing_required.join(", ")
+        ),
+        Ok(_) => {}
+        Err(err) => eprintln!("interactive: label-checklist hint unavailable ({err})"),
     }
 }
 

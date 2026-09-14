@@ -13,7 +13,8 @@ execution time** (their repo/API.md — do not rely on this plan's snapshot):
   registration evidence. Validate jointly that what the control-plane serves
   back matches the `dist/` manifest hashes.
 - **Doesn't exist:** ship the manifest + `dist/` layout the hypervisor
-  consumes directly (current layout: `dist/workload-image-0.1.0/` —
+  consumes directly (current layout: `dist/workload-image-0.2.0/` since the
+  2026-09-14 epoch-0.2.3 re-baseline, `refwork-demo@0.2.0`; was `0.1.0` —
   `workload-image.yaml`, `boot.toml`, `harness.toml`, `expected-regions.toml`,
   `bzImage`, `initramfs.cpio.zst`, `determinism.last_green`), and record the
   registration as control-plane's follow-on in the resolution — a named

@@ -286,9 +286,11 @@ fn framebuffer_region_matches_hypervisor_layout_contract() {
 
     // The dist manifest the operator consumes must carry the same size. The
     // bundle is untracked build output (`xtask image build`, gitignored
-    // `dist/`), so the check runs only where one has been built at the
-    // current workspace version; the generated shape itself is covered by
-    // the `image` unit tests.
+    // `dist/`; CI never builds it), so this leg runs only where a bundle has
+    // been built at the current workspace version. The exact generated line
+    // is pinned unconditionally by the `image` unit test
+    // `generated_manifest_pins_d7_framebuffer_line` (`validate_regions` alone
+    // only enforces `size >=`).
     let rel = format!(
         "dist/workload-image-{}/workload-image.yaml",
         env!("CARGO_PKG_VERSION")

@@ -1339,8 +1339,9 @@ impl Ppu {
             };
 
             let add = (cgadsub & 0x80) == 0; // bit7=0 → add, bit7=1 → sub
-                                             // Hardware disables halving when the main pixel was clipped to
-                                             // black (bsnes windowAbove gate).
+
+            // Hardware disables halving when the main pixel was clipped to
+            // black (bsnes windowAbove gate).
             let half =
                 (cgadsub & 0x40) != 0 && !(use_subscreen && sub_is_transparent) && !clip_main;
             color_math_op(main_r, main_g, main_b, sub_r, sub_g, sub_b, add, half)
@@ -3666,7 +3667,8 @@ mod ppu_tests {
         assert!(p.write(0x2C, 0x00).is_none()); // TM: no layers -> backdrop
         assert!(p.write(0x30, 0x00).is_none()); // fixed-color operand
         assert!(p.write(0x31, 0xA0).is_none()); // subtract | backdrop enable
-                                                // CGRAM color 0 = pure red (0x001F).
+
+        // CGRAM color 0 = pure red (0x001F).
         assert!(p.write(0x21, 0).is_none());
         assert!(p.write(0x22, 0x1F).is_none());
         assert!(p.write(0x22, 0x00).is_none());
