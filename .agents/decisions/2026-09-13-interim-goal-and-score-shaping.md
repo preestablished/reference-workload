@@ -6,13 +6,12 @@ in response to the plan
 `~/.agents/projects/reference-workload/plans/discovery-02-processing-and-interim-scoring/`
 (package `01-decision-gate-and-spec-amendment.md`, gate G0).
 
-**Status: DEFAULT DECISION RECORDED 2026-09-13; operator wording
-confirmation pending.** This file was drafted by the coding agent in an
-autonomous session under the contract's default branch (D4: "interim goal
-= W1 cleared / W2 reached, operator confirms at the plan-2 gate"). The
-operator's explicit acceptance is requested in the WP6 push ask; until
-then every gate-3 record produced under this decision carries the
-"interim form" wording below and none claims the credits form.
+**Status: ACCEPTED 2026-09-14.** Operator confirmation (in session, after the
+processing plan ran) recorded here; drafted 2026-09-13 by the coding agent
+under the contract's default branch (D4). The same session accepted the
+stability marks asserted from single-trace evidence (level_timer digits;
+constant score/currency digits — see GATE3-CLAIMS.md) as-is, and left
+commit `5b35113` in place for now (bead `refwork-1ls` filed for a later cleanup).
 
 ## What is accepted
 

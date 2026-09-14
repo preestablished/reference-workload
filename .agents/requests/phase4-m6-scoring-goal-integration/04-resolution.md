@@ -82,15 +82,15 @@ and GATE3-CLAIMS is upgraded to `full-corpus`.
 - `integration.rs` frame_ctr pin verification; package-06 re-stamp; doc
   updates for old corpus-id references.
 
-## Open operator decisions
-- Commit `5b35113` (private-root literal in pushed history): **open** — no
-  decision recorded under this plan; history was not rewritten.
-- Wording of `.agents/decisions/2026-09-13-interim-goal-and-score-shaping.md`
-  (recorded as the contract-D4 default; confirmation requested with the push).
-- Stability asserted from single-trace evidence only: `level_timer_d100/d10/d1`
-  (timer session + stage-entry reset consistency); constant-in-all-sessions
-  digits `score_d100k`, `score_d10`, `score_d1`, `currency_d100` — see
-  GATE3-CLAIMS.md and the private CHANGELOG-v3.md.
+## Operator decisions (resolved 2026-09-14 unless noted)
+- Commit `5b35113` (private-root literal in pushed history): **left as-is
+  (operator, 2026-09-14)** — no history rewrite; a later cleanup is tracked by bead `refwork-1ls`.
+- Wording of `.agents/decisions/2026-09-13-interim-goal-and-score-shaping.md`:
+  **confirmed (operator, 2026-09-14)**.
+- Stability asserted from single-trace evidence only (`level_timer_d100/d10/d1`;
+  constant-in-all-sessions digits `score_d100k`, `score_d10`, `score_d1`,
+  `currency_d100`): **accepted as-is (operator, 2026-09-14)**; none is used by
+  the v3 program — see GATE3-CLAIMS.md and the private CHANGELOG-v3.md.
 
 ## Handoff surface
 No WorkloadImage registration (unchanged). Scorer handoff:

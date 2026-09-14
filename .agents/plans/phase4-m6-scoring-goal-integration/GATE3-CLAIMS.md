@@ -1,8 +1,7 @@
 # Gate-3 Claims (interim form, decision 2026-09-13)
 
 Decision: `.agents/decisions/2026-09-13-interim-goal-and-score-shaping.md`
-(default of shared contract D4; operator wording confirmation pending — see
-the push ask in the discovery-02 processing handoff).
+(default of shared contract D4; wording confirmed by the operator 2026-09-14).
 
 Trajectory: `discovery-02-main` (log_frames 57064, 34 labeled dumps, emulator
 refwork-emu 0.2.3), host capture index at cadence 45 from frame 12 (the first
