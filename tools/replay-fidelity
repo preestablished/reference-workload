@@ -101,12 +101,14 @@ if [ "$replay_status" -ne 0 ] || grep -q 'fault at frame' "$REPLAY_ERR"; then
   exit 1
 fi
 
-# Byte compare every recorded dump against its replayed twin. Where two
-# dumps share a frame the later file on disk is the one the recording kept
-# (labels can collide on a file); compare each listed entry regardless.
-# (frame 0 is filtered inside awk: a `grep -v` with no surviving lines would
-# exit 1 and, under pipefail, abort the script before any verdict is written.)
-awk '/^  frame: /{f=$2} /^  file: /{ if (f != 0) print f, $2 }' "$SESS/session.yaml" |
+# Byte compare every recorded dump against its replayed twin, one entry per
+# frame (the same dedupe rule as MARKS above: the replay wrote exactly one
+# f<frame>.bin per distinct frame). Where two dumps share a frame the later
+# entry is the file the recording kept (labels can collide on a file), so the
+# last listed file per frame is the one compared. (frame 0 is filtered inside
+# awk: a `grep -v` with no surviving lines would exit 1 and, under pipefail,
+# abort the script before any verdict is written.)
+awk '/^  frame: /{f=$2} /^  file: /{ if (f != 0) file[f]=$2 } END { for (f in file) print f, file[f] }' "$SESS/session.yaml" | sort -n |
 while read -r frame orig; do
   if cmp -s "$RV/f${frame}.bin" "$SESS/$orig"; then
     echo "frame $frame: IDENTICAL"

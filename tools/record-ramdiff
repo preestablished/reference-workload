@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # record-ramdiff — launch the M6 discovery/trajectory hand-play session.
-# Usage: record-ramdiff [session-name] [--resume] [--stats]
+# Usage: record-ramdiff [session-name] [--resume] [--stats] [--name-check]
 #   Default: start FRESH — an existing non-empty session dir is rotated
 #   aside to <name>.bak-N (never deleted).
 #   --resume: replay interactive.padlog to restore state, then append.
 #   --stats: periodic fps/audio diagnostics + slow-frame attribution on
 #   stderr (refwork-dn5 stall diagnosis).
+#   --name-check: refuse the session name (exit 1, nothing touched) when a
+#   replay-verify-<name> sibling already exists — names are never reused.
 set -euo pipefail
 
 SESSION_NAME="discovery-01"
 SESSION_NAME_SET=0
 RESUME=0
 STATS=0
+NAME_CHECK=0
 for arg in "$@"; do
   case "$arg" in
     --resume) RESUME=1 ;;
     --stats) STATS=1 ;;
+    --name-check) NAME_CHECK=1 ;;
     -h|--help)
-      sed -n "2,8p" "$0" | sed "s/^# \{0,1\}//"; exit 0 ;;
+      sed -n "2,10p" "$0" | sed "s/^# \{0,1\}//"; exit 0 ;;
     -*) echo "error: unknown flag $arg" >&2; exit 1 ;;
     *)
       if [ "$SESSION_NAME_SET" -eq 1 ]; then
@@ -45,16 +49,29 @@ RAMDIFF="$REPO_ROOT/target/release/ramdiff"
 
 # The private root (ROMs + sessions) is resolved from a pointer file outside
 # every checkout; its location never appears in this repo (GATE-RECORD-ASK1).
+# RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only; mirrors
+# tools/replay-fidelity).
 POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
-if [ ! -s "$POINTER" ]; then
+if [ -n "${RAMDIFF_PRIVATE_ROOT:-}" ]; then
+  PRIVATE_ROOT="$RAMDIFF_PRIVATE_ROOT"
+elif [ -s "$POINTER" ]; then
+  PRIVATE_ROOT="$(head -n1 "$POINTER")"
+else
   echo "error: private-root pointer file missing: $POINTER" >&2
   echo "       write the operator-approved private root into it (one absolute" >&2
   echo "       path, no trailing slash) before running this tool." >&2
   exit 1
 fi
-PRIVATE_ROOT="$(head -n1 "$POINTER")"
 ROM_DIR="$PRIVATE_ROOT/ROMs/SNES"
 SESSION_DIR="$PRIVATE_ROOT/ramdiff/$SESSION_NAME"
+
+# --name-check: a session that already has a replay-verify sibling has been
+# through gate G2 (tools/replay-fidelity), and names are never reused. Checked
+# before anything under the private root is created or rotated.
+if [ "$NAME_CHECK" -eq 1 ] && [ -e "$PRIVATE_ROOT/ramdiff/replay-verify-$SESSION_NAME" ]; then
+  echo "error: session name $SESSION_NAME already has a replay-verify sibling; pick a new take name" >&2
+  exit 1
+fi
 
 [ -x "$RAMDIFF" ] || { echo "error: $RAMDIFF not built" >&2; exit 1; }
 

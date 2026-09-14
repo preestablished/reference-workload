@@ -282,6 +282,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             pad_debug,
             no_audio,
             stats,
+            // Best-effort: the committed checklist next to a target/<profile>/
+            // exe; absent (e.g. an installed binary) simply disables the hint.
+            checklist: default_checklist().ok(),
         });
     }
 
