@@ -1386,6 +1386,9 @@ fn print_missing_labels(session_dir: &std::path::Path, checklist: &std::path::Pa
             report.missing_required.join(", ")
         ),
         Ok(_) => {}
+        // Sessions outside the checklist (scratch names, the legacy default
+        // `discovery-01`) are expected; only a genuinely broken hint is noted.
+        Err(err) if err.starts_with("checklist has no session kind") => {}
         Err(err) => eprintln!("interactive: label-checklist hint unavailable ({err})"),
     }
 }

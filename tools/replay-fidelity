@@ -121,7 +121,7 @@ fi
 # any verdict is written.) Parsing is positional on the serialized
 # session.yaml key order (`frame:` before `file:`, two-space indent).
 awk '/^  frame: /{f=$2+0}
-     /^  file: /{ v=$2; gsub(/^["\x27]|["\x27]$/, "", v); if (f != 0 && (!(v in maxf) || f > maxf[v])) maxf[v]=f }
+     /^  file: /{ v=$2; gsub(/^["\047]|["\047]$/, "", v); if (f != 0 && (!(v in maxf) || f > maxf[v])) maxf[v]=f }
      END { for (v in maxf) print maxf[v], v }' "$SESS/session.yaml" | sort -n |
 while read -r frame orig; do
   if cmp -s "$RV/f${frame}.bin" "$SESS/$orig"; then
