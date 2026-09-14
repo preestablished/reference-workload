@@ -246,10 +246,15 @@ fn build_image_with_git_rev(
         &out_dir.join("workload-image.yaml"),
         &git_rev,
         &guest_sdk_rev,
+        refwork_emu::EMU_VERSION,
         &kernel_hash,
         &initramfs_hash,
     )?;
-    write_unstamped_sidecar(&out_dir.join("determinism.unstamped.yaml"), &git_rev)?;
+    write_unstamped_sidecar(
+        &out_dir.join("determinism.unstamped.yaml"),
+        &git_rev,
+        refwork_emu::EMU_VERSION,
+    )?;
     write_dist_readme(&out_dir.join("README.md"))?;
 
     validate_manifest(&out_dir.join("workload-image.yaml"))?;
@@ -282,6 +287,18 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
     }
     if let Some(meta) = child_map(root, "meta", "meta", &mut errors) {
         expect_string(meta, "name", WORKLOAD_NAME, "meta.name", &mut errors);
+        // The emulator epoch the bundle was built at (image 0.2.0+): a worker
+        // whose corpus pins another epoch must be able to refuse the bundle.
+        if let Some(built_from) =
+            child_map(Some(meta), "built_from", "meta.built_from", &mut errors)
+        {
+            expect_nonempty_string(
+                built_from,
+                "emu_version",
+                "meta.built_from.emu_version",
+                &mut errors,
+            );
+        }
     }
 
     validate_artifacts(base, root, &mut errors);
@@ -1021,6 +1038,7 @@ fn write_workload_manifest(
     path: &Path,
     git_rev: &str,
     guest_sdk_rev: &str,
+    emu_version: &str,
     kernel_hash: &str,
     initramfs_hash: &str,
 ) -> Result<(), ImageError> {
@@ -1034,6 +1052,7 @@ meta:
     repo: reference-workload
     git_rev: "{git_rev}"
     guest_sdk_rev: "{guest_sdk_rev}"
+    emu_version: "{emu_version}"
 artifacts:
   kernel:
     file: bzImage
@@ -1087,12 +1106,17 @@ determinism:
     write(path, manifest.as_bytes())
 }
 
-fn write_unstamped_sidecar(path: &Path, git_rev: &str) -> Result<(), ImageError> {
+fn write_unstamped_sidecar(
+    path: &Path,
+    git_rev: &str,
+    emu_version: &str,
+) -> Result<(), ImageError> {
     let content = format!(
         r#"schema_version: 1
 kind: determinism-unstamped
 workload_image: {WORKLOAD_NAME}@{VERSION}
 git_rev: "{git_rev}"
+emu_version: "{emu_version}"
 reason: "package 06 owns the full determinism green stamp"
 "#
     );
@@ -1568,6 +1592,19 @@ fn validate_green_stamp_sidecar(
             errors,
         );
     }
+    // Optional in the stamp (July-era stamps predate the field); when present
+    // it must name the same emulator epoch the manifest was built at.
+    if has_key(stamp, "emu_version") {
+        if let Some(emu_version) = manifest_emu_version(root, errors) {
+            expect_string(
+                stamp,
+                "emu_version",
+                &emu_version,
+                "determinism.last_green.emu_version",
+                errors,
+            );
+        }
+    }
 
     expect_nonempty_string(
         stamp,
@@ -1890,6 +1927,18 @@ fn manifest_git_rev(root: Option<&Mapping>, errors: &mut Vec<String>) -> Option<
     string_field(built_from, "git_rev", "meta.built_from.git_rev", errors).map(ToOwned::to_owned)
 }
 
+fn manifest_emu_version(root: Option<&Mapping>, errors: &mut Vec<String>) -> Option<String> {
+    let meta = child_map(root, "meta", "meta", errors)?;
+    let built_from = child_map(Some(meta), "built_from", "meta.built_from", errors)?;
+    string_field(
+        built_from,
+        "emu_version",
+        "meta.built_from.emu_version",
+        errors,
+    )
+    .map(ToOwned::to_owned)
+}
+
 fn is_blake3_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -2137,11 +2186,21 @@ mod tests {
             &tmp.path.join("workload-image.yaml"),
             "0123456789012345678901234567890123456789",
             "placeholder:test",
+            refwork_emu::EMU_VERSION,
             &kernel_hash,
             &initramfs_hash,
         )
         .unwrap();
         tmp
+    }
+
+    fn green_stamp_text(tmp: &TempDir) -> String {
+        std::fs::read_to_string(tmp.path.join("determinism.last_green")).unwrap()
+    }
+
+    fn append_green_stamp_line(tmp: &TempDir, line: &str) {
+        let text = format!("{}{line}\n", green_stamp_text(tmp));
+        std::fs::write(tmp.path.join("determinism.last_green"), text).unwrap();
     }
 
     fn manifest_text(tmp: &TempDir) -> String {
@@ -2197,6 +2256,98 @@ suite_report_blake3: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
     fn validator_accepts_generated_manifest_shape() {
         let tmp = valid_dist();
         validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    #[test]
+    fn generated_manifest_carries_emu_version() {
+        let tmp = valid_dist();
+        let expected = format!("    emu_version: \"{}\"\n", refwork_emu::EMU_VERSION);
+        assert!(
+            manifest_text(&tmp).contains(&expected),
+            "manifest must record refwork_emu::EMU_VERSION under meta.built_from"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_manifest_without_emu_version() {
+        let tmp = valid_dist();
+        let line = format!("    emu_version: \"{}\"\n", refwork_emu::EMU_VERSION);
+        let manifest = manifest_text(&tmp).replace(&line, "");
+        assert_ne!(
+            manifest,
+            manifest_text(&tmp),
+            "fixture must contain the field"
+        );
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(
+            errors
+                .iter()
+                .any(|err| err == "missing meta.built_from.emu_version"),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_emu_version() {
+        let tmp = valid_dist();
+        let line = format!("    emu_version: \"{}\"\n", refwork_emu::EMU_VERSION);
+        let manifest = manifest_text(&tmp).replace(&line, "    emu_version: \"\"\n");
+        write_manifest_text(&tmp, &manifest);
+
+        let errors = validation_errors(&tmp);
+
+        assert!(
+            errors
+                .iter()
+                .any(|err| err == "meta.built_from.emu_version must not be empty"),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn green_stamp_emu_version_mismatch_rejected() {
+        let tmp = valid_dist();
+        write_valid_green_stamp(&tmp);
+        append_green_stamp_line(&tmp, "emu_version: \"refwork-emu 0.0.0-other\"");
+
+        let err = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            true,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("determinism.last_green.emu_version expected"),
+            "must name the stamp field: {msg}"
+        );
+        assert!(
+            msg.contains(refwork_emu::EMU_VERSION),
+            "must name the manifest's epoch: {msg}"
+        );
+    }
+
+    #[test]
+    fn green_stamp_matching_emu_version_accepted() {
+        let tmp = valid_dist();
+        write_valid_green_stamp(&tmp);
+        append_green_stamp_line(
+            &tmp,
+            &format!("emu_version: \"{}\"", refwork_emu::EMU_VERSION),
+        );
+
+        let report = register_image(
+            Path::new("/missing-workspace"),
+            Some(&tmp.path.join("workload-image.yaml")),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(report.mode, RegisterMode::DirectDistStamped);
     }
 
     #[test]

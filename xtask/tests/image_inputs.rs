@@ -284,8 +284,21 @@ fn framebuffer_region_matches_hypervisor_layout_contract() {
         "framebuffer format"
     );
 
-    // The dist manifest the operator consumes must carry the same size.
-    let manifest = read_workspace_file("dist/workload-image-0.1.0/workload-image.yaml");
+    // The dist manifest the operator consumes must carry the same size. The
+    // bundle is untracked build output (`xtask image build`, gitignored
+    // `dist/`), so the check runs only where one has been built at the
+    // current workspace version; the generated shape itself is covered by
+    // the `image` unit tests.
+    let rel = format!(
+        "dist/workload-image-{}/workload-image.yaml",
+        env!("CARGO_PKG_VERSION")
+    );
+    let path = repo_root().join(&rel);
+    if !path.is_file() {
+        eprintln!("skipped dist manifest check: {rel} not built here");
+        return;
+    }
+    let manifest = read_workspace_file(&rel);
     assert!(
         manifest.contains("name: framebuffer, size: 229376, format: xrgb8888-256x224-stride1024"),
         "dist manifest framebuffer line drifted from the D7 contract"

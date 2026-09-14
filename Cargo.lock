@@ -1661,7 +1661,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramdiff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "cpal",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "refwork-dh-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "dh-proto",
@@ -1739,11 +1739,11 @@ dependencies = [
 
 [[package]]
 name = "refwork-emu"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "refwork-emu-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "refwork-emu",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "refwork-featuremap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "refwork-harness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "detguest-sdk",
@@ -1775,21 +1775,21 @@ dependencies = [
 
 [[package]]
 name = "refwork-hash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "refwork-m0-proto-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "determinism-proto",
 ]
 
 [[package]]
 name = "refwork-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "serde",
@@ -1797,11 +1797,11 @@ dependencies = [
 
 [[package]]
 name = "refwork-script"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "refwork-verify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "lz4_flex",
@@ -3149,7 +3149,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "refwork-emu",
