@@ -33,11 +33,17 @@ trace` compared them against the program-computed values on every capture.
    capacity pickup was not repeated; max_health constant).
 5. fires-on-credits: **UNDECLARABLE** (interim branch).
 
-Evaluated by: **trace-only** (scorer client pending the state-scorer plan
-`interim-goal-score-shaping-validation` WP2 `trajeval`; no index-evaluating
-client exists in `state-scorer/crates/scorer-service/src/bin/` as of
-2026-09-13). Stage scores in `gate3-eval-*.jsonl` are Σ points over the
-trace rows' `active_stages`.
+Evaluated by: **live state-scorer** (2026-09-14; the 2026-09-13 record was
+trace-only). `state-scorerd` build `0.1.0+b6662ad` (git
+`b6662ad1c90aaec04fc6ef9aa1edc5b8ad27d318`), engine grpc, `bytes_source:
+raw`, evaluated main/death/timer through `trajeval`: **PASS ×3** (every
+named property PASS, zero item errors). Evidence: state-scorer repo
+`docs/evidence/exit-gate/2026-09-14-interim-goal.md` (+ three evidence
+JSONs); its input hashes equal the host-index and trace hashes below, and
+its loaded map/program/layout hashes equal the ones above. The scorer's
+per-frame report agrees with `gate3-eval-<k>.jsonl` on all 2357 captures
+(0 mismatches on stage_score / prune / goal_hit). Stage scores in
+`gate3-eval-*.jsonl` are Σ points over the trace rows' `active_stages`.
 
 Stability disclosure (WP3 step 7): `level_timer_d100/d10/d1` are marked
 stable from single-trace evidence (timer session) plus stage-entry reset
