@@ -22,117 +22,6 @@ pub struct ArtifactCheckReport {
     pub errors: Vec<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn fixture() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("captures")).unwrap();
-        fs::create_dir_all(root.path().join("artifacts/feature-bytes")).unwrap();
-        fs::create_dir_all(root.path().join("artifacts/framebuffer")).unwrap();
-        let feature = [1u8, 2, 3];
-        let pixels = vec![7u8; FRAMEBUFFER_LEN];
-        let framebuffer = lz4_flex::compress_prepend_size(&pixels);
-        fs::write(root.path().join("artifacts/feature-bytes/a.bin"), feature).unwrap();
-        fs::write(
-            root.path().join("artifacts/framebuffer/a.lz4"),
-            &framebuffer,
-        )
-        .unwrap();
-        let row = serde_json::json!({
-            "feature_bytes": {"ref":"artifacts/feature-bytes/a.bin", "len":feature.len(), "blake3":hash(&feature)},
-            "framebuffer": {"ref":"artifacts/framebuffer/a.lz4", "len":framebuffer.len(), "blake3":hash(&framebuffer),
-                "uncompressed_blake3":hash(&pixels), "encoding":"fb_lz4", "width":256, "height":224,
-                "stride":1024, "pixel_format":"xrgb8888", "uncompressed_len":FRAMEBUFFER_LEN}
-        });
-        let mut index = fs::File::create(root.path().join("captures/index.jsonl")).unwrap();
-        writeln!(index, "{}", serde_json::to_string(&row).unwrap()).unwrap();
-        root
-    }
-
-    fn hash(bytes: &[u8]) -> String {
-        format!("blake3:{}", blake3::hash(bytes).to_hex())
-    }
-
-    #[test]
-    fn phase4_artifact_accepts_contained_hashed_artifacts() {
-        let root = fixture();
-        assert!(check_phase4_artifacts(root.path()).passed());
-    }
-
-    #[test]
-    fn phase4_artifact_rejects_corrupt_and_escaping_artifacts() {
-        let root = fixture();
-        fs::write(root.path().join("artifacts/feature-bytes/a.bin"), [9]).unwrap();
-        let report = check_phase4_artifacts(root.path());
-        assert!(!report.passed());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.contains("len does not match")));
-
-        let index = root.path().join("captures/index.jsonl");
-        let text = fs::read_to_string(&index)
-            .unwrap()
-            .replace("artifacts/feature-bytes/a.bin", "../outside.bin");
-        fs::write(index, text).unwrap();
-        let report = check_phase4_artifacts(root.path());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.contains("contained relative path")));
-    }
-
-    #[test]
-    fn phase4_artifact_rejects_missing_and_truncated_framebuffers() {
-        let root = fixture();
-        fs::remove_file(root.path().join("artifacts/feature-bytes/a.bin")).unwrap();
-        assert!(check_phase4_artifacts(root.path())
-            .errors
-            .iter()
-            .any(|e| e.contains("artifact is missing")));
-        let root = fixture();
-        fs::write(root.path().join("artifacts/framebuffer/a.lz4"), [0, 1, 2]).unwrap();
-        let report = check_phase4_artifacts(root.path());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.contains("decompression failed")));
-        assert!(report.errors.iter().any(|e| e.contains("blake3 mismatch")))
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn phase4_artifact_rejects_symlinks_and_pixel_hash_mismatch() {
-        use std::os::unix::fs::symlink;
-        let root = fixture();
-        let index = root.path().join("captures/index.jsonl");
-        let text = fs::read_to_string(&index).unwrap();
-        let mut row: Value = serde_json::from_str(text.trim()).unwrap();
-        row["framebuffer"]["uncompressed_blake3"] =
-            "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
-        fs::write(
-            &index,
-            format!("{}\n", serde_json::to_string(&row).unwrap()),
-        )
-        .unwrap();
-        assert!(check_phase4_artifacts(root.path())
-            .errors
-            .iter()
-            .any(|e| e.contains("uncompressed_blake3 mismatch")));
-        let fb = root.path().join("artifacts/framebuffer/a.lz4");
-        let target = root.path().join("artifacts/framebuffer/real.lz4");
-        fs::rename(&fb, &target).unwrap();
-        symlink(&target, &fb).unwrap();
-        assert!(check_phase4_artifacts(root.path())
-            .errors
-            .iter()
-            .any(|e| e.contains("non-symlink")));
-    }
-}
-
 impl ArtifactCheckReport {
     pub fn passed(&self) -> bool {
         self.errors.is_empty()
@@ -338,5 +227,116 @@ impl Checker<'_> {
         if self.report.errors.len() < 200 {
             self.report.errors.push(message.into());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("captures")).unwrap();
+        fs::create_dir_all(root.path().join("artifacts/feature-bytes")).unwrap();
+        fs::create_dir_all(root.path().join("artifacts/framebuffer")).unwrap();
+        let feature = [1u8, 2, 3];
+        let pixels = vec![7u8; FRAMEBUFFER_LEN];
+        let framebuffer = lz4_flex::compress_prepend_size(&pixels);
+        fs::write(root.path().join("artifacts/feature-bytes/a.bin"), feature).unwrap();
+        fs::write(
+            root.path().join("artifacts/framebuffer/a.lz4"),
+            &framebuffer,
+        )
+        .unwrap();
+        let row = serde_json::json!({
+            "feature_bytes": {"ref":"artifacts/feature-bytes/a.bin", "len":feature.len(), "blake3":hash(&feature)},
+            "framebuffer": {"ref":"artifacts/framebuffer/a.lz4", "len":framebuffer.len(), "blake3":hash(&framebuffer),
+                "uncompressed_blake3":hash(&pixels), "encoding":"fb_lz4", "width":256, "height":224,
+                "stride":1024, "pixel_format":"xrgb8888", "uncompressed_len":FRAMEBUFFER_LEN}
+        });
+        let mut index = fs::File::create(root.path().join("captures/index.jsonl")).unwrap();
+        writeln!(index, "{}", serde_json::to_string(&row).unwrap()).unwrap();
+        root
+    }
+
+    fn hash(bytes: &[u8]) -> String {
+        format!("blake3:{}", blake3::hash(bytes).to_hex())
+    }
+
+    #[test]
+    fn phase4_artifact_accepts_contained_hashed_artifacts() {
+        let root = fixture();
+        assert!(check_phase4_artifacts(root.path()).passed());
+    }
+
+    #[test]
+    fn phase4_artifact_rejects_corrupt_and_escaping_artifacts() {
+        let root = fixture();
+        fs::write(root.path().join("artifacts/feature-bytes/a.bin"), [9]).unwrap();
+        let report = check_phase4_artifacts(root.path());
+        assert!(!report.passed());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("len does not match")));
+
+        let index = root.path().join("captures/index.jsonl");
+        let text = fs::read_to_string(&index)
+            .unwrap()
+            .replace("artifacts/feature-bytes/a.bin", "../outside.bin");
+        fs::write(index, text).unwrap();
+        let report = check_phase4_artifacts(root.path());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("contained relative path")));
+    }
+
+    #[test]
+    fn phase4_artifact_rejects_missing_and_truncated_framebuffers() {
+        let root = fixture();
+        fs::remove_file(root.path().join("artifacts/feature-bytes/a.bin")).unwrap();
+        assert!(check_phase4_artifacts(root.path())
+            .errors
+            .iter()
+            .any(|e| e.contains("artifact is missing")));
+        let root = fixture();
+        fs::write(root.path().join("artifacts/framebuffer/a.lz4"), [0, 1, 2]).unwrap();
+        let report = check_phase4_artifacts(root.path());
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("decompression failed")));
+        assert!(report.errors.iter().any(|e| e.contains("blake3 mismatch")))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn phase4_artifact_rejects_symlinks_and_pixel_hash_mismatch() {
+        use std::os::unix::fs::symlink;
+        let root = fixture();
+        let index = root.path().join("captures/index.jsonl");
+        let text = fs::read_to_string(&index).unwrap();
+        let mut row: Value = serde_json::from_str(text.trim()).unwrap();
+        row["framebuffer"]["uncompressed_blake3"] =
+            "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        fs::write(
+            &index,
+            format!("{}\n", serde_json::to_string(&row).unwrap()),
+        )
+        .unwrap();
+        assert!(check_phase4_artifacts(root.path())
+            .errors
+            .iter()
+            .any(|e| e.contains("uncompressed_blake3 mismatch")));
+        let fb = root.path().join("artifacts/framebuffer/a.lz4");
+        let target = root.path().join("artifacts/framebuffer/real.lz4");
+        fs::rename(&fb, &target).unwrap();
+        symlink(&target, &fb).unwrap();
+        assert!(check_phase4_artifacts(root.path())
+            .errors
+            .iter()
+            .any(|e| e.contains("non-symlink")));
     }
 }

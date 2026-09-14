@@ -107,7 +107,7 @@ pub fn export_phase4_context(opts: &ContextExportOptions) -> ContextExportReport
             return report;
         }
     };
-    if hash(&map_text.as_bytes()) != feature_hash {
+    if hash(map_text.as_bytes()) != feature_hash {
         report
             .errors
             .push("source feature-map hash does not match manifest".into());

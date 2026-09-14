@@ -8,6 +8,12 @@
 //!        [--frames N] [--report out.json]
 //!        [--continue-past-faults]
 //!
+//!   host-capture-index --rom <file> --script <padlog> --map <feature-map.yaml>
+//!                       --layout <layout.json> --out <dir> --every N
+//!                       [--start-frame N] [--frames N] [--mark <frame>[=label] ...]
+//!                       --source-ref <opaque> --session-name <name>
+//!                       [--report <out.json>]
+//!
 //!   map-check --rom <file> --map <yaml> --script <run.padlog>
 //!             --expect <expectations.yaml>
 //!
@@ -66,6 +72,7 @@ use refwork_featuremap::parse_feature_map;
 use refwork_script::parse as parse_padlog;
 use refwork_verify::double_run::double_run;
 use refwork_verify::expectations::parse_expectations;
+use refwork_verify::host_capture_index::{write_host_capture_index, HostIndexOptions};
 use refwork_verify::map_check::{map_check, MapCheckResult};
 use refwork_verify::phase4_artifact_check::check_phase4_artifacts;
 use refwork_verify::phase4_bundle_check::check_phase4_bundle;
@@ -98,6 +105,7 @@ fn main() {
     }
     match args[0].as_str() {
         "play" => cmd_play(&args[1..]),
+        "host-capture-index" => cmd_host_capture_index(&args[1..]),
         "map-check" => cmd_map_check(&args[1..]),
         "trace" => cmd_trace(&args[1..]),
         "double-run" => cmd_double_run(&args[1..]),
@@ -140,6 +148,16 @@ fn usage() {
     println!("       [--continue-past-faults]          LAB-ONLY recon: keep running on fault");
     println!();
     println!("  Pad policy: frames beyond script length hold the last pad word.");
+    println!();
+    println!("  host-capture-index --rom <file> --script <padlog>");
+    println!("                     --map <feature-map.yaml> --layout <layout.json>");
+    println!("                     --out <dir> --every N");
+    println!("                     [--start-frame N] [--frames N] [--mark <frame>[=label] ...]");
+    println!("                     --source-ref <opaque> --session-name <name>");
+    println!("                     [--report <out.json>]");
+    println!("  Host-side replacement for phase4-capture-export: replays a padlog on");
+    println!("  the host emulator core (no worker) and writes a Phase-4-style capture");
+    println!("  index (JSONL rows + packed feature-byte blobs) consumable by `trace`.");
     println!();
     println!("  map-check --rom <file> --map <feature-map.yaml>");
     println!("            --script <run.padlog> --expect <expectations.yaml>");
@@ -880,6 +898,154 @@ fn cmd_play(args: &[String]) {
             eprintln!("play: error: {}", e);
             process::exit(1);
         }
+    }
+}
+
+// ─── host-capture-index ───────────────────────────────────────────────────────
+
+fn cmd_host_capture_index(args: &[String]) {
+    let mut rom: Option<PathBuf> = None;
+    let mut script: Option<PathBuf> = None;
+    let mut map: Option<PathBuf> = None;
+    let mut layout: Option<PathBuf> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut every: Option<u64> = None;
+    let mut start_frame: u64 = 0;
+    let mut frames: Option<u64> = None;
+    let mut marks: Vec<(u64, String)> = Vec::new();
+    let mut source_ref: Option<String> = None;
+    let mut session_name: Option<String> = None;
+    let mut report_path: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--rom" => {
+                i += 1;
+                rom = Some(require_arg("host-capture-index", "--rom", args, i));
+            }
+            "--script" => {
+                i += 1;
+                script = Some(require_arg("host-capture-index", "--script", args, i));
+            }
+            "--map" => {
+                i += 1;
+                map = Some(require_arg("host-capture-index", "--map", args, i));
+            }
+            "--layout" => {
+                i += 1;
+                layout = Some(require_arg("host-capture-index", "--layout", args, i));
+            }
+            "--out" => {
+                i += 1;
+                out_dir = Some(require_arg("host-capture-index", "--out", args, i));
+            }
+            "--every" => {
+                i += 1;
+                let n = require_arg_str("host-capture-index", "--every", args, i);
+                every = Some(n.parse().unwrap_or_else(|_| {
+                    eprintln!("host-capture-index: --every requires a positive integer");
+                    process::exit(1);
+                }));
+            }
+            "--start-frame" => {
+                i += 1;
+                let n = require_arg_str("host-capture-index", "--start-frame", args, i);
+                start_frame = n.parse().unwrap_or_else(|_| {
+                    eprintln!("host-capture-index: --start-frame requires a non-negative integer");
+                    process::exit(1);
+                });
+            }
+            "--frames" => {
+                i += 1;
+                let n = require_arg_str("host-capture-index", "--frames", args, i);
+                frames = Some(n.parse().unwrap_or_else(|_| {
+                    eprintln!("host-capture-index: --frames requires a positive integer");
+                    process::exit(1);
+                }));
+            }
+            "--mark" => {
+                i += 1;
+                let val = require_arg_str("host-capture-index", "--mark", args, i);
+                let (frame_str, label) = match val.split_once('=') {
+                    Some((f, l)) => (f, l.to_owned()),
+                    None => (val, String::new()),
+                };
+                let frame: u64 = frame_str.parse().unwrap_or_else(|_| {
+                    eprintln!(
+                        "host-capture-index: --mark frame '{}' is not an integer",
+                        frame_str
+                    );
+                    process::exit(1);
+                });
+                let label = if label.is_empty() {
+                    format!("mark-{frame}")
+                } else {
+                    label
+                };
+                marks.push((frame, label));
+            }
+            "--source-ref" => {
+                i += 1;
+                source_ref =
+                    Some(require_arg_str("host-capture-index", "--source-ref", args, i).to_owned());
+            }
+            "--session-name" => {
+                i += 1;
+                session_name = Some(
+                    require_arg_str("host-capture-index", "--session-name", args, i).to_owned(),
+                );
+            }
+            "--report" => {
+                i += 1;
+                report_path = Some(require_arg("host-capture-index", "--report", args, i));
+            }
+            other => {
+                eprintln!("host-capture-index: unknown option '{}'", other);
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let out_dir = out_dir.unwrap_or_else(|| missing_required("host-capture-index", "--out"));
+    let report = report_path.unwrap_or_else(|| out_dir.join("report.json"));
+
+    let opts = HostIndexOptions {
+        rom: rom.unwrap_or_else(|| missing_required("host-capture-index", "--rom")),
+        script: script.unwrap_or_else(|| missing_required("host-capture-index", "--script")),
+        map: map.unwrap_or_else(|| missing_required("host-capture-index", "--map")),
+        layout: layout.unwrap_or_else(|| missing_required("host-capture-index", "--layout")),
+        out_dir,
+        every: every.unwrap_or_else(|| {
+            eprintln!("host-capture-index: --every is required");
+            process::exit(1);
+        }),
+        start_frame,
+        frames,
+        source_ref: source_ref
+            .unwrap_or_else(|| missing_required_str("host-capture-index", "--source-ref")),
+        session_name: session_name
+            .unwrap_or_else(|| missing_required_str("host-capture-index", "--session-name")),
+        marks,
+        report,
+    };
+
+    let report = write_host_capture_index(&opts);
+    if report.passed() {
+        println!(
+            "host-capture-index: PASS — captures={} frames={}",
+            report.capture_count, report.frames_run
+        );
+    } else {
+        eprintln!(
+            "host-capture-index: FAIL — {} issue(s)",
+            report.errors.len()
+        );
+        for err in &report.errors {
+            eprintln!("  - {err}");
+        }
+        process::exit(1);
     }
 }
 

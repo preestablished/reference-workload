@@ -19,6 +19,7 @@
 pub(crate) mod decode;
 pub mod double_run;
 pub mod expectations;
+pub mod host_capture_index;
 pub mod map_check;
 pub mod phase4_artifact_check;
 pub mod phase4_bundle_check;
@@ -37,6 +38,7 @@ pub mod vm_first_room;
 pub mod vm_suite;
 
 pub use expectations::{Assertion, Expectations, NeverClause};
+pub use host_capture_index::{write_host_capture_index, HostIndexOptions, HostIndexReport};
 pub use phase4_artifact_check::{check_phase4_artifacts, ArtifactCheckReport};
 pub use phase4_bundle_check::{check_phase4_bundle, Phase4BundleReport};
 pub use phase4_checksum_manifest::{

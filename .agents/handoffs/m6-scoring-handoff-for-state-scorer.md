@@ -108,3 +108,31 @@ Observation 1 (`created_unix_ms` inside the archive_ref hash) is
 control-plane's question, not ours; observation 5 noted, no action.
 
 *Joint sign-off sections are appended below, dated, one per milestone.*
+
+## 2026-09-13 — M4 slot: real pair v3 + host-side gate-3 trajectory (interim goal)
+
+Delivered (private root, `$PR`; retrieval and integrity rules in
+`~/.agents/projects/reference-workload/requests/discovery-02-scorer-handoff/HANDOFF.md`):
+
+- feature-map.yaml v3 blake3 `b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4` (24 features, `feature_bytes_len` = 27);
+  scoring-program.yaml v3 blake3 `b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`; layout.json blake3 `blake3:39b8946911334bb7f07d17b6e6cecf955661d7ac9ff4d8bb57a54e4be58f231a`.
+- Host capture indexes (`$PR/host-index/<main|death|timer>/index.jsonl` +
+  `artifacts/feature-bytes/*.bin`), produced by the new
+  `refwork-verify host-capture-index` (reference-workload commit 1bcde0d+, see
+  the commit that lands this note); main index blake3 `blake3:b635149ddea53fb2a67d895529516cb3cf83a435c65e4fc67ce9ee12324b4b26`.
+- Labeled trajectories: `$PR/bundle/trajectory/first-boss.jsonl` (blake3
+  `blake3:220e05725c9f3305dbf24048e95e1cef911dbca039dea64438c56b9be0d8cb9b`), `negative-death.jsonl`, `negative-timer.jsonl`; trace reports and
+  `gate3-eval-*.jsonl` under `$PR/bundle/validation/`; manifest
+  `handoff.b3` (blake3 `0e66815e244d2fd48fb33809d65030caf37eb937ccd46b10cf59312e262e1188`).
+- Checks run on this side: featuremap validate, map-check on 3 padlogs,
+  layout review, trace PASS x3 with independently derived labels, gate-3
+  properties (monotone stage component, goal iff W1-clear latch, prune on
+  every sampled death/game-over window) — all PASS, **trace-only**.
+- Not run: live `state-scorerd` load/evaluation (no index-evaluating client
+  yet — your plan `interim-goal-score-shaping-validation` WP2 `trajeval`).
+  Build SHA, loaded hashes and `feature_bytes_len` cross-check are yours to
+  record when `trajeval --engine grpc` lands; expected values are above.
+- Goal is the interim world-1-clear latch (decision
+  `.agents/decisions/2026-09-13-interim-goal-and-score-shaping.md`);
+  fires-on-credits UNDECLARABLE. Stage names: capacity_upgrade,
+  equipment_upgrade, first_boss, world1_boss, world1_clear.

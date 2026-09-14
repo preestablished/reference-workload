@@ -54,20 +54,20 @@ impl CaptureExportReport {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Layout {
-    ranges: Vec<LayoutRange>,
-    total_len: u64,
-    blake3: String,
-    compiled_from_feature_map_hash: String,
-    capture_spec_hash: String,
-    compiler_or_exporter_commit: String,
+pub(crate) struct Layout {
+    pub(crate) ranges: Vec<LayoutRange>,
+    pub(crate) total_len: u64,
+    pub(crate) blake3: String,
+    pub(crate) compiled_from_feature_map_hash: String,
+    pub(crate) capture_spec_hash: String,
+    pub(crate) compiler_or_exporter_commit: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct LayoutRange {
-    region: String,
-    layout_version: u64,
-    offset: u64,
-    len: u64,
+pub(crate) struct LayoutRange {
+    pub(crate) region: String,
+    pub(crate) layout_version: u64,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
 }
 
 pub fn export_phase4_captures(opts: &CaptureExportOptions) -> CaptureExportReport {
@@ -374,7 +374,7 @@ pub fn export_phase4_captures(opts: &CaptureExportOptions) -> CaptureExportRepor
     report
 }
 
-fn validate_layout(layout: &Layout) -> Result<(), String> {
+pub(crate) fn validate_layout(layout: &Layout) -> Result<(), String> {
     if layout.ranges.is_empty() || layout.total_len == 0 {
         return Err("layout ranges and total_len must be nonempty".into());
     }
@@ -410,7 +410,6 @@ fn validate_capture_response(
     }
     let info = run
         .fb_info
-        .clone()
         .filter(|v| {
             v.width == 256
                 && v.height == 224
@@ -428,12 +427,12 @@ fn validate_capture_response(
     }
     Ok((info, pixels))
 }
-fn packed_width(map: &FeatureMap) -> Option<usize> {
+pub(crate) fn packed_width(map: &FeatureMap) -> Option<usize> {
     map.features.iter().try_fold(0usize, |n, f| {
         n.checked_add(f.feature_type.derived_width().or(f.width)? as usize)
     })
 }
-fn decode_packed(map: &FeatureMap, bytes: &[u8]) -> Result<Vec<Value>, String> {
+pub(crate) fn decode_packed(map: &FeatureMap, bytes: &[u8]) -> Result<Vec<Value>, String> {
     let mut at = 0;
     let mut out = Vec::new();
     for f in &map.features {
@@ -516,7 +515,7 @@ fn validate_resume_frames(path: &Path, base: u32, cadence: u32) -> Result<(), St
     }
     Ok(())
 }
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -525,11 +524,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     fs::rename(tmp, path)
 }
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     let b = fs::read(path).map_err(|e| format!("cannot read layout: {e}"))?;
     serde_json::from_slice(&b).map_err(|e| format!("cannot parse layout: {e}"))
 }
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 fn parse_hash(value: &str) -> Result<Vec<u8>, String> {
@@ -673,9 +672,11 @@ features:
     }
     #[test]
     fn phase4_capture_export_rejects_malformed_capture_responses() {
-        let mut run = proto::RunResponse::default();
-        run.reason = proto::StopReason::BudgetReached as i32;
-        run.feature_bytes = vec![0];
+        let mut run = proto::RunResponse {
+            reason: proto::StopReason::BudgetReached as i32,
+            feature_bytes: vec![0],
+            ..Default::default()
+        };
         assert!(validate_capture_response(&run, 1)
             .unwrap_err()
             .contains("framebuffer metadata"));
