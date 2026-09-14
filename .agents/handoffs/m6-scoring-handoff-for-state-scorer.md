@@ -114,8 +114,8 @@ control-plane's question, not ours; observation 5 noted, no action.
 Delivered (private root, `$PR`; retrieval and integrity rules in
 `~/.agents/projects/reference-workload/requests/discovery-02-scorer-handoff/HANDOFF.md`):
 
-- feature-map.yaml v3 blake3 `b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4` (24 features, `feature_bytes_len` = 27);
-  scoring-program.yaml v3 blake3 `b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`; layout.json blake3 `blake3:39b8946911334bb7f07d17b6e6cecf955661d7ac9ff4d8bb57a54e4be58f231a`.
+- feature-map.yaml v3 blake3 `blake3:b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4` (24 features, `feature_bytes_len` = 27);
+  scoring-program.yaml v3 blake3 `blake3:b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`; layout.json blake3 `blake3:39b8946911334bb7f07d17b6e6cecf955661d7ac9ff4d8bb57a54e4be58f231a`.
 - Host capture indexes (`$PR/host-index/<main|death|timer>/index.jsonl` +
   `artifacts/feature-bytes/*.bin`), produced by the new
   `refwork-verify host-capture-index` (reference-workload commit 1bcde0d+, see
@@ -123,7 +123,7 @@ Delivered (private root, `$PR`; retrieval and integrity rules in
 - Labeled trajectories: `$PR/bundle/trajectory/first-boss.jsonl` (blake3
   `blake3:220e05725c9f3305dbf24048e95e1cef911dbca039dea64438c56b9be0d8cb9b`), `negative-death.jsonl`, `negative-timer.jsonl`; trace reports and
   `gate3-eval-*.jsonl` under `$PR/bundle/validation/`; manifest
-  `handoff.b3` (blake3 `0e66815e244d2fd48fb33809d65030caf37eb937ccd46b10cf59312e262e1188`).
+  `handoff.b3` (blake3 `blake3:39aefe5a4602b2c15f463f1f01f367bd463d6837d6eb3d6326cf60be9f88884a`).
 - Checks run on this side: featuremap validate, map-check on 3 padlogs,
   layout review, trace PASS x3 with independently derived labels, gate-3
   properties (monotone stage component, goal iff W1-clear latch, prune on

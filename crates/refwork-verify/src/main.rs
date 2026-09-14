@@ -959,10 +959,15 @@ fn cmd_host_capture_index(args: &[String]) {
             "--frames" => {
                 i += 1;
                 let n = require_arg_str("host-capture-index", "--frames", args, i);
-                frames = Some(n.parse().unwrap_or_else(|_| {
+                let parsed: u64 = n.parse().unwrap_or_else(|_| {
                     eprintln!("host-capture-index: --frames requires a positive integer");
                     process::exit(1);
-                }));
+                });
+                if parsed == 0 {
+                    eprintln!("host-capture-index: --frames must be greater than zero");
+                    process::exit(1);
+                }
+                frames = Some(parsed);
             }
             "--mark" => {
                 i += 1;

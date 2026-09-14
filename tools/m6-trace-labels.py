@@ -14,7 +14,8 @@ Inputs (both private; paths are given on the command line, never echoed):
       stage_frames: {stage: <first frame at which its latch holds> | null}
       goal_frame: <first frame at which the goal holds> | null
       prune_windows: [[start, end|null], ...]   # inclusive frame windows where prune holds
-  --index <index.jsonl>    rows with capture_id + frame_index (host-capture-index output)
+  --index <index.jsonl>    rows with capture_id + frame_index (host-capture-index output;
+                           a row's optional `label` is informational and never read here)
 Output:
   --out <labels.yaml>      kind: phase4-trace-labels, schema_version: 1, one label per capture
 
@@ -31,7 +32,7 @@ import argparse
 import json
 import sys
 
-import yaml
+import yaml  # PyYAML (>= 6); the repo's helper venv is ~/.venvs/refwork
 
 
 def load_events(path):
@@ -46,6 +47,9 @@ def load_events(path):
     for s in frames:
         if s not in order:
             sys.exit(f"events: stage_frames names unknown stage {s!r}")
+    # Note: stage_order is the scoring program's order, not a temporal order —
+    # independent stages (e.g. an equipment latch) may fire after later-listed
+    # ones, so no monotonicity is enforced on stage_frames here.
     windows = []
     for w in ev.get("prune_windows") or []:
         if not isinstance(w, list) or len(w) != 2:
@@ -86,7 +90,9 @@ def main():
                 continue
             row = json.loads(line)
             cid = row.get("capture_id")
-            frame = row.get("frame_index", row.get("frame_counter"))
+            frame = row.get("frame_index")
+            if frame is None:
+                frame = row.get("frame_counter")
             if cid is None or frame is None:
                 sys.exit(f"index:{line_no}: missing capture_id/frame_index")
             if cid in seen:

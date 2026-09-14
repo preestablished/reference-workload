@@ -16,8 +16,8 @@ Scorer build SHA: none (trace-only evaluation; no index-evaluating scorer
 client exists yet — see GATE3-CLAIMS.md).
 
 Private pair v3 (under the private root, never tracked):
-- feature-map.yaml v3: blake3 `b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4` (24 features, 27 packed bytes)
-- scoring-program.yaml v3: blake3 `b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`
+- feature-map.yaml v3: blake3 `blake3:b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4` (24 features, 27 packed bytes)
+- scoring-program.yaml v3: blake3 `blake3:b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`
 - layout.json: blake3 `blake3:39b8946911334bb7f07d17b6e6cecf955661d7ac9ff4d8bb57a54e4be58f231a`
 - Validation: featuremap validate PASS; map-check PASS on 3 padlogs
   (main 759 assertions + 1 never, death 250, timer 181 + 1 never); layout
@@ -45,7 +45,7 @@ state-scorer plan's `trajeval`). Scope: Phase 4 exit gate 3 declared in its
 interim form only (world-1-clear latch; fires-on-credits UNDECLARABLE);
 items 4–5 still gated on the worker stack.
 
-`tools/m6-gate-check.sh` output, verbatim (home directory abbreviated):
+`tools/m6-gate-check.sh` re-run after WP5 (output identical to the entry above; kept verbatim per package 01 step 3, home directory abbreviated):
 
 ```
 PASS     scorer-M3                    documented evidence (scorer DB lost): ~/git/preestablished/state-scorer/.agents/requests/phase4-m1-m4-first-boss-scoring/04-resolution.md marks state-scorer-0gy (M3) closed

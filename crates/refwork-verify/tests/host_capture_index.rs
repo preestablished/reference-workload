@@ -344,3 +344,56 @@ fn host_capture_index_start_frame_skips_boot_era_rows() {
     );
     assert_eq!(report.capture_count, 2);
 }
+
+#[test]
+fn host_capture_index_rejects_marks_outside_the_replay_window() {
+    let fx = setup(12);
+    for (marks, start) in [
+        (vec![(3u64, "early".to_string())], 6u64),
+        (vec![(12, "late".to_string())], 0),
+    ] {
+        let out_dir = fx._root.path().join(format!("out-mark-{start}"));
+        let mut o = opts(&fx, out_dir.clone());
+        o.marks = marks;
+        o.start_frame = start;
+        let report = write_host_capture_index(&o);
+        assert!(!report.passed());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("outside the replay window")),
+            "{:?}",
+            report.errors
+        );
+        assert!(!out_dir.join("index.jsonl").exists());
+    }
+    // a valid mark is counted
+    let out_dir = fx._root.path().join("out-mark-ok");
+    let report = write_host_capture_index(&opts(&fx, out_dir));
+    assert!(report.passed());
+    assert_eq!((report.marks_requested, report.marks_emitted), (1, 1));
+    assert_eq!(report.frames_requested, 12);
+}
+
+#[test]
+fn host_capture_index_failed_rerun_removes_stale_outputs() {
+    let fx = setup(12);
+    let out_dir = fx._root.path().join("out-stale");
+    let good = write_host_capture_index(&opts(&fx, out_dir.clone()));
+    assert!(good.passed());
+    assert!(out_dir.join("index.jsonl").exists());
+    let mut bad = opts(&fx, out_dir.clone());
+    bad.every = 0; // pre-flight failure
+    let report = write_host_capture_index(&bad);
+    assert!(!report.passed());
+    assert!(
+        !out_dir.join("index.jsonl").exists(),
+        "stale index must not survive a failed rerun"
+    );
+    assert!(
+        !out_dir.join("artifacts/feature-bytes").exists(),
+        "stale blobs must not survive a failed rerun"
+    );
+    assert!(out_dir.join("report.json").exists());
+}

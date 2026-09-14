@@ -49,7 +49,12 @@ pub struct HostIndexReport {
     pub capture_count: usize,
     pub every: u64,
     pub start_frame: u64,
+    /// Frames the run was asked to replay (padlog length unless `--frames`).
+    pub frames_requested: u64,
     pub frames_run: u64,
+    /// `--mark` frames requested / actually emitted as rows (must be equal on a pass).
+    pub marks_requested: usize,
+    pub marks_emitted: usize,
     pub first_frame: Option<u64>,
     pub last_frame: Option<u64>,
     pub map_hash: Option<String>,
@@ -77,6 +82,7 @@ pub fn write_host_capture_index(opts: &HostIndexOptions) -> HostIndexReport {
         status: "fail".into(),
         every: opts.every,
         start_frame: opts.start_frame,
+        marks_requested: opts.marks.len(),
         source_ref: opts.source_ref.clone(),
         session_name: opts.session_name.clone(),
         ..Default::default()
@@ -229,11 +235,47 @@ pub fn write_host_capture_index(opts: &HostIndexOptions) -> HostIndexReport {
     };
 
     let total_frames = opts.frames.unwrap_or(script.len() as u64);
+    report.frames_requested = total_frames;
+    if total_frames == 0 {
+        report
+            .errors
+            .push("nothing to replay: --frames is zero or the padlog is empty".into());
+        return finish(opts, report);
+    }
+    // Every requested mark must fall inside the replay window, or it would be
+    // silently dropped from the index.
+    for (frame, label) in &opts.marks {
+        if *frame < opts.start_frame || *frame >= total_frames {
+            report.errors.push(format!(
+                "mark {frame}={label} is outside the replay window [{}, {})",
+                opts.start_frame, total_frames
+            ));
+            return finish(opts, report);
+        }
+    }
+    // Resolve each feature's (offset, width) once; the loop only slices.
+    let feature_spans: Vec<(usize, usize)> = map
+        .features
+        .iter()
+        .map(|feature| {
+            let width = feature
+                .feature_type
+                .derived_width()
+                .or(feature.width)
+                .unwrap() as usize;
+            (feature.offset.0 as usize, width)
+        })
+        .collect();
     let last_pad: u16 = script.frames.last().copied().unwrap_or(0);
     let marks: BTreeMap<u64, String> = opts.marks.iter().cloned().collect();
 
-    // Pre-flight passed: only now do we touch the output directory.
+    // Pre-flight passed: only now do we touch the output directory. Any
+    // previous run's index and blobs are cleared first so a rerun can never
+    // mix old rows with new ones.
     let artifacts_dir = opts.out_dir.join("artifacts/feature-bytes");
+    let _ = fs::remove_file(opts.out_dir.join("index.jsonl"));
+    let _ = fs::remove_file(opts.out_dir.join("index.tmp"));
+    let _ = fs::remove_dir_all(&artifacts_dir);
     if let Err(e) = fs::create_dir_all(&artifacts_dir) {
         report
             .errors
@@ -269,22 +311,16 @@ pub fn write_host_capture_index(opts: &HostIndexOptions) -> HostIndexReport {
 
         let capture_id = format!("host-{}-{:07}", opts.session_name, f);
         let mut bytes = Vec::with_capacity(layout.total_len as usize);
-        for feature in &map.features {
-            let width = feature
-                .feature_type
-                .derived_width()
-                .or(feature.width)
-                .unwrap() as usize;
-            let off = feature.offset.0 as usize;
-            let slice = match core.wram().get(off..off + width) {
-                Some(s) => s,
-                None => {
-                    report.errors.push(format!(
-                        "feature {} range exceeds wram bounds",
-                        feature.name
-                    ));
-                    break 'frames;
-                }
+        for (feature, (off, width)) in map.features.iter().zip(&feature_spans) {
+            let slice = off
+                .checked_add(*width)
+                .and_then(|end| core.wram().get(*off..end));
+            let Some(slice) = slice else {
+                report.errors.push(format!(
+                    "feature {} range exceeds wram bounds",
+                    feature.name
+                ));
+                break 'frames;
             };
             bytes.extend_from_slice(slice);
         }
@@ -330,7 +366,11 @@ pub fn write_host_capture_index(opts: &HostIndexOptions) -> HostIndexReport {
             "decoded_values": decoded,
         });
         if let Some(label) = mark_label {
+            // The label is informational (operator vocabulary) — `trace` and
+            // tools/m6-trace-labels.py key rows by capture_id/frame_index and
+            // never read it.
             row["label"] = serde_json::Value::String(label.clone());
+            report.marks_emitted += 1;
         }
         rows.push(serde_json::to_string(&row).unwrap());
         report.capture_count += 1;
@@ -366,6 +406,13 @@ fn finish(opts: &HostIndexOptions, mut report: HostIndexReport) -> HostIndexRepo
         "fail"
     }
     .into();
+    if !report.errors.is_empty() {
+        // A failing run must not leave a previous run's index (or this run's
+        // partial blobs) next to a report that says "fail": report.json is
+        // the only authority for the out dir.
+        let _ = fs::remove_file(opts.out_dir.join("index.jsonl"));
+        let _ = fs::remove_dir_all(opts.out_dir.join("artifacts/feature-bytes"));
+    }
     if let Some(parent) = opts.report.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             report
