@@ -1924,7 +1924,10 @@ mod tests {
         assert_eq!(bus.wmadd, 0, "primer line must not transfer data");
         bus.execute_hdma(); // first data line
         assert_eq!(bus.wram[0], 0xAA);
-        assert_eq!(bus.wmadd, 1, "entry data transfers one line after enable+primer");
+        assert_eq!(
+            bus.wmadd, 1,
+            "entry data transfers one line after enable+primer"
+        );
     }
 
     #[test]

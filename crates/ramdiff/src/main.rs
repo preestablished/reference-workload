@@ -154,9 +154,7 @@ fn usage() {
     #[cfg(feature = "interactive")]
     println!("         [--no-audio]   (interactive; skip audio playback entirely)");
     #[cfg(feature = "interactive")]
-    println!(
-        "         [--stats]   (interactive; periodic fps/audio diagnostics on stderr)"
-    );
+    println!("         [--stats]   (interactive; periodic fps/audio diagnostics on stderr)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");

@@ -1468,8 +1468,7 @@ mod tests {
             let single_pairs = total_pairs_produced(&mut single);
 
             let mut chunked = Apu::new();
-            let chunked_pairs =
-                advance_chunked_counting_pairs(&mut chunked, ONE_SECOND_MCLK, 30);
+            let chunked_pairs = advance_chunked_counting_pairs(&mut chunked, ONE_SECOND_MCLK, 30);
 
             println!(
                 "one second ({ONE_SECOND_MCLK} mclk): single-call={single_pairs} pairs, \

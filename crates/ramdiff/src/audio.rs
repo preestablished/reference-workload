@@ -193,8 +193,7 @@ impl AudioSink {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             queue.extend(self.scratch.iter().copied());
-            let dropped =
-                apply_watermark(&mut queue, device.high_watermark, device.low_watermark);
+            let dropped = apply_watermark(&mut queue, device.high_watermark, device.low_watermark);
             (dropped, queue.len())
         };
         device.last_depth = depth_after;
@@ -387,7 +386,12 @@ fn stream_error_callback(err: cpal::StreamError) {
 
 /// Realtime audio callback body for `i16` device output. Kept thin: on lock
 /// contention, output silence for the whole buffer rather than blocking.
-fn fill_i16(data: &mut [i16], channels: usize, queue: &Mutex<VecDeque<i16>>, mute_flag: &AtomicBool) {
+fn fill_i16(
+    data: &mut [i16],
+    channels: usize,
+    queue: &Mutex<VecDeque<i16>>,
+    mute_flag: &AtomicBool,
+) {
     let muted = mute_flag.load(Ordering::Relaxed);
     match queue.try_lock() {
         Ok(mut q) => {
@@ -402,7 +406,12 @@ fn fill_i16(data: &mut [i16], channels: usize, queue: &Mutex<VecDeque<i16>>, mut
 }
 
 /// Realtime audio callback body for `f32` device output.
-fn fill_f32(data: &mut [f32], channels: usize, queue: &Mutex<VecDeque<i16>>, mute_flag: &AtomicBool) {
+fn fill_f32(
+    data: &mut [f32],
+    channels: usize,
+    queue: &Mutex<VecDeque<i16>>,
+    mute_flag: &AtomicBool,
+) {
     let muted = mute_flag.load(Ordering::Relaxed);
     match queue.try_lock() {
         Ok(mut q) => {
@@ -606,10 +615,7 @@ mod tests {
 
     fn interleave(l: &[i16], r: &[i16]) -> Vec<i16> {
         assert_eq!(l.len(), r.len());
-        l.iter()
-            .zip(r.iter())
-            .flat_map(|(&a, &b)| [a, b])
-            .collect()
+        l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a, b]).collect()
     }
 
     #[test]
@@ -703,7 +709,9 @@ mod tests {
         // Same input fed through many small, unevenly sized chunks.
         let mut split = Resampler::new(32_000, 48_000);
         let mut out_split = Vec::new();
-        let chunk_pair_sizes = [1usize, 3, 7, 50, 2, 137, 1, 300 /* covers the remainder */];
+        let chunk_pair_sizes = [
+            1usize, 3, 7, 50, 2, 137, 1, 300, /* covers the remainder */
+        ];
         let mut offset_pairs = 0usize;
         let total_pairs = input.len() / 2;
         for &size in &chunk_pair_sizes {
@@ -716,7 +724,10 @@ mod tests {
             split.push(&input[start..end], &mut out_split);
             offset_pairs += take;
         }
-        assert_eq!(offset_pairs, total_pairs, "test chunking must cover all input");
+        assert_eq!(
+            offset_pairs, total_pairs,
+            "test chunking must cover all input"
+        );
 
         assert_eq!(out_whole, out_split);
     }

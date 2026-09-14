@@ -60,18 +60,18 @@ const NAME_HINTS: [&str; 4] = ["f310", "dual action", "logitech gamepad", "gamep
 /// (gilrs button, API.md §3.4 pad bit). gilrs uses SDL positional names:
 /// on the F310's Xbox-style layout South=A, East=B, West=X, North=Y.
 const BUTTON_BITS: [(Button, u16); 12] = [
-    (Button::South, 1 << 0),         // A
-    (Button::East, 1 << 1),          // B
-    (Button::West, 1 << 2),          // X
-    (Button::North, 1 << 3),         // Y
-    (Button::LeftTrigger, 1 << 4),   // LB -> L
-    (Button::RightTrigger, 1 << 5),  // RB -> R
-    (Button::DPadUp, 1 << 6),        // Up
-    (Button::DPadDown, 1 << 7),      // Down
-    (Button::DPadLeft, 1 << 8),      // Left
-    (Button::DPadRight, 1 << 9),     // Right
-    (Button::Start, 1 << 10),        // Start
-    (Button::Select, 1 << 11),       // Back -> Select
+    (Button::South, 1 << 0),        // A
+    (Button::East, 1 << 1),         // B
+    (Button::West, 1 << 2),         // X
+    (Button::North, 1 << 3),        // Y
+    (Button::LeftTrigger, 1 << 4),  // LB -> L
+    (Button::RightTrigger, 1 << 5), // RB -> R
+    (Button::DPadUp, 1 << 6),       // Up
+    (Button::DPadDown, 1 << 7),     // Down
+    (Button::DPadLeft, 1 << 8),     // Left
+    (Button::DPadRight, 1 << 9),    // Right
+    (Button::Start, 1 << 10),       // Start
+    (Button::Select, 1 << 11),      // Back -> Select
 ];
 
 /// Lower-trigger fallback for pads whose SDL mapping puts LT/RT in the
