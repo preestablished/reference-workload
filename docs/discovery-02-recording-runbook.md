@@ -101,7 +101,8 @@ replayed.
   character becomes a different file name than the label; the lint (check
   C6) fails such a session, so re-dump under the exact name.
 - Mid-session check from the second terminal: `tools/lint-session <name>`;
-  it lists the required labels not yet taken.
+  it lists the required labels not yet taken. The same list is also printed
+  automatically on Esc (best-effort; the lint is the authority).
 
 ## 2. Session `discovery-02-main` (no game over allowed)
 

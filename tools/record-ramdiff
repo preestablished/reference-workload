@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 # record-ramdiff — launch the M6 discovery/trajectory hand-play session.
-# Usage: record-ramdiff [session-name] [--resume] [--stats]
+# Usage: record-ramdiff [session-name] [--resume] [--stats] [--name-check]
 #   Default: start FRESH — an existing non-empty session dir is rotated
 #   aside to <name>.bak-N (never deleted).
 #   --resume: replay interactive.padlog to restore state, then append.
 #   --stats: periodic fps/audio diagnostics + slow-frame attribution on
 #   stderr (refwork-dn5 stall diagnosis).
+#   Names are never reused: a name that already has a replay-verify-<name>
+#   sibling (gate G2 ran on it) is always refused before anything under the
+#   private root is created or rotated, --resume included (appending would
+#   invalidate that evidence).
+#   --name-check: only run that check and exit (0 = name is free, 1 = taken);
+#   nothing is launched.
 set -euo pipefail
 
 SESSION_NAME="discovery-01"
 SESSION_NAME_SET=0
 RESUME=0
 STATS=0
+NAME_CHECK=0
 for arg in "$@"; do
   case "$arg" in
     --resume) RESUME=1 ;;
     --stats) STATS=1 ;;
+    --name-check) NAME_CHECK=1 ;;
     -h|--help)
-      sed -n "2,8p" "$0" | sed "s/^# \{0,1\}//"; exit 0 ;;
+      sed -n "2,14p" "$0" | sed "s/^# \{0,1\}//"; exit 0 ;;
     -*) echo "error: unknown flag $arg" >&2; exit 1 ;;
     *)
       if [ "$SESSION_NAME_SET" -eq 1 ]; then
@@ -27,8 +35,11 @@ for arg in "$@"; do
       SESSION_NAME="$arg"; SESSION_NAME_SET=1 ;;
   esac
 done
-if ! [[ "$SESSION_NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
-  echo "error: session name must match [A-Za-z0-9_-]+ (got: $SESSION_NAME)" >&2
+# Subset of the name rule tools/replay-fidelity accepts, so every recorded
+# session can be G2-gated (a leading `_` or `-` would record fine and then be
+# refused by the gate).
+if ! [[ "$SESSION_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  echo "error: session name must match [A-Za-z0-9][A-Za-z0-9_-]* (got: $SESSION_NAME)" >&2
   exit 1
 fi
 
@@ -45,16 +56,42 @@ RAMDIFF="$REPO_ROOT/target/release/ramdiff"
 
 # The private root (ROMs + sessions) is resolved from a pointer file outside
 # every checkout; its location never appears in this repo (GATE-RECORD-ASK1).
+# RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only; mirrors
+# tools/replay-fidelity): it must be an existing absolute directory and the
+# override is announced, so a stale export cannot silently redirect a
+# hand-play run.
 POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
-if [ ! -s "$POINTER" ]; then
+if [ -n "${RAMDIFF_PRIVATE_ROOT:-}" ]; then
+  if [[ "$RAMDIFF_PRIVATE_ROOT" != /* ]] || [ ! -d "$RAMDIFF_PRIVATE_ROOT" ]; then
+    echo "error: RAMDIFF_PRIVATE_ROOT must be an existing absolute directory" >&2
+    exit 1
+  fi
+  echo "note: RAMDIFF_PRIVATE_ROOT override in effect (scratch run; the pointer file is bypassed)" >&2
+  PRIVATE_ROOT="$RAMDIFF_PRIVATE_ROOT"
+elif [ -s "$POINTER" ]; then
+  PRIVATE_ROOT="$(head -n1 "$POINTER")"
+else
   echo "error: private-root pointer file missing: $POINTER" >&2
   echo "       write the operator-approved private root into it (one absolute" >&2
   echo "       path, no trailing slash) before running this tool." >&2
   exit 1
 fi
-PRIVATE_ROOT="$(head -n1 "$POINTER")"
 ROM_DIR="$PRIVATE_ROOT/ROMs/SNES"
 SESSION_DIR="$PRIVATE_ROOT/ramdiff/$SESSION_NAME"
+
+# A session that already has a replay-verify sibling has been through gate G2
+# (tools/replay-fidelity) and names are never reused — rotating it aside or
+# appending to it would leave that evidence attesting a recording that no
+# longer exists as gated. Always checked, before anything under the private
+# root is created or rotated. --name-check stops here either way.
+if [ -e "$PRIVATE_ROOT/ramdiff/replay-verify-$SESSION_NAME" ]; then
+  echo "error: session name $SESSION_NAME already has a replay-verify sibling; pick a new take name" >&2
+  exit 1
+fi
+if [ "$NAME_CHECK" -eq 1 ]; then
+  echo "ok: session name $SESSION_NAME is free" >&2
+  exit 0
+fi
 
 [ -x "$RAMDIFF" ] || { echo "error: $RAMDIFF not built" >&2; exit 1; }
 

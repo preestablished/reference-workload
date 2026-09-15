@@ -8,7 +8,7 @@ phase-4 exit-gate item 3.
 
 ## Identifiers
 - reference-workload SHA: 30fe9d1 + the review-fix commit on branch `discovery-02-processing` (recorded in git; the clean re-run below was built at 30fe9d1 — the fix commit changes report fields only, indexes and traces are byte-identical, re-verified)
-- scorer build SHA: none — trace-only (no index-evaluating scorer client yet)
+- scorer build SHA: `0.1.0+b6662ad` (git `b6662ad1c90aaec04fc6ef9aa1edc5b8ad27d318`), engine grpc, `bytes_source: raw` — live evaluation 2026-09-14 (2026-09-13: trace-only); evidence: state-scorer `docs/evidence/exit-gate/2026-09-14-interim-goal.md`
 - Loaded map hash: `blake3:b811fabc28f7daddce8dd44b011bec0e788adc5fa8a76de4e67fd266534081a4`   program hash: `blake3:b11b07420d75b87ce57c0e1901fa9f2e39cef5a03d5f3c7f6a58a8dbc564f0da`
 - Corpus id: **none — corpus deferred** (see below)
 - Labeled-trajectory hash: `blake3:220e05725c9f3305dbf24048e95e1cef911dbca039dea64438c56b9be0d8cb9b` (`$PR/bundle/trajectory/first-boss.jsonl`)
@@ -24,19 +24,24 @@ refwork-emu 0.2.3) via `~/.agents/projects/reference-workload/handplay-session`.
 - refwork-20v closed 2026-09-13 (pair v3 validated). refwork-czi closed (earlier).
 - refwork-1n8 closed (migration step superseded by discovery-02 re-confirmation; residue below).
 - refwork-5tk open — corpus deferred (comment posted). refwork-5be commented (handoff delivered).
+- 2026-09-14: refwork-5be closed (live scorer evaluation recorded, see Identifiers).
 - refwork-ob3 open — items 4–5 gated (comment posted). refwork-8n5 commented (session consumed).
 
 ## Validation results (the four)
 1. Compile + hand-score joint validation: this side validated the pair
    (featuremap validate PASS; map-check PASS on three padlogs: main 759
    assertions + 1 never-clause, death 250, timer 181 + 1 never); scorer-side
-   compile/evaluation pending state-scorer's `trajeval` (their plan WP2).
+   compile + evaluation done 2026-09-14 by state-scorer `trajeval` (build
+   `0.1.0+b6662ad`, engine grpc): main/death/timer PASS ×3, zero item
+   errors, loaded map/program/layout hashes equal to the handoff's,
+   `feature_bytes_len` 27.
 2. Scripted-trajectory checkpoints: not re-run under this plan (the hand-played
    discovery-02 trajectory replaces the scripted one for gate 3; the July
    scripted checkpoints were pre-epoch).
 3. Gate-3 fixture (interim form): monotonicity **PASS**, goal-iff-latch **PASS**
    (world-1-clear latch, both directions on 1,302 captures), prune on the
-   death/timer negatives **PASS** — all trace-only; see GATE3-CLAIMS.md.
+   death/timer negatives **PASS** — trace-only on 2026-09-13, confirmed by
+   the live scorer run of 2026-09-14; see GATE3-CLAIMS.md.
 4. Fixture corpus + budget: **not run** — no corpus (below).
 
 ## Self-verification matrix (package 08)
@@ -81,6 +86,11 @@ and GATE3-CLAIMS is upgraded to `full-corpus`.
 - Sibling programs' icount re-baseline (bill item 4) before any capture is trusted.
 - `integration.rs` frame_ctr pin verification; package-06 re-stamp; doc
   updates for old corpus-id references.
+- 2026-09-14: frame_ctr pin verified unchanged at `3afde31` / emulator 0.2.3
+  (`map_check_positive`, `map_check_negative_wrong_value` PASS; recorded in
+  `$PR/evidence/frame-ctr-pin-023.txt`). The synthetic ROM exercises no APU
+  timing, so this closes the bookkeeping item only. A grep for old corpus-id
+  references found none (no July corpus id was ever minted).
 
 ## Operator decisions (resolved 2026-09-14 unless noted)
 - Commit `5b35113` (private-root literal in pushed history): **left as-is
@@ -93,14 +103,19 @@ and GATE3-CLAIMS is upgraded to `full-corpus`.
   the v3 program — see GATE3-CLAIMS.md and the private CHANGELOG-v3.md.
 
 ## Handoff surface
-No WorkloadImage registration (unchanged). Scorer handoff:
+No WorkloadImage registration (unchanged). 2026-09-14: the bundle identity
+moves to `dist/workload-image-0.2.0/` / `refwork-demo@0.2.0` (workspace
+version bump for the epoch-0.2.3 re-baseline; the manifest now carries
+`meta.built_from.emu_version`); the 0.2.0 bundle is not yet built, and every
+consumer runbook naming `workload-image-0.1.0` is stale until it is. Scorer handoff:
 `~/.agents/projects/reference-workload/requests/discovery-02-scorer-handoff/HANDOFF.md`
 + `.agents/handoffs/m6-scoring-handoff-for-state-scorer.md` (2026-09-13 M4 slot).
 
 ## Gate assessment
 Gate 3: **declared in the interim form only** (world-1-clear latch;
-fires-on-credits UNDECLARABLE; trace-only evaluation). Evidence contributed
-to gates 1–2: none new (no live scorer run, no real-state dedup run).
+fires-on-credits UNDECLARABLE; evaluated live by state-scorer
+`0.1.0+b6662ad` on 2026-09-14). Evidence contributed to gates 1–2: none new
+(the live scorer run evaluates gate 3 only; no real-state dedup run).
 Cross-references: scorer packet resolution
 `~/git/preestablished/state-scorer/.agents/requests/phase4-m1-m4-first-boss-scoring/04-resolution.md`
 (items 1–2, 4, 5-window remain two-sided).

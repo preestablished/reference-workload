@@ -361,6 +361,9 @@ pub struct InteractiveOpts {
     /// per-phase slow-frame attribution on stderr. Interactive-only; see
     /// `StatsWindow` below and beads issue refwork-xkp.
     pub stats: bool,
+    /// Label checklist for the Esc-time "still to take" hint (the same file
+    /// `ramdiff lint` reads; `None` disables the hint). Interactive-only.
+    pub checklist: Option<std::path::PathBuf>,
 }
 
 #[cfg(any(feature = "interactive", test))]
@@ -1323,6 +1326,9 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     // total pad lines now in the log.
     session.log_frames = Some(frame);
     session.save()?;
+    if let Some(checklist) = &opts.checklist {
+        print_missing_labels(&opts.session_dir, checklist);
+    }
 
     // Shutdown diagnostic: all counters reflect only the live loop (the
     // audio baseline was captured after replay, before any live frame ran;
@@ -1356,6 +1362,35 @@ pub fn run_interactive(opts: &InteractiveOpts) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Esc-time hint: the checklist's required labels still absent from the
+/// session just saved (a mid-session lint with no waivers, so waived labels
+/// are listed too). Best-effort: a lint error (unknown session kind,
+/// unreadable checklist) is reported in one non-fatal line so a broken hint
+/// is distinguishable from "nothing missing" — `ramdiff lint` stays the
+/// authoritative check (refwork-0jz item 2).
+#[cfg(feature = "interactive")]
+fn print_missing_labels(session_dir: &std::path::Path, checklist: &std::path::Path) {
+    let opts = crate::lint::LintOpts {
+        session_dir: session_dir.to_path_buf(),
+        checklist: checklist.to_path_buf(),
+        kind: None,
+        final_: false,
+        waive: Vec::new(),
+    };
+    match crate::lint::run_lint(&opts) {
+        Ok(report) if !report.missing_required.is_empty() => eprintln!(
+            "interactive: {} required label(s) still to take: {}",
+            report.missing_required.len(),
+            report.missing_required.join(", ")
+        ),
+        Ok(_) => {}
+        // Sessions outside the checklist (scratch names, the legacy default
+        // `discovery-01`) are expected; only a genuinely broken hint is noted.
+        Err(err) if err.starts_with("checklist has no session kind") => {}
+        Err(err) => eprintln!("interactive: label-checklist hint unavailable ({err})"),
+    }
 }
 
 /// Build a pad word from the current window key state.

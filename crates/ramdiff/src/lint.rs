@@ -770,6 +770,8 @@ pub fn run_lint(opts: &LintOpts) -> Result<LintReport, String> {
     };
     let spec = checklist.sessions.get(&kind).ok_or_else(|| {
         format!(
+            // `record::print_missing_labels` matches this text to stay quiet
+            // for sessions outside the checklist; keep the prefix stable.
             "checklist has no session kind {:?} (known: {}); pass --kind",
             kind,
             checklist

@@ -154,9 +154,7 @@ fn usage() {
     #[cfg(feature = "interactive")]
     println!("         [--no-audio]   (interactive; skip audio playback entirely)");
     #[cfg(feature = "interactive")]
-    println!(
-        "         [--stats]   (interactive; periodic fps/audio diagnostics on stderr)"
-    );
+    println!("         [--stats]   (interactive; periodic fps/audio diagnostics on stderr)");
     println!();
     println!("  search --session <dir>");
     println!("         [--width u8|u16le]");
@@ -284,6 +282,9 @@ fn cmd_record(args: &[String]) -> Result<(), String> {
             pad_debug,
             no_audio,
             stats,
+            // Best-effort: the committed checklist next to a target/<profile>/
+            // exe; absent (e.g. an installed binary) simply disables the hint.
+            checklist: default_checklist().ok(),
         });
     }
 

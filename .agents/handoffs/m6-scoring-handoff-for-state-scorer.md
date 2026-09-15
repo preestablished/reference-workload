@@ -132,6 +132,12 @@ Delivered (private root, `$PR`; retrieval and integrity rules in
   yet — your plan `interim-goal-score-shaping-validation` WP2 `trajeval`).
   Build SHA, loaded hashes and `feature_bytes_len` cross-check are yours to
   record when `trajeval --engine grpc` lands; expected values are above.
+- 2026-09-14 outcome: live `state-scorerd` build `0.1.0+b6662ad` (engine
+  grpc, `bytes_source: raw`) evaluated all three trajectories through
+  `trajeval`: main/death/timer **PASS ×3**, zero item errors; loaded
+  map/program/layout hashes and `feature_bytes_len` (27) equal the values
+  above. Evidence: state-scorer
+  `docs/evidence/exit-gate/2026-09-14-interim-goal.md`.
 - Goal is the interim world-1-clear latch (decision
   `.agents/decisions/2026-09-13-interim-goal-and-score-shaping.md`);
   fires-on-credits UNDECLARABLE. Stage names: capacity_upgrade,

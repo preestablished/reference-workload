@@ -34,9 +34,16 @@ RAMDIFF="$REPO_ROOT/target/release/ramdiff"
 VERIFY="$REPO_ROOT/target/release/refwork-verify"
 
 # Private root from the pointer file outside every checkout; never printed.
-# RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only).
+# RAMDIFF_PRIVATE_ROOT overrides it (scratch/test runs only; must be an
+# existing absolute directory, and the override is announced so a stale
+# export cannot silently redirect a run).
 POINTER="$HOME/.agents/projects/reference-workload/private-root.path"
 if [ -n "${RAMDIFF_PRIVATE_ROOT:-}" ]; then
+  if [[ "$RAMDIFF_PRIVATE_ROOT" != /* ]] || [ ! -d "$RAMDIFF_PRIVATE_ROOT" ]; then
+    echo "error: RAMDIFF_PRIVATE_ROOT must be an existing absolute directory" >&2
+    exit 1
+  fi
+  echo "note: RAMDIFF_PRIVATE_ROOT override in effect (scratch run; the pointer file is bypassed)" >&2
   PR="$RAMDIFF_PRIVATE_ROOT"
 elif [ -s "$POINTER" ]; then
   PR="$(head -n1 "$POINTER")"
@@ -101,12 +108,21 @@ if [ "$replay_status" -ne 0 ] || grep -q 'fault at frame' "$REPLAY_ERR"; then
   exit 1
 fi
 
-# Byte compare every recorded dump against its replayed twin. Where two
-# dumps share a frame the later file on disk is the one the recording kept
-# (labels can collide on a file); compare each listed entry regardless.
-# (frame 0 is filtered inside awk: a `grep -v` with no surviving lines would
-# exit 1 and, under pipefail, abort the script before any verdict is written.)
-awk '/^  frame: /{f=$2} /^  file: /{ if (f != 0) print f, $2 }' "$SESS/session.yaml" |
+# Byte compare every recorded dump against its replayed twin. Keyed by FILE
+# with the max-frame entry winning — the same rule `ramdiff record --resume`
+# applies (record.rs): labels are not unique and distinct labels can sanitize
+# to the same file name, and the .bin on disk holds only the latest dump
+# written to that path, so an earlier entry sharing the file cannot be
+# verified and must not be compared (it would read as DIVERGED on a perfect
+# replay). Distinct files at one frame are all compared against that frame's
+# single replayed f<frame>.bin. A quoted `file:` value (hand-registered
+# captures) is unquoted. (frame 0 is filtered inside awk: a `grep -v` with no
+# surviving lines would exit 1 and, under pipefail, abort the script before
+# any verdict is written.) Parsing is positional on the serialized
+# session.yaml key order (`frame:` before `file:`, two-space indent).
+awk '/^  frame: /{f=$2+0}
+     /^  file: /{ v=$2; gsub(/^["\047]|["\047]$/, "", v); if (f != 0 && (!(v in maxf) || f > maxf[v])) maxf[v]=f }
+     END { for (v in maxf) print maxf[v], v }' "$SESS/session.yaml" | sort -n |
 while read -r frame orig; do
   if cmp -s "$RV/f${frame}.bin" "$SESS/$orig"; then
     echo "frame $frame: IDENTICAL"

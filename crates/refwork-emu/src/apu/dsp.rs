@@ -79,6 +79,7 @@
 ///
 /// The checksum (sum of all 512 entries, wrapping i32) is pinned by a unit
 /// test below to catch any transcription errors.
+#[rustfmt::skip] // 16 entries per row, auditable against the published table
 pub const GAUSS: [i16; 512] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
@@ -774,7 +775,12 @@ impl Dsp {
     /// the running total to 16 bits after the first three taps — the
     /// documented interpolation-overflow quirk — then adds the fourth tap
     /// before the final clamp and even-only mask.
-    fn gaussian_interp(buf: &[i16; BRR_BUF_LEN], buf_pos: u8, block_offset: u8, pitch_counter: u16) -> i32 {
+    fn gaussian_interp(
+        buf: &[i16; BRR_BUF_LEN],
+        buf_pos: u8,
+        block_offset: u8,
+        pitch_counter: u16,
+    ) -> i32 {
         let frac = ((pitch_counter >> 4) & 0xFF) as usize;
 
         let len = BRR_BUF_LEN;

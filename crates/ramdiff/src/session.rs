@@ -82,6 +82,10 @@ impl std::fmt::Display for SearchWidth {
 }
 
 /// Metadata for a single WRAM dump.
+///
+/// Field order is load-bearing: `tools/replay-fidelity` parses the serialized
+/// `session.yaml` positionally (`frame:` before `file:`, two-space indent), so
+/// reordering these fields silently breaks gate G2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DumpMeta {
     /// Human label used to reference this dump in search commands.
