@@ -35,9 +35,23 @@ fn required_image_inputs_exist() {
         "image/harness.toml",
         "image/expected-regions.toml",
         "image/README.md",
+        "image/fixtures/generic/workload-image.yaml",
+        "image/fixtures/generic/bzImage",
+        "image/fixtures/generic/initramfs.cpio.zst",
+        "image/fixtures/generic/boot.toml",
+        "image/fixtures/generic/expected-regions.toml",
+        "image/fixtures/generic/README.md",
+        "image/fixtures/generic/determinism.unstamped.yaml",
     ] {
         assert!(repo_root().join(path).is_file(), "missing {path}");
     }
+}
+
+#[test]
+fn generic_fixture_declares_no_game_device() {
+    let manifest = read_workspace_file("image/fixtures/generic/workload-image.yaml");
+    assert!(manifest.contains("variant: generic"));
+    assert!(!manifest.contains("game-image"));
 }
 
 #[test]
