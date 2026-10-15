@@ -296,13 +296,7 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
             }
             ManifestVariant::Generic => {
                 if let Some(name) = string_field(meta, "name", "meta.name", &mut errors) {
-                    if name.is_empty()
-                        || !name
-                            .bytes()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                        || !name.as_bytes()[0].is_ascii_lowercase()
-                            && !name.as_bytes()[0].is_ascii_digit()
-                    {
+                    if !is_generic_name(name) {
                         errors.push("meta.name must match ^[a-z0-9][a-z0-9-]*$".into());
                     }
                 }
@@ -370,7 +364,7 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManifestVariant {
+enum ManifestVariant {
     Game,
     Generic,
 }
@@ -387,15 +381,6 @@ fn resolve_variant(root: Option<&Mapping>, errors: &mut Vec<String>) -> Option<M
             None
         }
     }
-}
-
-pub fn manifest_variant(manifest: &Path) -> Result<ManifestVariant, ImageError> {
-    let content = read_to_string(manifest)?;
-    let yaml: Value = serde_yaml::from_str(&content).map_err(ImageError::Yaml)?;
-    let mut errors = Vec::new();
-    let root = mapping(&yaml, "root", &mut errors);
-    let variant = resolve_variant(root, &mut errors);
-    variant.ok_or(ImageError::Validation(errors))
 }
 
 pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageError> {
@@ -1637,9 +1622,7 @@ fn validate_defaults(root: Option<&Mapping>, variant: ManifestVariant, errors: &
         for key in ["feature_map", "scoring_program"] {
             let path = format!("defaults.{key}");
             if let Some(value) = string_field(defaults, key, &path, errors) {
-                let mut parts = value.split('@');
-                if !matches!((parts.next(), parts.next(), parts.next()), (Some(name), Some(version), None) if !name.is_empty() && !version.is_empty())
-                {
+                if !is_registry_ref(value) {
                     errors.push(format!("{path} must be non-empty name@version"));
                 }
             }
@@ -1759,7 +1742,8 @@ fn validate_generic_handoff_files(
     };
     let mut boot_layouts = std::collections::HashMap::new();
     if let Some(boot) = boot.as_deref() {
-        if field_u64(boot, "boot_toml_version") != Some(1) {
+        validate_toml_basic_syntax(boot, "boot.toml", errors);
+        if generic_root_u64(boot, "boot_toml_version") != Some(1) {
             errors.push("boot.toml boot_toml_version must be 1".into());
         }
         if toml_table_block(boot, "autostart").is_none() {
@@ -1771,7 +1755,7 @@ fn validate_generic_handoff_files(
         }
         if !units
             .iter()
-            .any(|unit| field_string(unit, "exec").is_some_and(|s| !s.is_empty()))
+            .any(|unit| generic_field_string(unit, "exec").is_some_and(|s| !s.is_empty()))
         {
             errors.push("boot.toml unit.exec must be non-empty".into());
         }
@@ -1780,30 +1764,36 @@ fn validate_generic_handoff_files(
             errors.push("boot.toml must declare at least one [[expected_region]]".into());
         }
         for block in expected_regions {
-            if let Some(name) = field_string(block, "name") {
+            if let Some(name) = generic_field_string(block, "name") {
                 if !regions.contains_key(&name) {
                     errors.push(format!(
                         "boot.toml expected_region {name} is not declared in regions"
                     ));
                 }
-                boot_layouts.insert(name, field_u64(block, "layout_version"));
+                if let Some(layout) = generic_field_u64(block, "layout_version") {
+                    boot_layouts.insert(name, layout);
+                } else {
+                    errors
+                        .push("boot.toml expected_region layout_version must be an integer".into());
+                }
             } else {
                 errors.push("boot.toml expected_region.name must be non-empty".into());
             }
         }
     }
     if let Some(expected) = expected.as_deref() {
-        if field_u64(expected, "schema_version") != Some(1) {
+        validate_toml_basic_syntax(expected, "expected-regions.toml", errors);
+        if generic_root_u64(expected, "schema_version") != Some(1) {
             errors.push("expected-regions.toml schema_version must be 1".into());
         }
         for block in toml_array_blocks(expected, "regions") {
-            let Some(name) = field_string(block, "name") else {
+            let Some(name) = generic_field_string(block, "name") else {
                 errors.push("expected-regions.toml regions.name must be non-empty".into());
                 continue;
             };
             match regions.get(&name) {
                 Some(size) => {
-                    if let Some(actual) = field_u64(block, "size") {
+                    if let Some(actual) = generic_field_u64(block, "size") {
                         if actual != *size {
                             errors.push(format!("expected-regions.toml {name} size {actual} != manifest size {size}"));
                         }
@@ -1817,8 +1807,8 @@ fn validate_generic_handoff_files(
                     "expected-regions.toml {name} is not declared in regions"
                 )),
             }
-            if let Some(Some(boot_layout)) = boot_layouts.get(&name) {
-                let actual = field_u64(block, "layout_version");
+            if let Some(boot_layout) = boot_layouts.get(&name) {
+                let actual = generic_field_u64(block, "layout_version");
                 if actual != Some(*boot_layout) {
                     errors.push(format!(
                         "expected-regions.toml {name} layout_version {} != boot.toml {boot_layout}",
@@ -2374,6 +2364,20 @@ fn is_git_rev_hex(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+fn is_generic_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_registry_ref(value: &str) -> bool {
+    let mut parts = value.split('@');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(name), Some(version), None) if !name.is_empty() && !version.is_empty())
+}
+
 fn strip_toml_comments(content: &str) -> String {
     content
         .lines()
@@ -2396,6 +2400,79 @@ fn strip_toml_comments(content: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn generic_field_value<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    block
+        .lines()
+        .filter_map(|line| {
+            let (actual_key, value) = line.split_once('=')?;
+            (actual_key.trim() == key).then_some(value.trim())
+        })
+        .next()
+}
+
+fn generic_field_string(block: &str, key: &str) -> Option<String> {
+    let value = generic_field_value(block, key)?;
+    Some(value.strip_prefix('"')?.strip_suffix('"')?.to_owned())
+}
+
+fn generic_field_u64(block: &str, key: &str) -> Option<u64> {
+    generic_field_value(block, key)?.parse().ok()
+}
+
+fn generic_root_u64(content: &str, key: &str) -> Option<u64> {
+    let root_end = content
+        .lines()
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .find_map(|(offset, line)| line.trim_start().starts_with('[').then_some(offset))
+        .unwrap_or(content.len());
+    generic_field_u64(&content[..root_end], key)
+}
+
+// This is a guard for the line-oriented generic handoff checks, not a TOML
+// parser. It catches malformed lines, unterminated simple strings, and keys
+// repeated in one table without changing the legacy game TOML checks.
+fn validate_toml_basic_syntax(content: &str, file: &str, errors: &mut Vec<String>) {
+    let mut keys = std::collections::HashSet::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            if !line.ends_with(']') || line.trim_matches(&['[', ']'][..]).is_empty() {
+                errors.push(format!(
+                    "{file} malformed table header at line {}",
+                    index + 1
+                ));
+            }
+            keys.clear();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            errors.push(format!("{file} malformed assignment at line {}", index + 1));
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            errors.push(format!("{file} malformed assignment at line {}", index + 1));
+            continue;
+        }
+        if !keys.insert(key.to_owned()) {
+            errors.push(format!("{file} duplicate key {key} at line {}", index + 1));
+        }
+        for quote in ['"', '\''] {
+            if value.starts_with(quote) != value.ends_with(quote) {
+                errors.push(format!("{file} malformed string at line {}", index + 1));
+            }
+        }
+    }
 }
 
 fn toml_table_block<'a>(content: &'a str, table: &str) -> Option<&'a str> {
@@ -2928,6 +3005,18 @@ mod tests {
         "meta.name"
     );
     generic_manifest_rejection!(
+        generic_name_leading_hyphen_rejected,
+        "name: generic-fixture",
+        "name: -fixture",
+        "meta.name"
+    );
+    generic_manifest_rejection!(
+        generic_name_empty_rejected,
+        "name: generic-fixture",
+        "name: \"\"",
+        "meta.name"
+    );
+    generic_manifest_rejection!(
         generic_version_rejects_at_sign,
         "version: \"0.1.0\"",
         "version: \"0.1.0@x\"",
@@ -3062,6 +3151,48 @@ mod tests {
         "expected-regions.toml state layout_version 2 != boot.toml 1"
     );
     generic_file_rejection!(
+        generic_boot_layout_version_required,
+        "boot.toml",
+        "layout_version = 1\n",
+        "",
+        "boot.toml expected_region layout_version must be an integer"
+    );
+    generic_file_rejection!(
+        generic_boot_layout_version_must_be_integer,
+        "boot.toml",
+        "layout_version = 1",
+        "layout_version = \"invalid\"",
+        "boot.toml expected_region layout_version must be an integer"
+    );
+    generic_file_rejection!(
+        generic_boot_root_version_must_be_root,
+        "boot.toml",
+        "boot_toml_version = 1\n[autostart]",
+        "[autostart]\nboot_toml_version = 1",
+        "boot.toml boot_toml_version must be 1"
+    );
+    generic_file_rejection!(
+        generic_expected_root_version_must_be_root,
+        "expected-regions.toml",
+        "schema_version = 1\n",
+        "",
+        "expected-regions.toml schema_version must be 1"
+    );
+    generic_file_rejection!(
+        generic_duplicate_toml_key_rejected,
+        "boot.toml",
+        "exec = \"/usr/bin/generic-workload\"",
+        "exec = \"/usr/bin/generic-workload\"\nexec = \"/usr/bin/generic-workload\"",
+        "boot.toml duplicate key exec"
+    );
+    generic_file_rejection!(
+        generic_unclosed_toml_string_rejected,
+        "boot.toml",
+        "layout_version = 1",
+        "layout_version = 1\nnote = \"unterminated",
+        "boot.toml malformed string"
+    );
+    generic_file_rejection!(
         generic_unstamped_sidecar_keys_checked,
         "determinism.unstamped.yaml",
         "workload_image: generic-fixture@0.1.0",
@@ -3082,6 +3213,17 @@ mod tests {
         let path = tmp.path.join("boot.toml");
         let original = std::fs::read_to_string(&path).unwrap();
         std::fs::write(path, format!("{original}[extra]\nlayout_version = 9\n")).unwrap();
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    #[test]
+    fn generic_compact_toml_assignments_accepted() {
+        let tmp = generic_fixture_copy();
+        for file in ["boot.toml", "expected-regions.toml"] {
+            let path = tmp.path.join(file);
+            let text = std::fs::read_to_string(&path).unwrap().replace(" = ", "=");
+            std::fs::write(path, text).unwrap();
+        }
         validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
     }
 
