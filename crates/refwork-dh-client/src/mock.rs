@@ -544,6 +544,7 @@ impl HypervisorWorker for MockWorker {
             class: None,
             version: "mock-0.1".to_owned(),
             build_profile: "mock".to_owned(),
+            image_identity: String::new(),
         }))
     }
 
