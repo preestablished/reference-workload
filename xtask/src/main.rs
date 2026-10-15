@@ -224,7 +224,19 @@ fn cmd_image_validate(args: &[String]) {
     }
 
     match xtask::image::validate_manifest(&PathBuf::from(&args[0])) {
-        Ok(()) => println!("image validate: OK - {}", args[0]),
+        Ok(()) => match xtask::image::manifest_variant(&PathBuf::from(&args[0])) {
+            Ok(variant) => {
+                let name = match variant {
+                    xtask::image::ManifestVariant::Game => "game",
+                    xtask::image::ManifestVariant::Generic => "generic",
+                };
+                println!("image validate: OK - {} (variant {name})", args[0]);
+            }
+            Err(err) => {
+                eprintln!("image validate: {err}");
+                std::process::exit(1);
+            }
+        },
         Err(err) => {
             eprintln!("image validate: {err}");
             std::process::exit(1);

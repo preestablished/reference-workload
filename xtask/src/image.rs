@@ -280,41 +280,86 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
         }
     };
     let root = mapping(&yaml, "root", &mut errors);
+    let Some(variant) = resolve_variant(root, &mut errors) else {
+        return Err(ImageError::Validation(errors));
+    };
 
     if let Some(root) = root {
         expect_u64(root, "schema_version", 1, "schema_version", &mut errors);
         expect_string(root, "kind", "workload-image", "kind", &mut errors);
     }
     if let Some(meta) = child_map(root, "meta", "meta", &mut errors) {
-        expect_string(meta, "name", WORKLOAD_NAME, "meta.name", &mut errors);
-        // The manifest is only valid for the xtask that generated it: the
-        // bundle identity (`refwork-demo@<version>`, the dist dir, the green
-        // stamp's `workload_image`) all derive from the workspace version.
-        expect_string(meta, "version", VERSION, "meta.version", &mut errors);
-        // The emulator epoch the bundle was built at: a worker whose corpus
-        // pins another epoch must be able to refuse the bundle. Required
-        // unconditionally (the 0.1.0 manifests that lack it fail `meta.version`
-        // first anyway).
+        match variant {
+            ManifestVariant::Game => {
+                expect_string(meta, "name", WORKLOAD_NAME, "meta.name", &mut errors);
+                expect_string(meta, "version", VERSION, "meta.version", &mut errors);
+            }
+            ManifestVariant::Generic => {
+                if let Some(name) = string_field(meta, "name", "meta.name", &mut errors) {
+                    if name.is_empty()
+                        || !name
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                        || !name.as_bytes()[0].is_ascii_lowercase()
+                            && !name.as_bytes()[0].is_ascii_digit()
+                    {
+                        errors.push("meta.name must match ^[a-z0-9][a-z0-9-]*$".into());
+                    }
+                }
+                if let Some(version) = string_field(meta, "version", "meta.version", &mut errors) {
+                    if version.is_empty()
+                        || version.contains('@')
+                        || version.chars().any(char::is_whitespace)
+                    {
+                        errors
+                            .push("meta.version must be non-empty without @ or whitespace".into());
+                    }
+                }
+            }
+        }
         if let Some(built_from) =
             child_map(Some(meta), "built_from", "meta.built_from", &mut errors)
         {
-            expect_nonempty_string(
-                built_from,
-                "emu_version",
-                "meta.built_from.emu_version",
-                &mut errors,
-            );
+            match variant {
+                ManifestVariant::Game => expect_nonempty_string(
+                    built_from,
+                    "emu_version",
+                    "meta.built_from.emu_version",
+                    &mut errors,
+                ),
+                ManifestVariant::Generic => {
+                    expect_nonempty_string(built_from, "repo", "meta.built_from.repo", &mut errors);
+                    for key in ["git_rev", "guest_sdk_rev"] {
+                        let path = format!("meta.built_from.{key}");
+                        if let Some(rev) = string_field(built_from, key, &path, &mut errors) {
+                            if !is_git_rev_hex(rev) {
+                                errors.push(format!("{path} must be 40 lowercase hex chars"));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     validate_artifacts(base, root, &mut errors);
     validate_boot(root, &mut errors);
-    validate_machine(root, &mut errors);
-    validate_regions(root, &mut errors);
-    validate_fps(root, &mut errors);
+    validate_machine(root, variant, &mut errors);
+    validate_regions(root, variant, &mut errors);
+    validate_fps(root, variant, &mut errors);
     validate_pad_layout(root, &mut errors);
-    validate_defaults(root, &mut errors);
-    validate_handoff_files(base, root, manifest_blake3.as_deref(), &mut errors);
+    validate_defaults(root, variant, &mut errors);
+    match variant {
+        ManifestVariant::Game => {
+            validate_handoff_files(base, root, manifest_blake3.as_deref(), &mut errors)
+        }
+        ManifestVariant::Generic => {
+            if let Some(determinism) = child_map(root, "determinism", "determinism", &mut errors) {
+                expect_nonempty_string(determinism, "suite", "determinism.suite", &mut errors);
+            }
+            validate_generic_handoff_files(base, root, manifest_blake3.as_deref(), &mut errors);
+        }
+    }
     validate_no_game_content(base, &mut errors);
 
     if errors.is_empty() {
@@ -322,6 +367,35 @@ pub fn validate_manifest(manifest: &Path) -> Result<(), ImageError> {
     } else {
         Err(ImageError::Validation(errors))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestVariant {
+    Game,
+    Generic,
+}
+
+fn resolve_variant(root: Option<&Mapping>, errors: &mut Vec<String>) -> Option<ManifestVariant> {
+    let Some(value) = root.and_then(|root| root.get(Value::String("variant".into()))) else {
+        return Some(ManifestVariant::Game);
+    };
+    match value.as_str() {
+        Some("game") => Some(ManifestVariant::Game),
+        Some("generic") => Some(ManifestVariant::Generic),
+        _ => {
+            errors.push(format!("variant must be game or generic, got {value:?}"));
+            None
+        }
+    }
+}
+
+pub fn manifest_variant(manifest: &Path) -> Result<ManifestVariant, ImageError> {
+    let content = read_to_string(manifest)?;
+    let yaml: Value = serde_yaml::from_str(&content).map_err(ImageError::Yaml)?;
+    let mut errors = Vec::new();
+    let root = mapping(&yaml, "root", &mut errors);
+    let variant = resolve_variant(root, &mut errors);
+    variant.ok_or(ImageError::Validation(errors))
 }
 
 pub fn double_build(workspace_root: &Path) -> Result<DoubleBuildReport, ImageError> {
@@ -1224,25 +1298,32 @@ fn validate_boot(root: Option<&Mapping>, errors: &mut Vec<String>) {
     validate_cmdline(cmdline, errors);
 }
 
-fn validate_machine(root: Option<&Mapping>, errors: &mut Vec<String>) {
+fn validate_machine(root: Option<&Mapping>, variant: ManifestVariant, errors: &mut Vec<String>) {
     let Some(machine) = child_map(root, "machine", "machine", errors) else {
         return;
     };
     expect_u64(machine, "vcpus", 1, "machine.vcpus", errors);
-    expect_u64(machine, "mem_mib", 128, "machine.mem_mib", errors);
+    match variant {
+        ManifestVariant::Game => expect_u64(machine, "mem_mib", 128, "machine.mem_mib", errors),
+        ManifestVariant::Generic => {
+            positive_u64_field(machine, "mem_mib", "machine.mem_mib", errors);
+        }
+    }
     let Some(devices) = seq_field(machine, "devices", "machine.devices", errors) else {
         return;
     };
-    expect_device(
-        devices,
-        DeviceSpec {
-            kind: "virtio-blk",
-            role: Some("game-image"),
-            readonly: Some(true),
-            required: true,
-        },
-        errors,
-    );
+    if variant == ManifestVariant::Game {
+        expect_device(
+            devices,
+            DeviceSpec {
+                kind: "virtio-blk",
+                role: Some("game-image"),
+                readonly: Some(true),
+                required: true,
+            },
+            errors,
+        );
+    }
     expect_device(
         devices,
         DeviceSpec {
@@ -1263,6 +1344,25 @@ fn validate_machine(root: Option<&Mapping>, errors: &mut Vec<String>) {
         },
         errors,
     );
+    if variant == ManifestVariant::Generic {
+        let mut seen = std::collections::HashSet::new();
+        for device in devices {
+            let Some(map) = mapping(device, "machine.devices[]", errors) else {
+                continue;
+            };
+            let Some(kind) = string_field(map, "kind", "machine.devices[].kind", errors) else {
+                continue;
+            };
+            if kind != "detguest-channel" && kind != "pv-pad" {
+                errors.push(format!(
+                    "machine.devices unsupported kind {kind} for variant generic"
+                ));
+            }
+            if !seen.insert(kind) {
+                errors.push(format!("machine.devices duplicate kind {kind}"));
+            }
+        }
+    }
 }
 
 struct DeviceSpec {
@@ -1349,7 +1449,7 @@ fn validate_cmdline(cmdline: &str, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_regions(root: Option<&Mapping>, errors: &mut Vec<String>) {
+fn validate_regions(root: Option<&Mapping>, variant: ManifestVariant, errors: &mut Vec<String>) {
     let Some(root) = root else {
         return;
     };
@@ -1357,6 +1457,53 @@ fn validate_regions(root: Option<&Mapping>, errors: &mut Vec<String>) {
         return;
     };
 
+    if variant == ManifestVariant::Generic {
+        if regions.is_empty() {
+            errors.push("regions must be a non-empty list".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for value in regions {
+            let Some(region) = mapping(value, "regions[]", errors) else {
+                continue;
+            };
+            let Some(name) = string_field(region, "name", "regions[].name", errors) else {
+                continue;
+            };
+            if name.is_empty() {
+                errors.push("regions[].name must not be empty".into());
+            }
+            if !seen.insert(name) {
+                errors.push(format!("regions duplicate name {name}"));
+            }
+            let optional = if has_key(region, "optional") {
+                bool_field(
+                    region,
+                    "optional",
+                    &format!("regions.{name}.optional"),
+                    errors,
+                )
+            } else {
+                None
+            };
+            let size_path = format!("regions.{name}.size");
+            if let Some(size) = u64_field(region, "size", &size_path, errors) {
+                if size % 4096 != 0 || (size == 0 && optional != Some(true)) {
+                    errors.push(format!(
+                        "{size_path} must be a multiple of 4096 (zero requires optional: true)"
+                    ));
+                }
+            }
+            if name == "framebuffer" {
+                expect_nonempty_string(region, "format", "regions.framebuffer.format", errors);
+            }
+            if has_key(region, "layout_version") {
+                errors.push(format!(
+                    "regions.{name} must not carry guest-sdk layout_version in workload-image.yaml"
+                ));
+            }
+        }
+        return;
+    }
     for spec in REQUIRED_REGIONS {
         let found = regions.iter().find_map(|region| {
             let map = mapping(region, "regions[]", errors)?;
@@ -1399,12 +1546,22 @@ fn validate_regions(root: Option<&Mapping>, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_fps(root: Option<&Mapping>, errors: &mut Vec<String>) {
+fn validate_fps(root: Option<&Mapping>, variant: ManifestVariant, errors: &mut Vec<String>) {
     let Some(fps) = child_map(root, "fps", "fps", errors) else {
         return;
     };
-    expect_u64(fps, "num", FPS_NUM, "fps.num", errors);
-    expect_u64(fps, "den", FPS_DEN, "fps.den", errors);
+    match variant {
+        ManifestVariant::Game => {
+            expect_u64(fps, "num", FPS_NUM, "fps.num", errors);
+            expect_u64(fps, "den", FPS_DEN, "fps.den", errors);
+        }
+        ManifestVariant::Generic => {
+            for key in ["num", "den"] {
+                let path = format!("fps.{key}");
+                positive_u64_field(fps, key, &path, errors);
+            }
+        }
+    }
 }
 
 fn validate_pad_layout(root: Option<&Mapping>, errors: &mut Vec<String>) {
@@ -1469,10 +1626,26 @@ fn validate_pad_layout(root: Option<&Mapping>, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_defaults(root: Option<&Mapping>, errors: &mut Vec<String>) {
+fn validate_defaults(root: Option<&Mapping>, variant: ManifestVariant, errors: &mut Vec<String>) {
+    if variant == ManifestVariant::Generic && !root.is_some_and(|r| has_key(r, "defaults")) {
+        return;
+    }
     let Some(defaults) = child_map(root, "defaults", "defaults", errors) else {
         return;
     };
+    if variant == ManifestVariant::Generic {
+        for key in ["feature_map", "scoring_program"] {
+            let path = format!("defaults.{key}");
+            if let Some(value) = string_field(defaults, key, &path, errors) {
+                let mut parts = value.split('@');
+                if !matches!((parts.next(), parts.next(), parts.next()), (Some(name), Some(version), None) if !name.is_empty() && !version.is_empty())
+                {
+                    errors.push(format!("{path} must be non-empty name@version"));
+                }
+            }
+        }
+        return;
+    }
     expect_string(
         defaults,
         "feature_map",
@@ -1510,7 +1683,13 @@ fn validate_handoff_files(
     match (unstamped.is_file(), green_stamp.is_file()) {
         (true, false) => {}
         (false, true) => {
-            validate_green_stamp_sidecar(&green_stamp, root, manifest_blake3, errors);
+            validate_green_stamp_sidecar(
+                &green_stamp,
+                root,
+                manifest_blake3,
+                ManifestVariant::Game,
+                errors,
+            );
         }
         (true, true) => errors.push(format!(
             "{UNSTAMPED_FILE} must not coexist with {GREEN_STAMP_FILE}"
@@ -1534,10 +1713,197 @@ fn validate_handoff_files(
     }
 }
 
+fn validate_generic_handoff_files(
+    base: &Path,
+    root: Option<&Mapping>,
+    manifest_blake3: Option<&str>,
+    errors: &mut Vec<String>,
+) {
+    for rel in ["boot.toml", "expected-regions.toml", "README.md"] {
+        if !base.join(rel).is_file() {
+            errors.push(format!("missing dist handoff file {rel}"));
+        }
+    }
+    let unstamped = base.join(UNSTAMPED_FILE);
+    let green_stamp = base.join(GREEN_STAMP_FILE);
+    match (unstamped.is_file(), green_stamp.is_file()) {
+        (true, false) => validate_generic_unstamped(&unstamped, root, errors),
+        (false, true) => validate_green_stamp_sidecar(
+            &green_stamp,
+            root,
+            manifest_blake3,
+            ManifestVariant::Generic,
+            errors,
+        ),
+        (true, true) => errors.push(format!(
+            "{UNSTAMPED_FILE} must not coexist with {GREEN_STAMP_FILE}"
+        )),
+        (false, false) => errors.push(format!(
+            "missing determinism sidecar {UNSTAMPED_FILE} or {GREEN_STAMP_FILE}"
+        )),
+    }
+    let regions = manifest_region_sizes(root);
+    let boot = match read_to_string(&base.join("boot.toml")) {
+        Ok(content) => Some(strip_toml_comments(&content)),
+        Err(err) => {
+            errors.push(format!("cannot read boot.toml: {err}"));
+            None
+        }
+    };
+    let expected = match read_to_string(&base.join("expected-regions.toml")) {
+        Ok(content) => Some(strip_toml_comments(&content)),
+        Err(err) => {
+            errors.push(format!("cannot read expected-regions.toml: {err}"));
+            None
+        }
+    };
+    let mut boot_layouts = std::collections::HashMap::new();
+    if let Some(boot) = boot.as_deref() {
+        if field_u64(boot, "boot_toml_version") != Some(1) {
+            errors.push("boot.toml boot_toml_version must be 1".into());
+        }
+        if toml_table_block(boot, "autostart").is_none() {
+            errors.push("boot.toml missing [autostart]".into());
+        }
+        let units = toml_array_blocks(boot, "unit");
+        if units.is_empty() {
+            errors.push("boot.toml missing [[unit]]".into());
+        }
+        if !units
+            .iter()
+            .any(|unit| field_string(unit, "exec").is_some_and(|s| !s.is_empty()))
+        {
+            errors.push("boot.toml unit.exec must be non-empty".into());
+        }
+        let expected_regions = toml_array_blocks(boot, "expected_region");
+        if expected_regions.is_empty() {
+            errors.push("boot.toml must declare at least one [[expected_region]]".into());
+        }
+        for block in expected_regions {
+            if let Some(name) = field_string(block, "name") {
+                if !regions.contains_key(&name) {
+                    errors.push(format!(
+                        "boot.toml expected_region {name} is not declared in regions"
+                    ));
+                }
+                boot_layouts.insert(name, field_u64(block, "layout_version"));
+            } else {
+                errors.push("boot.toml expected_region.name must be non-empty".into());
+            }
+        }
+    }
+    if let Some(expected) = expected.as_deref() {
+        if field_u64(expected, "schema_version") != Some(1) {
+            errors.push("expected-regions.toml schema_version must be 1".into());
+        }
+        for block in toml_array_blocks(expected, "regions") {
+            let Some(name) = field_string(block, "name") else {
+                errors.push("expected-regions.toml regions.name must be non-empty".into());
+                continue;
+            };
+            match regions.get(&name) {
+                Some(size) => {
+                    if let Some(actual) = field_u64(block, "size") {
+                        if actual != *size {
+                            errors.push(format!("expected-regions.toml {name} size {actual} != manifest size {size}"));
+                        }
+                    } else {
+                        errors.push(format!(
+                            "expected-regions.toml {name} size missing or invalid"
+                        ));
+                    }
+                }
+                None => errors.push(format!(
+                    "expected-regions.toml {name} is not declared in regions"
+                )),
+            }
+            if let Some(Some(boot_layout)) = boot_layouts.get(&name) {
+                let actual = field_u64(block, "layout_version");
+                if actual != Some(*boot_layout) {
+                    errors.push(format!(
+                        "expected-regions.toml {name} layout_version {} != boot.toml {boot_layout}",
+                        actual.map_or("missing".into(), |v| v.to_string())
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn validate_generic_unstamped(path: &Path, root: Option<&Mapping>, errors: &mut Vec<String>) {
+    let content = match read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            errors.push(format!("cannot read {UNSTAMPED_FILE}: {err}"));
+            return;
+        }
+    };
+    let yaml: Value = match serde_yaml::from_str(&content) {
+        Ok(yaml) => yaml,
+        Err(err) => {
+            errors.push(format!("{UNSTAMPED_FILE} yaml parse failed: {err}"));
+            return;
+        }
+    };
+    let Some(sidecar) = mapping(&yaml, UNSTAMPED_FILE, errors) else {
+        return;
+    };
+    expect_string(
+        sidecar,
+        "kind",
+        "determinism-unstamped",
+        "determinism.unstamped.kind",
+        errors,
+    );
+    if let Some(image_ref) = manifest_image_ref(root) {
+        expect_string(
+            sidecar,
+            "workload_image",
+            &image_ref,
+            "determinism.unstamped.workload_image",
+            errors,
+        );
+    }
+    if let Some(rev) = manifest_built_from(root)
+        .and_then(|built_from| built_from.get(Value::String("git_rev".into())))
+        .and_then(Value::as_str)
+    {
+        expect_string(
+            sidecar,
+            "git_rev",
+            rev,
+            "determinism.unstamped.git_rev",
+            errors,
+        );
+    }
+}
+
+fn manifest_image_ref(root: Option<&Mapping>) -> Option<String> {
+    let meta = root?.get(Value::String("meta".into()))?.as_mapping()?;
+    let name = meta.get(Value::String("name".into()))?.as_str()?;
+    let version = meta.get(Value::String("version".into()))?.as_str()?;
+    Some(format!("{name}@{version}"))
+}
+
+fn manifest_region_sizes(root: Option<&Mapping>) -> std::collections::HashMap<String, u64> {
+    root.and_then(|root| root.get(Value::String("regions".into())))
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let region = value.as_mapping()?;
+            let name = region.get(Value::String("name".into()))?.as_str()?;
+            let size = region.get(Value::String("size".into()))?.as_u64()?;
+            Some((name.to_owned(), size))
+        })
+        .collect()
+}
+
 fn validate_green_stamp_sidecar(
     path: &Path,
     root: Option<&Mapping>,
     manifest_blake3: Option<&str>,
+    variant: ManifestVariant,
     errors: &mut Vec<String>,
 ) {
     let content = match read_to_string(path) {
@@ -1572,13 +1938,19 @@ fn validate_green_stamp_sidecar(
         "determinism.last_green.kind",
         errors,
     );
-    expect_string(
-        stamp,
-        "workload_image",
-        &format!("{WORKLOAD_NAME}@{VERSION}"),
-        "determinism.last_green.workload_image",
-        errors,
-    );
+    let image_ref = match variant {
+        ManifestVariant::Game => Some(format!("{WORKLOAD_NAME}@{VERSION}")),
+        ManifestVariant::Generic => manifest_image_ref(root),
+    };
+    if let Some(image_ref) = image_ref {
+        expect_string(
+            stamp,
+            "workload_image",
+            &image_ref,
+            "determinism.last_green.workload_image",
+            errors,
+        );
+    }
 
     if let Some(manifest_blake3) = manifest_blake3 {
         expect_string(
@@ -1589,19 +1961,34 @@ fn validate_green_stamp_sidecar(
             errors,
         );
     }
-    if let Some(git_rev) = manifest_git_rev(root, errors) {
+    let git_rev = match variant {
+        ManifestVariant::Game => manifest_git_rev(root, errors),
+        ManifestVariant::Generic => manifest_built_from(root)
+            .and_then(|built_from| built_from.get(Value::String("git_rev".into())))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    };
+    if let Some(git_rev) = git_rev {
+        let rev_key = if variant == ManifestVariant::Game {
+            "reference_workload_git_rev"
+        } else {
+            "git_rev"
+        };
         expect_string(
             stamp,
-            "reference_workload_git_rev",
+            rev_key,
             &git_rev,
-            "determinism.last_green.reference_workload_git_rev",
+            &format!("determinism.last_green.{rev_key}"),
             errors,
         );
     }
     // The stamp must name the emulator epoch the manifest was built at (a
     // stamp without the key is refused: `workload_image` above already pins
     // the stamp to this bundle version, so no pre-0.2.0 stamp reaches here).
-    if let Some(emu_version) = manifest_emu_version(root) {
+    if let Some(emu_version) = (variant == ManifestVariant::Game)
+        .then(|| manifest_emu_version(root))
+        .flatten()
+    {
         expect_string(
             stamp,
             "emu_version",
@@ -1870,6 +2257,24 @@ fn u64_field(parent: &Mapping, key: &str, path: &str, errors: &mut Vec<String>) 
     }
 }
 
+fn positive_u64_field(
+    parent: &Mapping,
+    key: &str,
+    path: &str,
+    errors: &mut Vec<String>,
+) -> Option<u64> {
+    match parent
+        .get(Value::String(key.into()))
+        .and_then(Value::as_u64)
+    {
+        Some(value @ 1..) => Some(value),
+        _ => {
+            errors.push(format!("{path} must be an integer >= 1"));
+            None
+        }
+    }
+}
+
 fn bool_field(parent: &Mapping, key: &str, path: &str, errors: &mut Vec<String>) -> Option<bool> {
     let Some(value) = parent.get(Value::String(key.into())) else {
         errors.push(format!("missing {path}"));
@@ -1960,6 +2365,82 @@ fn is_blake3_hex(value: &str) -> bool {
             .as_bytes()
             .iter()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_git_rev_hex(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn strip_toml_comments(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            let mut in_string = false;
+            let mut escaped = false;
+            for (offset, ch) in line.char_indices() {
+                if ch == '"' && !escaped {
+                    in_string = !in_string;
+                }
+                if ch == '#' && !in_string {
+                    return &line[..offset];
+                }
+                escaped = ch == '\\' && !escaped;
+                if ch != '\\' {
+                    escaped = false;
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn toml_table_block<'a>(content: &'a str, table: &str) -> Option<&'a str> {
+    let header = format!("[{table}]");
+    let mut start = None;
+    for (offset, line) in content.split_inclusive('\n').scan(0, |position, line| {
+        let offset = *position;
+        *position += line.len();
+        Some((offset, line))
+    }) {
+        if line.trim() == header {
+            start = Some(offset + line.len());
+            continue;
+        }
+        if let Some(previous) = start {
+            if line.trim_start().starts_with('[') {
+                return Some(&content[previous..offset]);
+            }
+        }
+    }
+    start.map(|previous| &content[previous..])
+}
+
+fn toml_array_blocks<'a>(content: &'a str, array: &str) -> Vec<&'a str> {
+    let header = format!("[[{array}]]");
+    let mut blocks = Vec::new();
+    let mut start = None;
+    for (offset, line) in content.split_inclusive('\n').scan(0, |position, line| {
+        let offset = *position;
+        *position += line.len();
+        Some((offset, line))
+    }) {
+        if line.trim_start().starts_with('[') {
+            if let Some(previous) = start.take() {
+                blocks.push(&content[previous..offset]);
+            }
+            if line.trim() == header {
+                start = Some(offset + line.len());
+            }
+        }
+    }
+    if let Some(previous) = start {
+        blocks.push(&content[previous..]);
+    }
+    blocks
 }
 
 fn region_block<'a>(content: &'a str, name: &str) -> Option<&'a str> {
@@ -2300,6 +2781,382 @@ mod tests {
             let errors = validation_errors(&tmp);
             assert_eq!(errors, expected, "{name}");
         }
+        let tmp = valid_dist();
+        std::fs::remove_file(tmp.path.join(UNSTAMPED_FILE)).unwrap();
+        assert_eq!(
+            validation_errors(&tmp),
+            ["missing determinism sidecar determinism.unstamped.yaml or determinism.last_green"]
+        );
+
+        let tmp = valid_dist();
+        write_manifest_text(
+            &tmp,
+            &manifest_text(&tmp)
+                .replace("name: refwork-demo", "name: other")
+                .replace(GAME_DEVICE, ""),
+        );
+        assert_eq!(
+            validation_errors(&tmp),
+            [
+                "meta.name expected \"refwork-demo\", got \"other\"",
+                "machine.devices missing virtio-blk",
+            ]
+        );
+
+        let tmp = valid_dist();
+        write_manifest_text(
+            &tmp,
+            &manifest_text(&tmp)
+                .replace("  vcpus: 1", "  vcpus: 2")
+                .replace("  layout_id: console16-12btn-v1\n", ""),
+        );
+        assert_eq!(
+            validation_errors(&tmp),
+            [
+                "machine.vcpus expected 1, got 2",
+                "missing pad_layout.layout_id",
+            ]
+        );
+    }
+
+    fn generic_fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../image/fixtures/generic")
+    }
+
+    fn generic_fixture_copy() -> TempDir {
+        let tmp = TempDir::new();
+        for entry in std::fs::read_dir(generic_fixture_dir()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), tmp.path.join(entry.file_name())).unwrap();
+            }
+        }
+        tmp
+    }
+
+    fn generic_error_after_manifest_replace(before: &str, after: &str) -> Vec<String> {
+        let tmp = generic_fixture_copy();
+        let original = manifest_text(&tmp);
+        assert!(original.contains(before), "fixture missing {before:?}");
+        write_manifest_text(&tmp, &original.replacen(before, after, 1));
+        validation_errors(&tmp)
+    }
+
+    macro_rules! generic_manifest_rejection {
+        ($name:ident, $before:expr, $after:expr, $error:expr) => {
+            #[test]
+            fn $name() {
+                let errors = generic_error_after_manifest_replace($before, $after);
+                assert!(errors.iter().any(|e| e.contains($error)), "{errors:?}");
+            }
+        };
+    }
+
+    #[test]
+    fn generic_fixture_validates_in_place() {
+        validate_manifest(&generic_fixture_dir().join("workload-image.yaml")).unwrap();
+    }
+    #[test]
+    fn generic_fixture_copy_validates() {
+        let tmp = generic_fixture_copy();
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+    #[test]
+    fn game_manifest_without_game_image_rejected() {
+        let tmp = valid_dist();
+        let text = manifest_text(&tmp).replace(
+            "    - { kind: virtio-blk, role: game-image, readonly: true, required: true }\n",
+            "",
+        );
+        write_manifest_text(&tmp, &text);
+        assert!(validation_errors(&tmp)
+            .iter()
+            .any(|e| e.contains("machine.devices missing virtio-blk")));
+    }
+    #[test]
+    fn explicit_variant_game_without_game_image_rejected() {
+        let tmp = valid_dist();
+        let text = manifest_text(&tmp)
+            .replace(
+                "kind: workload-image\n",
+                "kind: workload-image\nvariant: game\n",
+            )
+            .replace(
+                "    - { kind: virtio-blk, role: game-image, readonly: true, required: true }\n",
+                "",
+            );
+        write_manifest_text(&tmp, &text);
+        assert!(validation_errors(&tmp)
+            .iter()
+            .any(|e| e.contains("machine.devices missing virtio-blk")));
+    }
+
+    generic_manifest_rejection!(
+        generic_with_virtio_blk_rejected,
+        "    - { kind: pv-pad, required: true }",
+        "    - { kind: pv-pad, required: true }\n    - { kind: virtio-blk, required: true }",
+        "machine.devices unsupported kind virtio-blk"
+    );
+    generic_manifest_rejection!(
+        generic_with_pv_net_rejected,
+        "    - { kind: pv-pad, required: true }",
+        "    - { kind: pv-pad, required: true }\n    - { kind: pv-net, required: true }",
+        "machine.devices unsupported kind pv-net"
+    );
+    generic_manifest_rejection!(
+        generic_duplicate_pv_pad_rejected,
+        "    - { kind: pv-pad, required: true }",
+        "    - { kind: pv-pad, required: true }\n    - { kind: pv-pad, required: true }",
+        "machine.devices duplicate kind pv-pad"
+    );
+    generic_manifest_rejection!(
+        generic_missing_pv_pad_rejected,
+        "    - { kind: pv-pad, required: true }\n",
+        "",
+        "machine.devices missing pv-pad"
+    );
+    generic_manifest_rejection!(
+        generic_missing_detguest_channel_rejected,
+        "    - { kind: detguest-channel, required: true }\n",
+        "",
+        "machine.devices missing detguest-channel"
+    );
+    generic_manifest_rejection!(
+        generic_name_charset_enforced,
+        "name: generic-fixture",
+        "name: Generic_Fixture",
+        "meta.name"
+    );
+    generic_manifest_rejection!(
+        generic_version_rejects_at_sign,
+        "version: \"0.1.0\"",
+        "version: \"0.1.0@x\"",
+        "meta.version"
+    );
+    generic_manifest_rejection!(
+        generic_git_rev_must_be_40_hex,
+        "git_rev: \"0000000000000000000000000000000000000000\"",
+        "git_rev: \"000000000000000000000000000000000000000\"",
+        "meta.built_from.git_rev"
+    );
+    generic_manifest_rejection!(
+        generic_requires_pad_layout_identity,
+        "name: Up, bit: 6",
+        "name: UP, bit: 6",
+        "pad_layout.buttons[6].name"
+    );
+    generic_manifest_rejection!(
+        generic_fps_must_be_integer_rational,
+        "fps: { num: 60, den: 1 }",
+        "fps: { num: 60.0, den: 1 }",
+        "fps.num"
+    );
+    generic_manifest_rejection!(
+        generic_fps_zero_den_rejected,
+        "fps: { num: 60, den: 1 }",
+        "fps: { num: 60, den: 0 }",
+        "fps.den must be an integer >= 1"
+    );
+    generic_manifest_rejection!(
+        generic_framebuffer_requires_format,
+        "  - { name: state, size: 4096 }",
+        "  - { name: state, size: 4096 }\n  - { name: framebuffer, size: 4096 }",
+        "regions.framebuffer.format"
+    );
+    generic_manifest_rejection!(
+        generic_duplicate_region_rejected,
+        "  - { name: state, size: 4096 }",
+        "  - { name: state, size: 4096 }\n  - { name: state, size: 4096 }",
+        "regions duplicate name state"
+    );
+    generic_manifest_rejection!(
+        generic_region_size_must_be_page_multiple,
+        "name: state, size: 4096",
+        "name: state, size: 256",
+        "regions.state.size must be a multiple of 4096"
+    );
+    generic_manifest_rejection!(
+        generic_mem_mib_zero_rejected,
+        "mem_mib: 64",
+        "mem_mib: 0",
+        "machine.mem_mib must be an integer >= 1"
+    );
+
+    #[test]
+    fn unknown_variant_rejected() {
+        assert_eq!(
+            generic_error_after_manifest_replace("variant: generic", "variant: sandbox"),
+            ["variant must be game or generic, got String(\"sandbox\")"]
+        );
+    }
+    #[test]
+    fn variant_null_rejected() {
+        let errors = generic_error_after_manifest_replace("variant: generic", "variant:");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("variant must be game or generic"));
+    }
+    #[test]
+    fn generic_framebuffer_with_format_accepted() {
+        let tmp = generic_fixture_copy();
+        write_manifest_text(&tmp, &manifest_text(&tmp).replace("  - { name: state, size: 4096 }", "  - { name: state, size: 4096 }\n  - { name: framebuffer, size: 4096, format: xrgb8888-16x16-stride64 }"));
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+    #[test]
+    fn generic_optional_zero_size_accepted() {
+        let tmp = generic_fixture_copy();
+        write_manifest_text(
+            &tmp,
+            &manifest_text(&tmp).replace(
+                "  - { name: state, size: 4096 }",
+                "  - { name: state, size: 4096 }\n  - { name: scratch, size: 0, optional: true }",
+            ),
+        );
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    fn generic_file_errors(file: &str, before: &str, after: &str) -> Vec<String> {
+        let tmp = generic_fixture_copy();
+        let path = tmp.path.join(file);
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert!(original.contains(before));
+        std::fs::write(path, original.replace(before, after)).unwrap();
+        validation_errors(&tmp)
+    }
+
+    macro_rules! generic_file_rejection {
+        ($name:ident, $file:expr, $before:expr, $after:expr, $error:expr) => {
+            #[test]
+            fn $name() {
+                let errors = generic_file_errors($file, $before, $after);
+                assert!(errors.iter().any(|e| e.contains($error)), "{errors:?}");
+            }
+        };
+    }
+
+    generic_file_rejection!(
+        generic_requires_an_expected_region,
+        "boot.toml",
+        "[[expected_region]]\nname = \"state\"\nlayout_version = 1\n",
+        "",
+        "boot.toml must declare at least one [[expected_region]]"
+    );
+    generic_file_rejection!(
+        generic_expected_region_must_be_declared,
+        "boot.toml",
+        "name = \"state\"",
+        "name = \"other\"",
+        "boot.toml expected_region other is not declared in regions"
+    );
+    generic_file_rejection!(
+        generic_expected_regions_size_must_match,
+        "expected-regions.toml",
+        "size = 4096",
+        "size = 8192",
+        "expected-regions.toml state size 8192 != manifest size 4096"
+    );
+    generic_file_rejection!(
+        generic_layout_version_must_agree,
+        "expected-regions.toml",
+        "layout_version = 1",
+        "layout_version = 2",
+        "expected-regions.toml state layout_version 2 != boot.toml 1"
+    );
+    generic_file_rejection!(
+        generic_unstamped_sidecar_keys_checked,
+        "determinism.unstamped.yaml",
+        "workload_image: generic-fixture@0.1.0",
+        "workload_image: other@0.1.0",
+        "determinism.unstamped.workload_image"
+    );
+    generic_file_rejection!(
+        generic_boot_toml_comment_does_not_count_as_table,
+        "boot.toml",
+        "[autostart]",
+        "# [autostart]",
+        "boot.toml missing [autostart]"
+    );
+
+    #[test]
+    fn generic_boot_toml_trailing_table_not_attributed_to_region() {
+        let tmp = generic_fixture_copy();
+        let path = tmp.path.join("boot.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, format!("{original}[extra]\nlayout_version = 9\n")).unwrap();
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+
+    #[test]
+    fn generic_does_not_require_emu_version() {
+        let tmp = generic_fixture_copy();
+        let path = tmp.path.join("workload-image.yaml");
+        validate_manifest(&path).unwrap();
+        write_manifest_text(
+            &tmp,
+            &manifest_text(&tmp).replace(
+                "    repo: guest-sdk",
+                "    repo: guest-sdk\n    emu_version: \"x\"",
+            ),
+        );
+        validate_manifest(&path).unwrap();
+    }
+
+    fn write_generic_green_stamp(tmp: &TempDir) {
+        std::fs::remove_file(tmp.path.join(UNSTAMPED_FILE)).unwrap();
+        let hash = blake3_file(&tmp.path.join("workload-image.yaml")).unwrap();
+        let content = format!("schema_version: 1\nkind: determinism-last-green\nworkload_image: generic-fixture@0.1.0\nimage_manifest_hash: \"{hash}\"\ngit_rev: \"0000000000000000000000000000000000000000\"\nsuite_version: \"fixture-suite-v1\"\ntimestamp: \"2026-10-15T00:00:00Z\"\nsuite_report_blake3: \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n");
+        std::fs::write(tmp.path.join(GREEN_STAMP_FILE), content).unwrap();
+    }
+
+    #[test]
+    fn generic_green_stamp_accepted() {
+        let tmp = generic_fixture_copy();
+        write_generic_green_stamp(&tmp);
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
+    }
+    #[test]
+    fn generic_green_stamp_wrong_workload_image_rejected() {
+        let tmp = generic_fixture_copy();
+        write_generic_green_stamp(&tmp);
+        let path = tmp.path.join(GREEN_STAMP_FILE);
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            content.replace(
+                "workload_image: generic-fixture@0.1.0",
+                "workload_image: refwork-demo@0.2.0",
+            ),
+        )
+        .unwrap();
+        assert!(validation_errors(&tmp)
+            .iter()
+            .any(|e| e.contains("determinism.last_green.workload_image")));
+    }
+    #[test]
+    fn generic_green_stamp_requires_git_rev() {
+        let tmp = generic_fixture_copy();
+        write_generic_green_stamp(&tmp);
+        let path = tmp.path.join(GREEN_STAMP_FILE);
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            content.replace(
+                "git_rev: \"0000000000000000000000000000000000000000\"\n",
+                "",
+            ),
+        )
+        .unwrap();
+        assert!(validation_errors(&tmp)
+            .iter()
+            .any(|e| e.contains("determinism.last_green.git_rev")));
+    }
+    #[test]
+    fn generic_unknown_top_level_key_ignored() {
+        let tmp = generic_fixture_copy();
+        write_manifest_text(
+            &tmp,
+            &format!("{}x_builder_note: hello\n", manifest_text(&tmp)),
+        );
+        validate_manifest(&tmp.path.join("workload-image.yaml")).unwrap();
     }
 
     fn write_double_build_artifacts(dir: &Path, initramfs: &[u8]) {

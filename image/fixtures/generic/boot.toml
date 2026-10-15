@@ -1,0 +1,9 @@
+boot_toml_version = 1
+[autostart]
+unit = 0
+[[unit]]
+id = 0
+exec = "/usr/bin/generic-workload"
+[[expected_region]]
+name = "state"
+layout_version = 1

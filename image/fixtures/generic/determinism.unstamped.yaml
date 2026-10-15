@@ -1,0 +1,5 @@
+schema_version: 1
+kind: determinism-unstamped
+workload_image: generic-fixture@0.1.0
+git_rev: "0000000000000000000000000000000000000000"
+reason: "validator fixture; never stamped"
