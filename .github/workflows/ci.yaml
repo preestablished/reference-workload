@@ -26,6 +26,12 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/determinism-hypervisor
           path: determinism-hypervisor
+      # dh-snapshot in determinism-hypervisor resolves snapstore workspace
+      # dependencies even when this repository builds only dh-proto.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/snapshot-store
+          path: snapshot-store
       # detguest-sdk (in-guest region publication) is a path dep on the
       # sibling guest-sdk checkout — the GS-5/GS-6 join point.
       - uses: actions/checkout@v4
