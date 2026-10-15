@@ -2234,6 +2234,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn game_error_vectors_are_unchanged() {
+        const GAME_DEVICE: &str =
+            "    - { kind: virtio-blk, role: game-image, readonly: true, required: true }\n";
+        let cases: [(&str, &str, &str, &[&str]); 8] = [
+            (
+                "vcpus",
+                "  vcpus: 1",
+                "  vcpus: 2",
+                &["machine.vcpus expected 1, got 2"],
+            ),
+            (
+                "artifact",
+                "file: bzImage",
+                "file: kernel.payload",
+                &["artifacts.kernel.file must be bzImage, got kernel.payload"],
+            ),
+            (
+                "cmdline",
+                "cmdline: \"quiet\"",
+                "cmdline: \"quiet root=/dev/vda\"",
+                &["boot.cmdline token \"root=/dev/vda\" is not whitelisted"],
+            ),
+            (
+                "device",
+                GAME_DEVICE,
+                "    - { kind: virtio-blk, role: host-root, readonly: false, required: false }\n",
+                &[
+                    "machine.devices.virtio-blk.role expected \"game-image\", got \"host-root\"",
+                    "machine.devices.virtio-blk.readonly expected true, got false",
+                    "machine.devices.virtio-blk.required expected true, got false",
+                ],
+            ),
+            (
+                "fps",
+                "  num: 21477272",
+                "  num: 60.0",
+                &["fps.num must be an unsigned integer"],
+            ),
+            (
+                "pad",
+                "{ name: Start, bit: 10 }",
+                "{ name: Start, bit: 9 }",
+                &["pad_layout.buttons[10].bit expected 10, got 9"],
+            ),
+            (
+                "layout",
+                "- { name: wram, size: 131072 }",
+                "- { name: wram, size: 131072, layout_version: 1 }",
+                &["regions.wram must not carry guest-sdk layout_version in workload-image.yaml"],
+            ),
+            (
+                "missing-game-image",
+                GAME_DEVICE,
+                "",
+                &["machine.devices missing virtio-blk"],
+            ),
+        ];
+        for (name, before, after, expected) in cases {
+            let tmp = valid_dist();
+            let text = manifest_text(&tmp);
+            assert!(text.contains(before), "{name} fixture drift");
+            write_manifest_text(&tmp, &text.replace(before, after));
+            let errors = validation_errors(&tmp);
+            assert_eq!(errors, expected, "{name}");
+        }
+    }
+
     fn write_double_build_artifacts(dir: &Path, initramfs: &[u8]) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("bzImage"), b"kernel").unwrap();
